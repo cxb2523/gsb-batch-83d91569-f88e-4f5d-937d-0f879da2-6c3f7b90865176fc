@@ -1,1 +1,1 @@
-<span class="error">N/A</span>
+<span class="error">{{0}}</span>

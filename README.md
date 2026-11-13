@@ -9,7 +9,7 @@ A custom Home Assistant Lovelace card for displaying solar panels in an interact
 - **Snap-to-Grid**: Panels snap to a configurable grid for neat alignment
 - **Live Data**: Real-time display of current production values from sensor entities
 - **Power / Energy Toggle**: Switch between instantaneous power (W) and daily energy (kWh) views with a slide toggle — configure a secondary energy entity per panel
-- **Historical Playback**: Select any date and time (minute resolution) to view a 24-hour snapshot of all panel values, with a quick "Now" action to return to current time
+- **Historical Playback**: Select any date and time (minute resolution) to view a 24-hour snapshot of all panel values, with a quick "Now" action to return to current time. Each panel's power entity and optional energy entity reports its own outcome — record loaded, no record for that day, request failed, or unrecognized data — and a failed request keeps the last successful snapshot together with its timestamp.
 - **Per-Panel Rotation**: Rotate individual panels to match your physical roof layout
 - **Canvas Rotation**: Rotate the entire grid to orient the installation according to compass direction
 - **Background Image**: Overlay panels on a roof photo or plan for accurate positioning
@@ -169,6 +169,13 @@ Each panel displays:
 - **Entity ID Suffix**: Last 4 characters of entity ID (or custom `name`) at bottom-right corner for quick identification
 - **W / kWh Toggle**: When energy entities are configured, a slide toggle in the top-right corner switches the entire card between power and energy views
 - **Date + Time Snapshot Controls**: A date picker and 24-hour slider at the top fetch history and render all panels at that selected timestamp
+- **Per-Panel History Outcomes**: Every panel's power entity and optional energy entity reports its own status badge:
+  - `✓` — a history record was found for the selected day/time
+  - `No record` — the entity returned an empty list (the panel genuinely produced nothing)
+  - `Failed` — the history request for that entity rejected
+  - `Bad data` — the entity returned data the card could not interpret
+
+  A failure for one entity never clears values already loaded for the others. If every entity fails, the card keeps the last successful snapshot and shows the failure reason plus the snapshot's timestamp above the grid. Selecting a new date/time discards stale in-flight responses, so a slow request cannot overwrite a newer selection.
 
 ### Color Gradient
 

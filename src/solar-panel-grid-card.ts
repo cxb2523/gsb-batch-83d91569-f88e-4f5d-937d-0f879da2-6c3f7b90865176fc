@@ -12,6 +12,9 @@ import cardCanvasTpl from './templates/solar-panel-grid-card-canvas.tpl';
 import cardBackgroundImageTpl from './templates/solar-panel-grid-card-background-image.tpl';
 import cardPanelTpl from './templates/solar-panel-grid-card-panel.tpl';
 import cardPanelValueTpl from './templates/solar-panel-grid-card-panel-value.tpl';
+import cardPanelStatusTpl from './templates/solar-panel-grid-card-panel-status.tpl';
+import cardPanelMissingTpl from './templates/solar-panel-grid-card-panel-missing.tpl';
+import cardPanelOutcomesTpl from './templates/solar-panel-grid-card-panel-outcomes.tpl';
 import cardPanelErrorTpl from './templates/solar-panel-grid-card-panel-error.tpl';
 
 interface SolarPanelConfig {
@@ -61,6 +64,38 @@ interface Hass {
   callService: (domain: string, service: string, data?: any) => Promise<void>;
   callApi?: <T = any>(method: string, path: string, parameters?: Record<string, any>) => Promise<T>;
 }
+
+/**
+ * Per-entity outcome of a historical fetch.  Each configured entity
+ * (a panel's power entity and its optional energy entity) gets exactly one
+ * of these, independently from all other entities.
+ */
+type HistoryOutcome = 'record' | 'empty' | 'error' | 'invalid';
+
+interface HistoryEntityResult {
+  entityId: string;
+  outcome: HistoryOutcome;
+  entity?: HassEntity;
+  message?: string;
+}
+
+interface HistorySnapshot {
+  /** Local date + minute label of the last successful fetch. */
+  label: string;
+}
+
+/** A value kept for display, together with the snapshot it came from. */
+interface HistoryValueEntry {
+  entity: HassEntity;
+  label: string;
+}
+
+const HISTORY_OUTCOME_LABELS: Record<HistoryOutcome, string> = {
+  record: 'Loaded',
+  empty: 'No record',
+  error: 'Failed',
+  invalid: 'Bad data',
+};
 
 // Helper function to convert HSL to RGB
 function hslToRgb(h: number, s: number, l: number): string {
@@ -141,9 +176,13 @@ export class SolarPanelGridCard extends LitElement {
   private _viewPanX = 0;
   private _viewPanY = 0;
   private _resizeObserver: ResizeObserver | undefined = undefined;
-  private _historyStates: Map<string, HassEntity> = new Map();
+  private _historySnapshot: HistorySnapshot | undefined = undefined;
   private _historyDebounceTimer: number | undefined;
   private _historyRequestToken = 0;
+  /** Per-entity outcomes for the most recent completed request. */
+  private _historyResults: Map<string, HistoryEntityResult> = new Map();
+  /** Values to display for the current selection (record or carried over). */
+  private _historyValues: Map<string, HistoryValueEntry> = new Map();
   private _activePointers: Map<number, { x: number; y: number }> = new Map();
   private _isViewportPanning = false;
   private _panStartPoint = { x: 0, y: 0 };
@@ -386,96 +425,284 @@ export class SolarPanelGridCard extends LitElement {
       return;
     }
 
+    // Invalidate any in-flight request immediately: a response that arrives
+    // after the selection changed must never be rendered.
+    const requestToken = ++this._historyRequestToken;
+
     if (this._historyDebounceTimer !== undefined) {
       window.clearTimeout(this._historyDebounceTimer);
     }
 
     this._historyDebounceTimer = window.setTimeout(() => {
       this._historyDebounceTimer = undefined;
-      void this._fetchHistoricalSnapshot();
+      void this._fetchHistoricalSnapshot(requestToken);
     }, delayMs);
   }
 
-  private async _fetchHistoricalSnapshot(): Promise<void> {
-    if (!this.hass?.callApi || !this._selectedDate) {
-      this._historyStates = new Map();
-      this._historyError = '';
+  private async _fetchHistoricalSnapshot(requestToken?: number): Promise<void> {
+    const token = requestToken ?? ++this._historyRequestToken;
+    if (token !== this._historyRequestToken) {
+      // A newer selection superseded this request before it even started.
+      return;
+    }
+
+    if (!this._selectedDate) {
+      this._resetHistoryState();
       this.requestUpdate();
       return;
     }
 
     const entityIds = this._getHistoryEntityIds();
     if (entityIds.length === 0) {
-      this._historyStates = new Map();
-      this._historyError = '';
+      this._resetHistoryState();
       this.requestUpdate();
       return;
     }
 
-    const requestToken = ++this._historyRequestToken;
+    if (!this.hass?.callApi) {
+      // The history API is not available yet. Keep any previously rendered
+      // snapshot and explain why the selection could not be refreshed.
+      this._historyLoading = false;
+      this._historyError = `Unable to load history for ${this._describeSelection()}: `
+        + 'the history API is unavailable.'
+        + (this._historySnapshot
+          ? ` Showing last successful snapshot from ${this._historySnapshot.label}.`
+          : ' No previous successful snapshot to show.');
+      this.requestUpdate();
+      return;
+    }
+
     this._historyLoading = true;
     this._historyError = '';
+    this.requestUpdate();
 
-    try {
-      const endTime = this._getSelectedDateTime();
-      const startTime = new Date(endTime);
-      startTime.setHours(0, 0, 0, 0);
+    const endTime = this._getSelectedDateTime();
+    const startTime = new Date(endTime);
+    startTime.setHours(0, 0, 0, 0);
+    const selectionLabel = `${endTime.toLocaleDateString()} ${this._minutesToLabel(this._selectedMinute)}`;
 
-      const path = `history/period/${encodeURIComponent(startTime.toISOString())}`
-        + `?filter_entity_id=${encodeURIComponent(entityIds.join(','))}`
-        + `&end_time=${encodeURIComponent(endTime.toISOString())}`;
+    // One request per configured entity (power and optional energy), so each
+    // entity gets its own outcome instead of sharing the fate of a single
+    // batched response.
+    const entityResults = await Promise.all(
+      entityIds.map((entityId) => this._fetchEntityHistory(entityId, startTime, endTime))
+    );
 
-      const historyResult = await this.hass.callApi<any[]>('GET', path);
-      if (requestToken !== this._historyRequestToken) {
-        return;
-      }
-
-      const states = new Map<string, HassEntity>();
-      if (Array.isArray(historyResult)) {
-        historyResult.forEach((entityHistory: any) => {
-          if (!Array.isArray(entityHistory) || entityHistory.length === 0) {
-            return;
-          }
-          const latest = entityHistory[entityHistory.length - 1];
-          const entityId: string | undefined = latest?.entity_id;
-          if (!entityId) {
-            return;
-          }
-
-          const liveEntity = this.hass.states[entityId];
-          states.set(entityId, {
-            entity_id: entityId,
-            state: String(latest?.state ?? liveEntity?.state ?? '0'),
-            attributes: {
-              ...(liveEntity?.attributes || {}),
-              ...(latest?.attributes || {}),
-            },
-          });
-        });
-      }
-
-      this._historyStates = states;
-      this.requestUpdate();
-    } catch (err) {
-      if (requestToken !== this._historyRequestToken) {
-        return;
-      }
-      this._historyStates = new Map();
-      this._historyError = 'Unable to load historical data for the selected time.';
-      console.error('[SolarPanelGridCard] History fetch failed:', err);
-      this.requestUpdate();
-    } finally {
-      if (requestToken === this._historyRequestToken) {
-        this._historyLoading = false;
-      }
+    if (token !== this._historyRequestToken) {
+      // Stale response: the user picked another date/time meanwhile.
+      return;
     }
+
+    this._historyLoading = false;
+
+    const results = new Map<string, HistoryEntityResult>();
+    entityResults.forEach((result) => results.set(result.entityId, result));
+    this._historyResults = results;
+
+    // Entities that resolved (record or empty) are authoritative for the new
+    // selection. Entities whose request failed or returned junk keep the value
+    // from the last successful snapshot, if any.
+    const values = new Map<string, HistoryValueEntry>();
+    entityResults.forEach((result) => {
+      if (result.outcome === 'record' && result.entity) {
+        values.set(result.entityId, { entity: result.entity, label: selectionLabel });
+      } else if (result.outcome === 'error' || result.outcome === 'invalid') {
+        const previous = this._historyValues.get(result.entityId);
+        if (previous) {
+          values.set(result.entityId, previous);
+        }
+      }
+    });
+
+    const resolvedCount = entityResults.filter(
+      (result) => result.outcome === 'record' || result.outcome === 'empty'
+    ).length;
+
+    this._historyValues = values;
+
+    if (resolvedCount === 0) {
+      // Nothing at all could be resolved: keep the last successful snapshot
+      // (values and label) and surface the reason plus the snapshot time.
+      this._historyError = this._buildHistoryFailureMessage(
+        selectionLabel,
+        entityResults,
+        this._historySnapshot?.label
+      );
+      console.error('[SolarPanelGridCard] History fetch failed:', entityResults);
+      this.requestUpdate();
+      return;
+    }
+
+    this._historySnapshot = { label: selectionLabel };
+    this._historyError = '';
+    this.requestUpdate();
   }
 
-  private _getDisplayEntity(entityId?: string): HassEntity | undefined {
-    if (!entityId) {
-      return undefined;
+  private _resetHistoryState(): void {
+    this._historySnapshot = undefined;
+    this._historyResults = new Map();
+    this._historyValues = new Map();
+    this._historyError = '';
+    this._historyLoading = false;
+  }
+
+  private async _fetchEntityHistory(
+    entityId: string,
+    startTime: Date,
+    endTime: Date
+  ): Promise<HistoryEntityResult> {
+    const callApi = this.hass?.callApi;
+    if (!callApi) {
+      return { entityId, outcome: 'error', message: 'History API is unavailable.' };
     }
-    return this._historyStates.get(entityId) || this.hass?.states?.[entityId];
+
+    const path = `history/period/${encodeURIComponent(startTime.toISOString())}`
+      + `?filter_entity_id=${encodeURIComponent(entityId)}`
+      + `&end_time=${encodeURIComponent(endTime.toISOString())}`;
+
+    let response: unknown;
+    try {
+      response = await callApi('GET', path);
+    } catch (err) {
+      const message = err instanceof Error
+        ? err.message
+        : (typeof err === 'string' && err ? err : 'request failed');
+      return { entityId, outcome: 'error', message };
+    }
+
+    return this._parseEntityHistory(entityId, response);
+  }
+
+  /**
+   * Classify what the history/period endpoint returned for a single entity.
+   * Anything that is not a list, a list without records, or a list whose
+   * latest entry cannot be understood is reported separately from a request
+   * error so the user can tell "no production that day" from "fetch failed".
+   */
+  private _parseEntityHistory(entityId: string, response: unknown): HistoryEntityResult {
+    if (!Array.isArray(response)) {
+      return {
+        entityId,
+        outcome: 'invalid',
+        message: 'History response was not a list.',
+      };
+    }
+
+    if (response.length === 0) {
+      return { entityId, outcome: 'empty' };
+    }
+
+    const entries = response as unknown[];
+    let records: unknown[] | undefined;
+
+    if (entries.every((entry) => Array.isArray(entry))) {
+      // Home Assistant returns one list of records per requested entity.
+      const lists = entries as unknown[][];
+      const nonEmptyLists = lists.filter((list) => list.length > 0);
+      if (nonEmptyLists.length === 0) {
+        return { entityId, outcome: 'empty' };
+      }
+
+      const matchingList = nonEmptyLists.find((list) => {
+        const last = list[list.length - 1];
+        return this._isHistoryRecord(last) && (last as any).entity_id === entityId;
+      });
+      records = matchingList || nonEmptyLists[0];
+    } else if (entries.every((entry) => this._isHistoryRecord(entry))) {
+      // Tolerate a flat list of records for the filtered entity.
+      records = entries;
+    } else {
+      return {
+        entityId,
+        outcome: 'invalid',
+        message: 'History response did not contain recognizable records.',
+      };
+    }
+
+    const latest = records[records.length - 1];
+    if (!this._isHistoryRecord(latest) || latest.state === null) {
+      return {
+        entityId,
+        outcome: 'invalid',
+        message: 'Latest history record could not be interpreted.',
+      };
+    }
+
+    const liveEntity = this.hass?.states?.[entityId];
+    return {
+      entityId,
+      outcome: 'record',
+      entity: {
+        entity_id: entityId,
+        state: String(latest.state),
+        attributes: {
+          ...(liveEntity?.attributes || {}),
+          ...(this._isPlainObject(latest.attributes) ? latest.attributes : {}),
+        },
+      },
+    };
+  }
+
+  private _isHistoryRecord(value: unknown): value is Record<string, any> {
+    return this._isPlainObject(value) && 'state' in (value as Record<string, any>);
+  }
+
+  private _isPlainObject(value: unknown): value is Record<string, any> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  private _buildHistoryFailureMessage(
+    selectionLabel: string,
+    results: HistoryEntityResult[],
+    snapshotLabel?: string
+  ): string {
+    const errorResults = results.filter((result) => result.outcome === 'error');
+    const invalidResults = results.filter((result) => result.outcome === 'invalid');
+    const reasons: string[] = [];
+
+    if (errorResults.length > 0) {
+      const detail = errorResults.find((result) => result.message)?.message;
+      const count = `${errorResults.length} request${errorResults.length === 1 ? '' : 's'} failed`;
+      reasons.push(detail ? `${count} (${detail})` : count);
+    }
+    if (invalidResults.length > 0) {
+      reasons.push(
+        `${invalidResults.length} returned unrecognized data`
+      );
+    }
+
+    const reasonText = reasons.join('; ') || 'history request failed';
+    const base = `Unable to load history for ${selectionLabel}: ${reasonText}.`;
+    return snapshotLabel
+      ? `${base} Showing last successful snapshot from ${snapshotLabel}.`
+      : `${base} No previous successful snapshot to show.`;
+  }
+
+  private _getDisplayEntityInfo(entityId?: string): {
+    entity?: HassEntity;
+    outcome?: HistoryOutcome;
+    valueLabel?: string;
+  } {
+    if (!entityId) {
+      return {};
+    }
+
+    const result = this._historyResults.get(entityId);
+    const entry = this._historyValues.get(entityId);
+
+    if (result) {
+      return {
+        entity: entry?.entity,
+        outcome: result.outcome,
+        valueLabel: entry?.label,
+      };
+    }
+
+    // No outcome recorded for this entity yet (e.g. before the first history
+    // fetch): use the snapshot when one exists, else the live state.
+    return {
+      entity: entry?.entity || this.hass?.states?.[entityId],
+    };
   }
 
   private _onDateChanged = (event: Event) => {
@@ -1121,20 +1348,108 @@ export class SolarPanelGridCard extends LitElement {
     );
   }
 
-  private _renderHistoryMeta(selectedDateTimeLabel: string) {
+  private _renderHistoryMeta() {
     const statusMarkup = this._historyLoading ? htmlFromTpl(cardHistoryStatusTpl) : '';
-    const errorMarkup = this._historyError ? htmlFromTpl(cardHistoryErrorTpl, this._historyError) : '';
+    const snapshot = this._historySnapshot;
+    const selectionLabel = this._describeSelection();
+    const snapshotLabel = snapshot?.label || '—';
+    const errorMarkup = this._historyError
+      ? htmlFromTpl(cardHistoryErrorTpl, this._historyError)
+      : '';
 
-    return htmlFromTpl(cardHistoryMetaTpl, selectedDateTimeLabel, statusMarkup, errorMarkup);
+    return htmlFromTpl(
+      cardHistoryMetaTpl,
+      selectionLabel,
+      snapshotLabel,
+      statusMarkup,
+      errorMarkup
+    );
+  }
+
+  private _describeSelection(): string {
+    return `${this._getSelectedDateTime().toLocaleDateString()} ${this._minutesToLabel(this._selectedMinute)}`;
+  }
+
+  /**
+   * Outcome badge for one entity. "record" renders a compact check, every
+   * other outcome gets a distinct visible label so "no production" and "could
+   * not fetch" are never confused. When a panel has an energy entity the
+   * badge is prefixed with P:/E: so the two outcomes stay attributable.
+   */
+  private _renderEntityOutcomeBadge(
+    entityId: string,
+    outcome: HistoryOutcome | undefined,
+    valueLabel?: string,
+    prefix = ''
+  ) {
+    if (!outcome) {
+      return '';
+    }
+
+    const baseLabel = HISTORY_OUTCOME_LABELS[outcome];
+    let label = baseLabel;
+    let tooltip = `${entityId}: ${baseLabel.toLowerCase()}.`;
+
+    if (outcome === 'record') {
+      label = '✓';
+      tooltip = `${entityId}: history record loaded for the selected day/time.`;
+    } else if (outcome === 'empty') {
+      tooltip = `${entityId}: no history record for the selected day/time.`;
+    } else if (valueLabel) {
+      label = `${baseLabel} · kept`;
+      tooltip = `${entityId}: ${baseLabel.toLowerCase()}; showing the last successful value from ${valueLabel}.`;
+    } else {
+      tooltip = `${entityId}: ${baseLabel.toLowerCase()}; no previous value to keep.`;
+    }
+
+    return htmlFromTpl(
+      cardPanelStatusTpl,
+      prefix ? `${prefix} ${label}` : label,
+      tooltip,
+      entityId,
+      outcome
+    );
+  }
+
+  private _renderPanelOutcomes(
+    entityId: string,
+    energyEntityId: string | undefined,
+    powerInfo: { outcome?: HistoryOutcome; valueLabel?: string },
+    energyInfo: { outcome?: HistoryOutcome; valueLabel?: string }
+  ) {
+    const prefixFor = (suffix: string) => (energyEntityId ? suffix : '');
+
+    const powerBadge = this._renderEntityOutcomeBadge(
+      entityId,
+      powerInfo.outcome,
+      powerInfo.valueLabel,
+      prefixFor('P:')
+    );
+    const energyBadge = energyEntityId
+      ? this._renderEntityOutcomeBadge(
+          energyEntityId,
+          energyInfo.outcome,
+          energyInfo.valueLabel,
+          'E:'
+        )
+      : '';
+
+    if (!powerBadge && !energyBadge) {
+      return '';
+    }
+
+    return htmlFromTpl(cardPanelOutcomesTpl, powerBadge, energyBadge);
   }
 
   private _renderPanel(entityId: string, panel: { config: SolarPanelConfig; entity?: HassEntity; entityEnergy?: HassEntity }, canvasRotation: number) {
     const rotation = panel.config.rotation || 0;
     const totalRotation = rotation + canvasRotation;
-    const activeEntityId = (this._showEnergy && panel.config.entity_energy)
-      ? panel.config.entity_energy
-      : entityId;
-    const activeEntity = this._getDisplayEntity(activeEntityId);
+    const powerInfo = this._getDisplayEntityInfo(entityId);
+    const energyEntityId = panel.config.entity_energy;
+    const energyInfo = this._getDisplayEntityInfo(energyEntityId);
+    const useEnergy = this._showEnergy && !!energyEntityId;
+    const activeInfo = useEnergy ? energyInfo : powerInfo;
+    const activeEntity = activeInfo.entity;
     const panelStyle = `left: ${panel.config.x}px; top: ${panel.config.y}px; width: ${this.panelWidth}px; height: ${this.panelHeight}px;${rotation ? ` transform: rotate(${rotation}deg);` : ''}`;
     const panelValueStyle = totalRotation ? `transform: rotate(${-totalRotation}deg)` : '';
     const entitySuffixStyle = totalRotation ? `transform: rotate(${-totalRotation}deg)` : '';
@@ -1145,13 +1460,33 @@ export class SolarPanelGridCard extends LitElement {
         activeEntity?.attributes.unit_of_measurement || 'W'
       )
     );
-    const panelValueMarkup = activeEntity
-      ? htmlFromTpl(
-          cardPanelValueTpl,
-          this.getProductionValue(activeEntity).toFixed(1),
-          activeEntity.attributes.unit_of_measurement || ''
-        )
-      : htmlFromTpl(cardPanelErrorTpl);
+
+    const activeEntityId = useEnergy ? energyEntityId! : entityId;
+    let panelValueMarkup;
+    if (activeEntity) {
+      panelValueMarkup = htmlFromTpl(
+        cardPanelValueTpl,
+        this.getProductionValue(activeEntity).toFixed(1),
+        activeEntity.attributes.unit_of_measurement || ''
+      );
+    } else if (activeInfo.outcome === 'empty') {
+      panelValueMarkup = htmlFromTpl(
+        cardPanelMissingTpl,
+        'No record',
+        `${activeEntityId}: no history record for the selected day/time.`
+      );
+    } else if (activeInfo.outcome === 'invalid') {
+      panelValueMarkup = htmlFromTpl(cardPanelErrorTpl, 'Bad data');
+    } else {
+      panelValueMarkup = htmlFromTpl(cardPanelErrorTpl, 'N/A');
+    }
+
+    const outcomesMarkup = this._renderPanelOutcomes(
+      entityId,
+      energyEntityId,
+      powerInfo,
+      energyInfo
+    );
 
     return htmlFromTpl(
       cardPanelTpl,
@@ -1163,7 +1498,12 @@ export class SolarPanelGridCard extends LitElement {
       panelValueStyle,
       panelValueMarkup,
       entitySuffixStyle,
-      this.getPanelDisplayName(entityId, panel.config)
+      this.getPanelDisplayName(entityId, panel.config),
+      entityId,
+      activeInfo.outcome || '',
+      powerInfo.outcome || '',
+      energyInfo.outcome || '',
+      outcomesMarkup
     );
   }
 
@@ -1223,13 +1563,11 @@ export class SolarPanelGridCard extends LitElement {
     const panX = liveInteractionEnabled ? this._viewPanX : 0;
     const panY = liveInteractionEnabled ? this._viewPanY : 0;
     const combinedScale = baseScale * viewZoom;
-    const selectedDateTime = this._getSelectedDateTime();
-    const selectedDateTimeLabel = `${selectedDateTime.toLocaleDateString()} ${this._minutesToLabel(this._selectedMinute)}`;
 
     return htmlFromTpl(
       cardRenderTpl,
       this._renderTopControls(hasEnergy),
-      this._renderHistoryMeta(selectedDateTimeLabel),
+      this._renderHistoryMeta(),
       this._renderCanvas(
         size,
         canvasRotation,

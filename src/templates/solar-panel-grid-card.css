@@ -123,6 +123,48 @@ ha-card {
   color: #d32f2f;
 }
 
+.panel-outcomes {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: calc(100% - 8px);
+  pointer-events: none;
+}
+
+.panel-outcome {
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 9px;
+  line-height: 1.2;
+  padding: 2px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.panel-outcome[data-outcome='record'] {
+  background: rgba(46, 125, 50, 0.75);
+}
+
+.panel-outcome[data-outcome='empty'] {
+  background: rgba(84, 110, 122, 0.85);
+}
+
+.panel-outcome[data-outcome='error'] {
+  background: rgba(198, 40, 40, 0.88);
+}
+
+.panel-outcome[data-outcome='invalid'] {
+  background: rgba(230, 126, 34, 0.9);
+}
+
 .canvas-wrapper {
   position: relative;
   margin: 0 auto;
@@ -297,4 +339,9 @@ ha-card {
 
 .error {
   color: #ff6b6b;
+}
+
+.missing {
+  color: #cfd8dc;
+  font-style: italic;
 }
