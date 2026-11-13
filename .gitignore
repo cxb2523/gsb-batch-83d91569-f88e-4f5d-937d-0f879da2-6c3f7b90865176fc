@@ -1,2 +1,6 @@
 data/html_files/
 dev/
+__pycache__/
+*.pyc
+espncricinfo-*/
+manifest.json
