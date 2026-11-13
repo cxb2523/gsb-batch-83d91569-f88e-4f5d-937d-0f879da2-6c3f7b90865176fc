@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wayback-archive"
+description = "Download archived websites from the Wayback Machine for offline viewing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [{ name = "GeiserX" }]
+keywords = ["wayback-machine", "internet-archive", "web-archive", "offline", "website-downloader", "archiving"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: System :: Archiving",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dynamic = ["version", "dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/GeiserX/Wayback-Archive"
+Documentation = "https://geiserx.github.io/Wayback-Archive/"
+Changelog = "https://github.com/GeiserX/Wayback-Archive/blob/main/CHANGELOG.md"
+Issues = "https://github.com/GeiserX/Wayback-Archive/issues"
+
+[project.scripts]
+wayback-archive = "wayback_archive.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "wayback_archive.__version__" }
+dependencies = { file = ["config/requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["wayback_archive*"]
+
+# Coverage flags are left to CI, which passes them explicitly.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["--strict-markers", "--tb=short"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501: ruff format wraps code; long strings and comments are left as they are.
+# E741: single-letter names in tests.
+ignore = ["E501", "E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wayback_archive"]
+
+# CI runs `mypy wayback_archive`. rjsmin and rcssmin ship no types; bs4,
+# requests and Pillow ship their own. Bodies of unannotated functions are not
+# checked yet (check_untyped_defs would report about 40 errors).
+[tool.mypy]
+python_version = "3.10"
+files = ["wayback_archive"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+strict_equality = true
+extra_checks = true
+no_implicit_reexport = true

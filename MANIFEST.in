@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include config/requirements.txt
+recursive-include wayback_archive *.py
+
+

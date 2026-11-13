@@ -1,0 +1,57 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    labels:
+      - ci
+      - automated
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+      github_actions_security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+  - package-ecosystem: pip
+    directory: /config
+    # Bump a ">=" floor only when the new release falls outside it; a floor
+    # is the oldest version the code supports, not the newest release.
+    versioning-strategy: increase-if-necessary
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+      - automated
+    groups:
+      minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+      pip-security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+    ignore:
+      - dependency-name: '*'
+        update-types:
+          - version-update:semver-major
+  - package-ecosystem: pip
+    directory: /docs
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build(docs)
+    labels:
+      - documentation
+      - automated

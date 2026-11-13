@@ -1,0 +1,210 @@
+"""Tests for downloader module."""
+
+import os
+from unittest.mock import Mock, patch
+
+from bs4 import BeautifulSoup
+
+from wayback_archive.config import Config
+from wayback_archive.downloader import WaybackDownloader
+
+
+class TestWaybackDownloader:
+    """Test downloader class."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        os.environ["WAYBACK_URL"] = "https://web.archive.org/web/20250417203037/http://example.com/"
+        self.config = Config()
+        self.downloader = WaybackDownloader(self.config)
+
+    def teardown_method(self):
+        """Clean up after tests."""
+        os.environ.pop("WAYBACK_URL", None)
+
+    def test_parse_wayback_url(self):
+        """Test Wayback URL parsing."""
+        assert self.downloader.config.base_url == "http://example.com/"
+        assert self.downloader.config.domain == "example.com"
+
+    def test_is_internal_url(self):
+        """Test internal URL detection."""
+        assert self.downloader._is_internal_url("http://example.com/page") is True
+        assert self.downloader._is_internal_url("http://www.example.com/page") is True
+        assert self.downloader._is_internal_url("http://other.com/page") is False
+        assert self.downloader._is_internal_url("/relative/page") is True
+
+    def test_is_tracker(self):
+        """Test tracker detection."""
+        assert self.downloader._is_tracker("https://www.google-analytics.com/ga.js") is True
+        assert self.downloader._is_tracker("https://example.com/script.js") is False
+
+    def test_is_ad(self):
+        """Test ad detection."""
+        assert self.downloader._is_ad("https://ads.example.com/banner.jpg") is True
+        assert self.downloader._is_ad("https://example.com/image.jpg") is False
+
+    def test_is_contact_link(self):
+        """Test contact link detection."""
+        assert self.downloader._is_contact_link("mailto:test@example.com") is True
+        assert self.downloader._is_contact_link("tel:+1234567890") is True
+        assert self.downloader._is_contact_link("http://example.com") is False
+
+    def test_convert_to_wayback_url(self):
+        """Test Wayback URL conversion."""
+        wayback_url = self.downloader._convert_to_wayback_url("http://example.com/page")
+        assert "web.archive.org" in wayback_url
+        assert "20250417203037" in wayback_url
+
+    def test_normalize_url(self):
+        """Test URL normalization."""
+        # Test relative to absolute
+        normalized = self.downloader._normalize_url("/page", "http://example.com/")
+        assert normalized == "http://example.com/page"
+
+        # Test www removal
+        normalized = self.downloader._normalize_url("http://www.example.com/page", "http://example.com/")
+        assert "www." not in normalized
+
+    def test_make_relative_path(self):
+        """Test relative path conversion."""
+        path = self.downloader._make_relative_path("http://example.com/page.html")
+        assert path == "/page.html"
+
+    def test_get_local_path(self):
+        """Test local path generation."""
+        path = self.downloader._get_local_path("http://example.com/page.html")
+        assert "page.html" in str(path)
+        assert path.name == "page.html"
+
+    @patch("wayback_archive.downloader.requests.Session.get")
+    def test_download_file(self, mock_get):
+        """Test file downloading."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b"test content"
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        content = self.downloader.download_file("http://example.com/page")
+        assert content == b"test content"
+
+    def test_optimize_html(self):
+        """Test HTML optimization."""
+        html = "<html><body>  <p>Test</p>  </body></html>"
+        optimized = self.downloader._optimize_html(html)
+        assert len(optimized) <= len(html)
+
+    def test_minify_js(self):
+        """Test JavaScript minification."""
+        js = """
+        function test() {
+            var x = 1;
+            return x;
+        }
+        """
+        minified = self.downloader._minify_js(js)
+        assert len(minified) <= len(js)
+
+    def test_minify_css(self):
+        """Test CSS minification."""
+        css = """
+        body {
+            margin: 0;
+            padding: 0;
+        }
+        """
+        minified = self.downloader._minify_css(css)
+        assert len(minified) <= len(css)
+
+    def test_process_html_rewrites_and_queues_frames(self):
+        """Test that frame-based pages are rewritten and queued for download."""
+        self.config.remove_external_iframes = True
+
+        html = """
+        <html>
+            <frameset cols="25%,75%">
+                <frame src="/web/20010405003907fw_/http://example.com/left.html">
+                <frame src="content">
+                <iframe src="/web/20010405003907if_/http://example.com/embed"></iframe>
+                <iframe src="http://other.com/external.html"></iframe>
+            </frameset>
+        </html>
+        """
+
+        processed_html, links_to_follow = self.downloader._process_html(
+            html,
+            "http://example.com/index.html",
+        )
+
+        soup = BeautifulSoup(processed_html, "lxml")
+        sources = [tag.get("src") for tag in soup.find_all(["frame", "iframe"], src=True)]
+
+        assert "left.html" in sources
+        assert "content.html" in sources
+        assert "embed.html" in sources
+        assert all("other.com" not in src for src in sources)
+
+        assert "http://example.com/left.html" in links_to_follow
+        assert "http://example.com/embed" in links_to_follow
+        assert any(link == "content" or link.endswith("/content") for link in links_to_follow)
+
+    def test_process_html_rewrites_legacy_background_attributes(self):
+        """Test that HTML background= attrs in frame content are rewritten and images queued.
+
+        Regression test for GitHub Issue #1: legacy frameset pages like lightpen.com
+        use <body background="..."> and <table background="..."> with Wayback URLs
+        that must be rewritten to relative paths and queued for download.
+        """
+        html = """
+        <html>
+            <body alink="midnightblue" background="/web/20010405005347im_/http://example.com/background.gif" bgcolor="gray">
+                <table background="/web/20010405005347im_/http://example.com/background.gif" bgcolor="gray">
+                    <tr>
+                        <td>
+                            <a href="/web/20010405003907/http://example.com/page.html">Link</a>
+                        </td>
+                    </tr>
+                </table>
+            </body>
+        </html>
+        """
+
+        processed_html, links_to_follow = self.downloader._process_html(
+            html,
+            "http://example.com/left.html",
+        )
+
+        soup = BeautifulSoup(processed_html, "lxml")
+
+        # background= attributes must be rewritten to relative paths
+        body = soup.find("body")
+        assert body["background"] == "background.gif"
+
+        table = soup.find("table")
+        assert table["background"] == "background.gif"
+
+        # The background image must be queued for download
+        assert "http://example.com/background.gif" in links_to_follow
+
+    def test_is_html_url_bare_host_and_root(self):
+        """Bare-host and root URLs are classified as HTML."""
+        for url in ["https://example.com", "https://example.com/"]:
+            assert WaybackDownloader._is_html_url(url), f"{url} should be HTML"
+
+    def test_is_html_url_html_extensions(self):
+        """HTML extensions are classified as HTML."""
+        assert WaybackDownloader._is_html_url("https://example.com/page.html")
+        assert WaybackDownloader._is_html_url("https://example.com/page.htm")
+
+    def test_is_html_url_extensionless_paths(self):
+        """Extensionless paths are classified as HTML."""
+        assert WaybackDownloader._is_html_url("https://example.com/about")
+        assert WaybackDownloader._is_html_url("https://example.com/foo/bar")
+
+    def test_is_html_url_asset_extensions(self):
+        """Known asset extensions are NOT classified as HTML."""
+        for ext in [".css", ".js", ".png", ".jpg", ".gif", ".svg", ".woff2", ".pdf", ".json", ".xml"]:
+            url = f"https://example.com/file{ext}"
+            assert not WaybackDownloader._is_html_url(url), f"{url} should NOT be HTML"
