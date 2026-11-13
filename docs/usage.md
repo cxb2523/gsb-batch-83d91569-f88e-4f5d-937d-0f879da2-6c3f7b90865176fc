@@ -93,7 +93,16 @@ The same applies when a run stops early for other reasons:
 
 Every file is written to a temporary name first and renamed into place once complete, so a run killed mid-write never leaves a truncated file behind; a temporary file left by a run killed outright is removed when the next run starts.
 
-The summary at the end lists the URLs that failed, up to 50, so what is missing from the copy is visible without scrolling back through the log.
+The summary at the end lists the URLs that failed, up to 50, so what is missing from the copy is visible without scrolling back through the log. Every run also writes `OUTPUT_DIR/wayback-archive-failures.json`, which holds every failure with its address, the file it would have been stored as, its category and the number of attempts, so the list can be read by a script and checked in full. It is empty when nothing failed, and is written when the run finishes or is interrupted; an interrupted run never leaves a half-written one.
+
+Each failure is filed under one of four categories:
+
+- **network**: no answer, a timeout, a throttle, or a 5xx from the Wayback Machine itself. Worth retrying later.
+- **missing**: a 404 at the requested timestamp and at every nearby one. The archive does not have this file.
+- **unusable**: an answer came back but not the file -- an archived error page, a Cloudflare challenge, an HTML page where an image or script was expected, or a page that could not be processed.
+- **unsafe_path**: the address would have been written outside `OUTPUT_DIR`.
+
+If an address failed once and a later attempt (or the live CDN) did save the file, it is not in the report: the report lists what is still missing. When a run stops at `MAX_FILES`, only the files it actually tried appear.
 
 ## Exit status
 

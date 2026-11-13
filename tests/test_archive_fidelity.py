@@ -106,7 +106,8 @@ class TestWholeSiteSurvivesArchiving:
         written = {
             p.relative_to(output_dir).as_posix(): p.read_text("utf-8", "replace")
             for p in output_dir.rglob("*")
-            if p.is_file()
+            # The failure report is bookkeeping, not part of the site.
+            if p.is_file() and p.name != WaybackDownloader.FAILURE_REPORT_FILE
         }
 
         assert set(written) == {"index.html", "blog/index.html", "about/index.html"}

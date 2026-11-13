@@ -502,7 +502,11 @@ class TestThrottling:
         dl.download()
         live = [url for url, _ in dl.session.get.calls if url.startswith("https://fonts.googleapis.com/")]
         assert len(live) == 8
-        saved = [p for p in (tmp_path / "out").rglob("*") if p.is_file() and p.name != "index.html"]
+        saved = [
+            p
+            for p in (tmp_path / "out").rglob("*")
+            if p.is_file() and p.name not in ("index.html", WaybackDownloader.FAILURE_REPORT_FILE)
+        ]
         assert len(saved) == 8
 
     def test_a_success_resets_the_count(self, tmp_path):

@@ -40,10 +40,11 @@ Files successfully downloaded: 50
 Files failed: 0
 Files skipped (duplicates): 0
 Total files processed: 50
+Failure report: ./output/wayback-archive-failures.json (0 entries)
 ======================================================================
 ```
 
-`Files failed` (none here) counts pages and files the archive does not have at that timestamp or any nearby one; their links stay broken in the copy.
+`Files failed` (none here) counts pages and files the archive does not have at that timestamp or any nearby one; their links stay broken in the copy. The failure report named on the last line lists every failed address with its category, the file it would have been stored as, and how many times it was tried (see [Usage](usage.md)); it is empty here.
 
 Open the copy straight from disk:
 

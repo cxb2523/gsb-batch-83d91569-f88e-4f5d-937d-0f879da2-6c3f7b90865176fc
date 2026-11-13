@@ -101,7 +101,9 @@ class TestResume:
         assert "Files skipped (duplicates): 0" in out
         assert "Download Complete!" in out
         assert not (out_dir / WaybackDownloader.STATE_FILE).exists()
-        assert {p.name for p in out_dir.iterdir()} == {"index.html"} | {f"p{i}.html" for i in range(4)}
+        written = {p.name for p in out_dir.iterdir()}
+        written.discard(WaybackDownloader.FAILURE_REPORT_FILE)
+        assert written == {"index.html"} | {f"p{i}.html" for i in range(4)}
 
     def test_same_folder_named_another_way_resumes(self, tmp_path, monkeypatch):
         pages = _site(3)

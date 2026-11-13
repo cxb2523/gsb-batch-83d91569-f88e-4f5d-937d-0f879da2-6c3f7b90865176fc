@@ -77,6 +77,8 @@ def _run(tmp_path, pages, wayback_url=None):
     with contextlib.redirect_stdout(out):
         dl.download()
     files = {p.relative_to(output_dir).as_posix() for p in output_dir.rglob("*") if p.is_file()}
+    # The failure report is the downloader's own bookkeeping, not the site.
+    files.discard(WaybackDownloader.FAILURE_REPORT_FILE)
     return dl, files, out.getvalue(), output_dir
 
 

@@ -1750,7 +1750,11 @@ class TestContentTypeDetection:
         dl.config.base_url = base_url
         dl.download_file = Mock(return_value=content)
         dl.download()
-        return sorted((p.relative_to(tmp_path).as_posix(), p.read_bytes()) for p in tmp_path.rglob("*") if p.is_file())
+        return sorted(
+            (p.relative_to(tmp_path).as_posix(), p.read_bytes())
+            for p in tmp_path.rglob("*")
+            if p.is_file() and p.name != WaybackDownloader.FAILURE_REPORT_FILE
+        )
 
     # An extensionless URL is stored under .html whatever it holds, so for
     # these the sniffed type shows only in the bytes: a binary that is taken

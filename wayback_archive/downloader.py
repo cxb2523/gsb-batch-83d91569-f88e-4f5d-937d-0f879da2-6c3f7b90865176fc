@@ -207,6 +207,15 @@ class WaybackDownloader:
         # "throttled" (429), "unavailable" (5xx or a read timeout after the
         # retries) or "connection" (no answer); None otherwise.
         self._last_failure: str | None = None
+        # The failure category of the last download_file call (see
+        # FAILURE_CATEGORIES) and whether it tried other timestamps. Only
+        # meaningful when that call returned None. _recorded_failure_for
+        # is the address that call already entered in the report, so the
+        # crawl loop does not count it twice.
+        self._last_failure_category: str | None = None
+        self._last_tried_timestamps = False
+        self._observed_categories: list[str] = []
+        self._recorded_failure_for: str | None = None
         # Track corrupted font files (HTML error pages instead of actual fonts)
         self.corrupted_fonts: set[str] = set()
         # Font URLs already probed this run, so each is fetched at most once
@@ -226,6 +235,10 @@ class WaybackDownloader:
         # failed in a row. CDX is slow and often down, so both are capped.
         self._cdx_lookups = 0
         self._cdx_failures = 0
+        # One entry per address that could not be fetched, which the failure
+        # report is written from. It is saved with the resume state, so a run
+        # interrupted and resumed keeps counting the same addresses.
+        self.failures: dict[str, dict] = {}
         self._parse_wayback_url()
 
     def _parse_wayback_url(self):
@@ -1079,6 +1092,8 @@ class WaybackDownloader:
         # The capture Wayback served, which can differ from the one asked for.
         served = re.search(r"/web/(\d{14})", bad_response.url or "")
         bad_timestamp = served.group(1) if served else self.original_datetime.strftime("%Y%m%d%H%M%S")
+        # A CDX lookup and a request at another capture: other timestamps tried.
+        self._last_tried_timestamps = True
         timestamp = self._nearest_good_timestamp(url, bad_timestamp)
         if not timestamp:
             return None
@@ -1120,10 +1135,53 @@ class WaybackDownloader:
         timestamps to find when the file was available.
         If all Wayback attempts fail and the URL is on a well-known CDN
         (LIVE_FALLBACK_HOSTS), tries that CDN live.
+
+        A failed fetch is entered in the run's failure report (see
+        FAILURE_REPORT_FILE): one entry per address, its category, and how
+        many times it has been attempted (a later attempt at the same address
+        in this process adds to the same entry). An address that failed before
+        in this run but succeeds now leaves the report, which lists only what
+        is still missing.
         """
         self._last_charset = None
         self._last_failure = None
+        self._last_failure_category = None
+        self._last_tried_timestamps = False
         self._last_final_url = None
+        self._observed_categories = []
+        self._recorded_failure_for = None
+        content = self._download_file(url)
+        if content is None:
+            self._last_failure_category = self._final_failure_category() or (
+                "network" if self._last_failure else "unusable"
+            )
+            self._record_failure(
+                url,
+                self._last_failure_category,
+                tried_timestamps=self._last_tried_timestamps,
+            )
+            self._recorded_failure_for = url
+        else:
+            self._clear_failure(url)
+        return content
+
+    def _note_failure(self, category: str) -> None:
+        """Remember why this file could not be fetched, for the failure report.
+
+        The categories observed in one attempt are kept in order of how much
+        they explain: an answer that is not the file says more than a refusal,
+        which says more than a 404 (which may only hide a later refusal)."""
+        self._observed_categories.append(category)
+
+    def _final_failure_category(self) -> str | None:
+        """The most informative failure seen during one download_file call."""
+        for category in ("unusable", "network", "missing", "unsafe_path"):
+            if category in self._observed_categories:
+                return category
+        return None
+
+    def _download_file(self, url: str) -> bytes | None:
+        """The fetch behind download_file, without the failure bookkeeping."""
         # Determine if this is an HTML page (we should NOT fallback to live for HTML)
         parsed = urlparse(url)
         # A referenced stylesheet or script, or a Google Fonts stylesheet, is
@@ -1143,10 +1201,12 @@ class WaybackDownloader:
                 response = self._wayback_get(wayback_url_if, timeout=15, allow_redirects=True)
                 reason = self._bad_capture_reason(response)
                 if reason:
+                    self._note_failure("unusable")
                     return self._fetch_nearest_good_capture(url, reason, is_html_page, response)
                 if response.status_code == 429 or response.status_code >= 500:
                     # Still refused after the retries; the plain URL would be too.
                     self._last_failure = "throttled" if response.status_code == 429 else "unavailable"
+                    self._note_failure("network")
                     return None
                 response.raise_for_status()
                 content = self._body_of(response)
@@ -1172,13 +1232,20 @@ class WaybackDownloader:
                         if not is_only_wrapper:
                             # Got content (even if it has Wayback scripts, it has the actual page)
                             return content
+                        # Nothing but the Wayback interface came back.
+                        self._note_failure("unusable")
                     except Exception:
                         # If we can't decode, assume it's good
                         return content
+                else:
+                    # An answer that is not a page at all.
+                    self._note_failure("unusable")
             except requests.exceptions.ConnectionError as e:
                 self._last_failure = self._connection_failure(e)
+                self._note_failure("network")
                 return None
             except _RejectedResponse:
+                self._note_failure("unusable")
                 return None
             except Exception:
                 # If if_ version fails, fall through to regular download
@@ -1190,6 +1257,7 @@ class WaybackDownloader:
             response = self._wayback_get(wayback_url, timeout=15, allow_redirects=True)
             reason = self._bad_capture_reason(response)
             if reason:
+                self._note_failure("unusable")
                 return self._fetch_nearest_good_capture(url, reason, is_html_page, response)
             response.raise_for_status()
             content = self._body_of(response)
@@ -1200,12 +1268,15 @@ class WaybackDownloader:
                 normalized_url = self._normalize_url(url, self.config.base_url or "")
                 self.corrupted_fonts.add(normalized_url)
                 print("         ⚠️  Font file is corrupted (HTML error page) - will be removed from CSS", flush=True)
+                self._note_failure("unusable")
                 return None
 
             return content
         except requests.exceptions.HTTPError as e:
             if hasattr(e, "response") and e.response is not None and e.response.status_code == 404:
                 # File not found at original timestamp, try a few others
+                self._note_failure("missing")
+                self._last_tried_timestamps = True
                 for timestamp in self._fallback_timestamps():
                     try:
                         variant_url = self._convert_to_wayback_url_with_timestamp(
@@ -1215,6 +1286,7 @@ class WaybackDownloader:
                         if variant_response.status_code == 429:
                             # Throttled after the retries: the other variants would be too.
                             self._last_failure = "throttled"
+                            self._note_failure("network")
                             break
                         if variant_response.status_code == 200 and not self._bad_capture_reason(variant_response):
                             content = self._body_of(variant_response)
@@ -1225,6 +1297,7 @@ class WaybackDownloader:
                                     "         ⚠️  Font file is corrupted (HTML error page) - will be removed from CSS",
                                     flush=True,
                                 )
+                                self._note_failure("unusable")
                                 continue  # Try next timestamp
                             return content
                     except Exception:
@@ -1235,20 +1308,26 @@ class WaybackDownloader:
                     return self._fetch_from_live_cdn(url)
             elif e.response is not None and e.response.status_code == 429:
                 self._last_failure = "throttled"
+                self._note_failure("network")
             elif e.response is not None and e.response.status_code >= 500:
                 self._last_failure = "unavailable"
-            # Other HTTP errors - skip silently
+                self._note_failure("network")
+            else:
+                # Another refusal from Wayback: an answer, but not the file.
+                self._note_failure("unusable")
         except requests.exceptions.Timeout as e:
             self._last_failure = (
                 self._connection_failure(e) if isinstance(e, requests.exceptions.ConnectionError) else "unavailable"
             )
+            self._note_failure("network")
             # Timeout on Wayback - try a well-known CDN live (only for assets)
             if not is_html_page:
                 return self._fetch_from_live_cdn(url)
         except requests.exceptions.ConnectionError as e:
             self._last_failure = self._connection_failure(e)
+            self._note_failure("network")
         except Exception:
-            pass
+            self._note_failure("unusable")
 
         return None
 
@@ -3060,6 +3139,127 @@ class WaybackDownloader:
     STATE_SAVE_EVERY = 25
     MAX_FAILED_URLS_SHOWN = 50
 
+    # The machine-readable record of every address that could not be fetched.
+    # It lives beside the archive, and is never named like a URL could be,
+    # so no downloaded file can collide with it.
+    FAILURE_REPORT_FILE = "wayback-archive-failures.json"
+    # Categories a failure is reported under. Each says what went wrong in
+    # terms a user can act on: retry later, look for another capture, or the
+    # address is simply not in the archive.
+    FAILURE_CATEGORIES = (
+        "network",  # no answer, throttled, timeout, a 5xx from Wayback itself
+        "missing",  # 404 at the timestamp and at every nearby one
+        "unusable",  # an answer came back, but not the file: an archived
+        #             error, a blocked request, HTML for an asset, a page that
+        #             could not be processed or stored
+        "unsafe_path",  # the URL would resolve outside OUTPUT_DIR
+    )
+
+    def _record_failure(self, url: str, category: str, *, tried_timestamps: bool = False) -> dict:
+        """
+        Add one failed address to the run's failure report, or update its entry.
+
+        The same address attempted twice keeps one entry and counts two
+        attempts, so the report is a set of addresses, not a log.
+
+        Args:
+            url: The original address that was requested.
+            category: One of FAILURE_CATEGORIES.
+            tried_timestamps: Whether other capture timestamps were tried too.
+
+        Returns:
+            The entry now held for url.
+        """
+        entry = self.failures.get(url)
+        if entry is None:
+            entry = {
+                "url": url,
+                "local_path": self._local_path_for_report(url),
+                "category": category,
+                "attempts": 0,
+                "tried_other_timestamps": False,
+            }
+            self.failures[url] = entry
+        entry["attempts"] += 1
+        entry["category"] = category
+        entry["tried_other_timestamps"] = entry["tried_other_timestamps"] or tried_timestamps
+        entry["local_path"] = entry["local_path"] or self._local_path_for_report(url)
+        return entry
+
+    def _discard_failure(self, url: str) -> None:
+        """Undo one recorded failure, for an attempt the run is taking back.
+
+        A refused URL goes back to the queue for the next run, and an
+        interrupted file is fetched again first: neither is a failure the
+        report should keep. Only the attempt is removed; an address that also
+        failed earlier in the run stays with its remaining count.
+        """
+        entry = self.failures.get(url)
+        if entry is None:
+            return
+        entry["attempts"] -= 1
+        if entry["attempts"] <= 0:
+            del self.failures[url]
+
+    def _clear_failure(self, url: str) -> None:
+        """Forget an address's failures: a later attempt did save its file.
+
+        The report lists what is missing from the archive, so an address that
+        failed once and came through on a retry (or from the live CDN) is not
+        on it, however many earlier attempts failed.
+        """
+        self.failures.pop(url, None)
+
+    def _local_path_for_report(self, url: str) -> str | None:
+        """The file this URL maps to inside OUTPUT_DIR, or None if not known."""
+        try:
+            path = self._get_local_path(url)
+        except UnsafeOutputPathError:
+            return None
+        try:
+            relative = path.relative_to(Path(self.config.output_dir))
+        except ValueError:
+            return None
+        return "/".join(relative.parts)
+
+    def _failure_report_document(self) -> dict:
+        """The report as it is written to disk: parseable, with counts.
+
+        JSON, one object: the run it belongs to, how many addresses failed,
+        and the list of failures. Each line names the address that was
+        requested, the file it would have been stored as (when the URL maps
+        to one), the category of failure, how many times it was attempted, and
+        whether other capture timestamps were tried.
+        """
+        entries = [
+            {
+                "url": entry["url"],
+                "local_path": entry["local_path"],
+                "category": entry["category"],
+                "attempts": entry["attempts"],
+                "tried_other_timestamps": entry["tried_other_timestamps"],
+            }
+            for entry in sorted(self.failures.values(), key=lambda e: e["url"])
+        ]
+        return {
+            "generated_by": "wayback-archive",
+            "wayback_url": self.config.wayback_url,
+            "start_url": self.config.base_url,
+            "failed": len(entries),
+            "failures": entries,
+        }
+
+    def _failure_report_path(self) -> Path:
+        return Path(self.config.output_dir) / self.FAILURE_REPORT_FILE
+
+    def _write_failure_report(self) -> Path:
+        """Write the failure report; always written, even when it is empty."""
+        import json
+
+        path = self._failure_report_path()
+        self._write_file(path, json.dumps(self._failure_report_document(), indent=2, sort_keys=False))
+        return path
+
     def _write_file(self, path: Path, data: bytes | str, encoding: str | None = None) -> None:
         """Write a file so that it is either complete or absent.
 
@@ -3111,6 +3311,7 @@ class WaybackDownloader:
             "queue": list(queue),
             "files_downloaded": files_downloaded,
             "failed_urls": failed_urls,
+            "failures": list(self.failures.values()),
             "files_skipped": files_skipped,
             "corrupted_fonts": sorted(self.corrupted_fonts),
             "path_kinds": self._path_kinds,
@@ -3149,6 +3350,12 @@ class WaybackDownloader:
             state["failed_urls"] = list(state["failed_urls"])
             state["files_downloaded"] = int(state["files_downloaded"])
             state["files_skipped"] = int(state["files_skipped"])
+            # A state written before the failure report existed has none.
+            failures = state.get("failures") or []
+            for entry in failures:
+                if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
+                    raise TypeError("failure entry is not an object with a url")
+                int(entry["attempts"])
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             print(f"Ignoring {path}: damaged ({e!r}); starting fresh", flush=True)
             return None
@@ -3162,6 +3369,16 @@ class WaybackDownloader:
         self.corrupted_fonts.update(corrupted_fonts)
         self._path_kinds.update(path_kinds)
         self._kind_by_path.update(kind_by_path)
+        # Keep the attempt counts of addresses that failed before the
+        # interruption, so the report covers the whole crawl, not just this run.
+        for entry in failures:
+            self.failures[entry["url"]] = {
+                "url": entry["url"],
+                "local_path": entry.get("local_path"),
+                "category": entry.get("category") or "unusable",
+                "attempts": int(entry["attempts"]),
+                "tried_other_timestamps": bool(entry.get("tried_other_timestamps")),
+            }
         return state
 
     def _print_summary(
@@ -3185,6 +3402,9 @@ class WaybackDownloader:
                 print(f"  {failed_url}", flush=True)
             if len(failed_urls) > self.MAX_FAILED_URLS_SHOWN:
                 print(f"  ... and {len(failed_urls) - self.MAX_FAILED_URLS_SHOWN} more", flush=True)
+        # The report holds every failure with its category and attempts; say
+        # where it is, so a user can look past the 50 URLs printed above.
+        print(f"Failure report: {self._failure_report_path()} ({len(self.failures)} entries)", flush=True)
         print(f"{'=' * 70}\n", flush=True)
 
     def download(self):
@@ -3218,6 +3438,7 @@ class WaybackDownloader:
         # fetched once, while each Google Fonts family set has its own file.
         queued_keys = set(self.config.visited_urls) | {self._tracking_key(u) for u in queue}
         state_path = self._state_path()
+        report_path = self._failure_report_path()
 
         def enqueue(link_url: str) -> None:
             nonlocal files_skipped
@@ -3227,6 +3448,22 @@ class WaybackDownloader:
                 queue.append(link_url)
             else:
                 files_skipped += 1
+
+        def note_failure(link_url: str, category: str | None = None, *, recorded: bool = False) -> None:
+            """Count one failed attempt and enter it in the failure report.
+
+            failed_urls and the report are kept together: every entry in the
+            summary has a line in the report, and one address attempted twice
+            keeps one report line with two attempts. A fetch failure that
+            download_file already recorded passes recorded=True, so only the
+            summary list grows.
+            """
+            # One line per address in the summary too, so its count and the
+            # report's entry count are the same number.
+            if link_url not in failed_urls:
+                failed_urls.append(link_url)
+            if not recorded:
+                self._record_failure(link_url, category or "unusable")
 
         # Requests in a row that Wayback throttled or did not answer. Past
         # MAX_CONSECUTIVE_REFUSALS the run stops rather than hammer it, and
@@ -3272,13 +3509,13 @@ class WaybackDownloader:
 
                 try:
                     local_path = self._get_local_path(url)
-                    if local_path == state_path:
-                        raise UnsafeOutputPathError("that name holds the resume state")
+                    if local_path == state_path or local_path == report_path:
+                        raise UnsafeOutputPathError("that name holds the downloader's own bookkeeping")
                 except UnsafeOutputPathError as e:
                     # Archived content asked us to write outside OUTPUT_DIR. Skip
                     # this file and keep archiving the rest of the site.
                     self.config.visited_urls.add(url)
-                    failed_urls.append(url)
+                    note_failure(url, "unsafe_path")
                     print(f"         ⛔ Refused unsafe path for {url}: {e}", flush=True)
                     continue
                 normalized_for_tracking = str(local_path)
@@ -3319,10 +3556,14 @@ class WaybackDownloader:
                                 )
                             content = self._fetch_from_live_cdn(f"https://code.jquery.com/jquery-{version}.min.js")
                             if content:
+                                # The CDN saved it, so it is not a failure.
+                                self._clear_failure(url)
                                 break
 
                     if not content:
-                        failed_urls.append(url)
+                        # download_file already entered it in the report;
+                        # a test double that returns None did not.
+                        note_failure(url, recorded=self._recorded_failure_for == url)
                         print("         ⚠️  Failed to download", flush=True)
                         # Only a file no fallback could save counts as refused.
                         if not refusal:
@@ -3334,10 +3575,12 @@ class WaybackDownloader:
                                 f"Stopped: the Wayback Machine refused {len(refused)} requests in a row "
                                 f"(last: {refusal}); try again later"
                             )
-                            # Refused is not missing: the next run retries them.
+                            # Refused is not missing: the next run retries them,
+                            # so they leave the summary and the failure report.
                             for refused_url, refused_key in reversed(refused):
                                 self.config.visited_urls.discard(refused_key)
                                 failed_urls.remove(refused_url)
+                                self._discard_failure(refused_url)
                                 queue.appendleft(refused_url)
                             in_flight = None
                             break
@@ -3346,7 +3589,8 @@ class WaybackDownloader:
                 refused.clear()
 
                 if self._is_html_instead_of_asset(content, url):
-                    failed_urls.append(url)
+                    # An answer came back, but not the file.
+                    note_failure(url, "unusable")
                     print("         ⚠️  Failed: got an HTML page instead of the file", flush=True)
                     continue
                 if url == start_url:
@@ -3427,7 +3671,7 @@ class WaybackDownloader:
                     # A name too long for the filesystem, or one already taken by
                     # a file, costs this file only, not the rest of the run.
                     files_downloaded -= 1
-                    failed_urls.append(url)
+                    note_failure(url, "unusable")
                     print(f"         ⛔ Cannot store {url}: {e}", flush=True)
                     continue
 
@@ -3479,7 +3723,7 @@ class WaybackDownloader:
                             # The raw HTML is still saved, but its links are
                             # neither rewritten nor followed: the page failed.
                             files_downloaded -= 1
-                            failed_urls.append(url)
+                            note_failure(url, "unusable")
                             try:
                                 self._write_file(local_path, content)
                                 self.config.downloaded_files[url] = str(local_path)
@@ -3493,7 +3737,7 @@ class WaybackDownloader:
                             self.config.downloaded_files[url] = str(local_path)
                         except Exception as e:
                             files_downloaded -= 1
-                            failed_urls.append(url)
+                            note_failure(url, "unusable")
                             print(f"Error saving HTML to {local_path}: {e}")
                             continue
 
@@ -3568,7 +3812,7 @@ class WaybackDownloader:
                             self.config.downloaded_files[url] = str(local_path)
                         except Exception as e:
                             files_downloaded -= 1
-                            failed_urls.append(url)
+                            note_failure(url, "unusable")
                             print(f"Error saving CSS to {local_path}: {e}")
                             continue
 
@@ -3620,7 +3864,7 @@ class WaybackDownloader:
                 except Exception as e:
                     # One file that cannot be processed or written fails alone.
                     files_downloaded -= 1
-                    failed_urls.append(url)
+                    note_failure(url, "unusable")
                     print(f"Error processing {url}: {e}")
                     continue
             in_flight = None
@@ -3629,6 +3873,9 @@ class WaybackDownloader:
             # back in the queue and the state is saved for the next run.
             if in_flight:
                 url, key, files_downloaded, failed_count = in_flight
+                # Its own failures are not results: they go back with it.
+                for failed_url in failed_urls[failed_count:]:
+                    self._discard_failure(failed_url)
                 del failed_urls[failed_count:]
                 self.config.visited_urls.discard(key)
                 queue.appendleft(url)
@@ -3639,6 +3886,13 @@ class WaybackDownloader:
             except OSError as e:
                 print(f"Could not save the resume state: {e}", flush=True)
             if isinstance(error, KeyboardInterrupt):
+                # The summary is printed, so the report goes with it: this is
+                # a written stop, not a killed run, and _write_file makes it
+                # all-or-nothing.
+                try:
+                    self._write_failure_report()
+                except OSError as e:
+                    print(f"Could not write the failure report: {e}", flush=True)
                 self._print_summary("Download interrupted", files_downloaded, failed_urls, files_skipped)
             raise
 
@@ -3646,6 +3900,11 @@ class WaybackDownloader:
             self._save_state(start_url, queue, files_downloaded, failed_urls, files_skipped)
         else:
             state_path.unlink(missing_ok=True)
+
+        # The report is part of the run's result: written on every finish, empty
+        # when nothing failed. _write_file makes it all-or-nothing, so even an
+        # interrupted or failed run leaves a complete report or none at all.
+        self._write_failure_report()
 
         if files_downloaded == 0 and not stop_reason:
             # The start page failed, so nothing else was found. Say so rather
