@@ -129,8 +129,11 @@ class TestSafeGotoRecovery:
             recovery = FakeRecovery()
             scraper = StealthScraper(page, None, None, recovery=recovery)
 
-            result = await scraper._safe_goto("https://example.com/", platform="test")
-            assert result is True
+            ok, via_recovery = await scraper._safe_goto(
+                "https://example.com/", platform="test"
+            )
+            assert ok is True
+            assert via_recovery is True
             assert len(recovery.calls) == 1
             assert page.goto_calls == ["https://example.com/"]
 
@@ -141,7 +144,9 @@ class TestSafeGotoRecovery:
             page = FakePage()
             scraper = StealthScraper(page, None, None)
 
-            assert await scraper._safe_goto("https://example.com/") is True
+            ok, via_recovery = await scraper._safe_goto("https://example.com/")
+            assert ok is True
+            assert via_recovery is False
             assert page.goto_calls == ["https://example.com/"]
 
         asyncio.run(_run())
@@ -167,6 +172,97 @@ class TestSafeGotoRecovery:
                 await scraper.scrape_page("https://example.com/")
             assert page.goto_calls == []
             assert page.evaluate_calls == []
+
+        asyncio.run(_run())
+
+
+# --- Provenance marker: scrape_page content says whether recovery was used ---
+
+
+class TestScrapePageRecoveryMarker:
+    def test_recovery_success_returns_content_marked_recovered(self):
+        async def _run():
+            page = FakePage(evaluate_result=dict(CONTENT))
+            recovery = FakeRecovery()
+            scraper = StealthScraper(page, None, None, recovery=recovery)
+
+            result = await scraper.scrape_page("https://example.com/", platform="test")
+
+            # Navigation actually went through the attached recovery wrapper.
+            assert len(recovery.calls) == 1
+            assert recovery.calls[0]["url"] == "https://example.com/"
+            assert page.goto_calls == ["https://example.com/"]
+
+            content = result["content"]
+            assert content["recovery_used"] is True
+            # Original content fields keep their existing shape/values.
+            assert content["title"] == "Example Title"
+            assert content["url"] == "https://example.com/"
+            assert content["text"] == "hello body text"
+            assert content["headings"] == ["H1"]
+            # Top-level envelope is unchanged.
+            assert result["url"] == "https://example.com/"
+            assert isinstance(result["timestamp"], float)
+
+        asyncio.run(_run())
+
+    def test_attach_recovery_after_init_marks_content_recovered(self):
+        async def _run():
+            page = FakePage(evaluate_result=dict(CONTENT))
+            scraper = StealthScraper(page, None, None)
+            assert scraper.recovery is None
+
+            recovery = FakeRecovery()
+            scraper.attach_recovery(recovery)  # post-init wiring still works
+
+            result = await scraper.scrape_page("https://example.com/")
+            assert len(recovery.calls) == 1
+            assert page.goto_calls == ["https://example.com/"]
+            assert result["content"]["recovery_used"] is True
+
+        asyncio.run(_run())
+
+    def test_without_recovery_direct_navigation_marks_not_recovered(self):
+        async def _run():
+            page = FakePage(evaluate_result=dict(CONTENT))
+            scraper = StealthScraper(page, None, None)
+
+            result = await scraper.scrape_page("https://example.com/")
+
+            # Plain goto path: no recovery wrapper involved.
+            assert page.goto_calls == ["https://example.com/"]
+            assert result["content"]["recovery_used"] is False
+            # All original content fields remain present.
+            for field in ("title", "url", "text", "headings"):
+                assert field in result["content"]
+
+        asyncio.run(_run())
+
+    def test_images_still_extracted_alongside_marker(self):
+        class _MultiResultPage(FakePage):
+            """Returns content dict for the scrape script, images for the image script."""
+
+            def __init__(self):
+                super().__init__()
+                self._images = [{"src": "a.png", "alt": "", "width": 1, "height": 1}]
+
+            async def evaluate(self, script, arg=None):
+                self.evaluate_calls.append(script)
+                if "document.images" in script:
+                    return list(self._images)
+                return dict(CONTENT)
+
+        async def _run():
+            page = _MultiResultPage()
+            scraper = StealthScraper(page, None, None)
+
+            result = await scraper.scrape_page(
+                "https://example.com/", extract_images=True
+            )
+            assert result["content"]["recovery_used"] is False
+            assert result["images"] == [
+                {"src": "a.png", "alt": "", "width": 1, "height": 1}
+            ]
 
         asyncio.run(_run())
 
@@ -206,6 +302,30 @@ class TestExtractImagesValidation:
 
             assert await scraper.extract_images(max_images=-5) == []
             assert "slice(0, 0)" in page.evaluate_calls[0]
+
+        asyncio.run(_run())
+
+    def test_bool_max_images_raises_value_error(self):
+        async def _run():
+            page = FakePage(evaluate_result=[])
+            scraper = StealthScraper(page, None, None)
+
+            # bool must not be accepted as an int even though isinstance(True, int).
+            with pytest.raises(ValueError):
+                await scraper.extract_images(max_images=True)
+            assert page.evaluate_calls == []
+
+        asyncio.run(_run())
+
+    def test_negative_three_max_images_clamps_to_zero_in_script(self):
+        async def _run():
+            page = FakePage(evaluate_result=[])
+            scraper = StealthScraper(page, None, None)
+
+            assert await scraper.extract_images(max_images=-3) == []
+            # The clamped 0 (not -3) is what reaches the page script.
+            assert "slice(0, 0)" in page.evaluate_calls[0]
+            assert "-3" not in page.evaluate_calls[0]
 
         asyncio.run(_run())
 

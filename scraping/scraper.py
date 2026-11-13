@@ -24,6 +24,15 @@ class StealthScraper:
         self.orchestrator = orchestrator
         self.recovery = recovery  # AntiBlockOrchestrator scaffolding to prevent bypass
 
+    def _has_recovery(self) -> bool:
+        """True when a usable recovery wrapper is attached.
+
+        Single source of truth for the routing decision so scrape_page's
+        provenance marker can never disagree with what _safe_goto actually
+        did. An object without execute_with_recovery is treated as absent.
+        """
+        return bool(self.recovery and hasattr(self.recovery, "execute_with_recovery"))
+
     async def _safe_goto(self, url: str, platform: str = "scrape"):
         """Navigation preferring recovery wrapper if present (#105).
 
@@ -32,8 +41,12 @@ class StealthScraper:
         falling back to a raw goto would send one more unprotected request
         and let scrape_page extract the challenge page as content. With no
         recovery attached, the plain goto path is used as before.
+
+        Returns (ok, via_recovery): via_recovery is True only when the
+        attached recovery wrapper actually carried the navigation, so the
+        caller can mark the provenance of the extracted content.
         """
-        if self.recovery and hasattr(self.recovery, "execute_with_recovery"):
+        if self._has_recovery():
 
             async def _nav():
                 await self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -42,15 +55,25 @@ class StealthScraper:
             await self.recovery.execute_with_recovery(
                 func=_nav, platform=platform, url=url
             )
-            return True
+            return True, True
         await self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        return True
+        return True, False
 
     async def scrape_page(
         self, url: str, extract_images: bool = False, platform: str = "unknown"
     ) -> Dict:
-        """Scrape with natural behavior + recovery opt-in."""
-        await self._safe_goto(url, platform=platform)
+        """Scrape with natural behavior + recovery opt-in.
+
+        The returned content dict carries a ``recovery_used`` boolean so
+        callers can tell a genuine article apart from content that only
+        arrived after the attached recovery flow (retries, rotation, ...).
+        It is True only when navigation actually went through an attached
+        recovery wrapper; direct navigation marks it False. When recovery is
+        attached but raises (block confirmed, retries exhausted), the error
+        propagates and no content is produced. title/url/text/headings keep
+        their existing shape.
+        """
+        _, via_recovery = await self._safe_goto(url, platform=platform)
         if self.orchestrator:
             await self.orchestrator.read_page_naturally(2, 4)
         content = await self.page.evaluate("""
@@ -63,6 +86,9 @@ class StealthScraper:
                 }
             }
         """)
+        # Provenance marker on the content itself: the nested content dict is
+        # the canonical shape consumed by both the SDK client and MCP handler.
+        content["recovery_used"] = bool(via_recovery)
         result = {"url": url, "timestamp": time.time(), "content": content}
         if extract_images:
             result["images"] = await self.extract_images()
