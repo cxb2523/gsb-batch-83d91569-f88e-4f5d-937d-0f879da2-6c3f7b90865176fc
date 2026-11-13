@@ -1,0 +1,24 @@
+{
+  "Version": "1.104.5",
+  "BackendState": "Running",
+  "MagicDNSSuffix": "example.ts.net",
+  "CurrentTailnet": {"Name": "example.ts.net", "MagicDNSSuffix": "example.ts.net", "MagicDNSEnabled": true},
+  "Self": {
+    "ID": "n1", "HostName": "homelab", "DNSName": "homelab.example.ts.net.", "OS": "linux",
+    "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"], "Relay": "sfo", "Online": true, "Active": false,
+    "LastSeen": "0001-01-01T00:00:00Z", "Tags": ["tag:server"]
+  },
+  "Peer": {
+    "k2": {"ID": "n2", "HostName": "vps-fra", "DNSName": "vps-fra.example.ts.net.", "OS": "linux",
+           "TailscaleIPs": ["100.64.1.1"], "Relay": "fra", "Online": true, "Active": true, "CurAddr": "203.0.113.5:41641",
+           "LastSeen": "2026-11-13T10:00:00.123456789Z", "Tags": ["tag:server"]},
+    "k3": {"ID": "n3", "HostName": "My Laptop", "DNSName": "my-laptop.example.ts.net.", "OS": "macOS",
+           "TailscaleIPs": ["100.64.0.10"], "Relay": "home-derp", "Online": true, "Active": false,
+           "LastSeen": "2026-11-13T10:00:00Z"},
+    "k4": {"ID": "n4", "HostName": "old-phone", "DNSName": "old-phone.example.ts.net.", "OS": "iOS",
+           "TailscaleIPs": ["100.64.0.11"], "Relay": "sfo", "Online": false, "Active": false,
+           "LastSeen": "2025-01-01T00:00:00Z"},
+    "k5": {"ID": "n5", "HostName": "localhost", "DNSName": "", "OS": "android",
+           "TailscaleIPs": ["100.64.0.12"], "Relay": "", "Online": true, "LastSeen": "2026-11-13T10:00:00Z"}
+  }
+}

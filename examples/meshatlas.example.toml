@@ -1,0 +1,38 @@
+# Example MeshAtlas configuration. Every key is optional; see `meshatlas init` for one generated from your tailnet.
+
+[server]
+host = "auto"      # this machine's Tailscale IP
+port = 8765
+
+[locations.home]
+name = "Home"
+code = "HOME"
+lat = 37.77
+lon = -122.42
+
+[nodes.homelab]
+location = "home"
+role = "Home server"
+notes = ["Backups run at 03:00"]
+
+[nodes.nas]
+location = "home"
+role = "NAS"
+ssh = "admin@nas"          # read-only collection: docker ps, docker stats, systemctl, /proc
+statsEvery = 600           # run `docker stats` at most every 10 minutes on this host
+
+[nodes.vps-fra]
+role = "Edge proxy"
+ssh = "root@vps-fra"
+# location is guessed from the home DERP region (fra) when not set
+
+[[external]]
+id = "status-page"
+address = "203.0.113.10"
+location = "fra"
+role = "Public status page"
+probe_from = ["hub", "vps-fra"]
+
+# [kuma]
+# url = "http://100.64.0.1:3001"
+# slug = "default"

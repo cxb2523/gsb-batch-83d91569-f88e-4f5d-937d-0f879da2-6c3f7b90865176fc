@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#060606">
+  <meta name="description" content="MeshAtlas: a live map of your Tailscale tailnet — where every node is, how it is connected and what runs on it.">
+  <title>MeshAtlas</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top panel">
+    <a class="brand" href="#/" aria-label="MeshAtlas" data-i18n-aria="Back to map">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <div class="brand-title" id="brand-title">MESHATLAS</div>
+        <div class="brand-sub" id="brand-sub">// TAILNET OPS</div>
+      </div>
+    </a>
+    <div class="sys-wrap">
+      <button class="sys" id="sys" type="button" aria-haspopup="dialog" aria-controls="issues" aria-expanded="false">
+        <span class="sys-dot"></span><span id="sys-text">SYNCING</span>
+      </button>
+      <div class="issues" id="issues" role="dialog" aria-label="Issues" data-i18n-aria="Issues" hidden></div>
+    </div>
+    <div class="tb">
+      <button class="tb-btn" id="btn-search" type="button" title="Search nodes, containers, services (/ or ⌘K)" data-i18n-title="Search nodes, containers, services (/ or ⌘K)"><span aria-hidden="true">⌕</span> <span data-i18n="Search">Search</span> <kbd>⌘K</kbd></button>
+      <button class="tb-btn icon" id="btn-settings" type="button" title="Display settings (,)" aria-label="Display settings" data-i18n-title="Display settings (,)" data-i18n-aria="Display settings"><span aria-hidden="true">⚙</span></button>
+      <button class="tb-btn icon" id="btn-help" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" data-i18n-title="Keyboard shortcuts (?)" data-i18n-aria="Keyboard shortcuts">?</button>
+    </div>
+    <div class="kpis" id="kpis"></div>
+    <div class="clock">
+      <div class="clock-main" id="clk-local">--:--:--</div>
+      <div class="clock-sub" id="clk-utc">--:--:-- UTC</div>
+    </div>
+  </header>
+
+  <aside class="panel left">
+    <div class="ph"><span class="ph-t">NODE INDEX</span><span class="ph-r" id="idx-sub"></span></div>
+    <div class="node-list" id="node-list"></div>
+  </aside>
+
+  <main class="panel mapwrap">
+    <div class="ph">
+      <span class="ph-t" id="map-title">THEATER // TAILNET</span>
+      <span class="ph-r" id="map-sub"></span>
+      <span class="seg-tg" role="group" aria-label="Map mode (m)" data-i18n-aria="Map mode (m)">
+        <button type="button" data-mapmode="node" data-i18n="Selected" data-i18n-title="Links from the selected node" title="Links from the selected node">Selected</button>
+        <button type="button" data-mapmode="mesh" data-i18n="Mesh" data-i18n-title="Every link between every pair of nodes" title="Every link between every pair of nodes">Mesh</button>
+        <button type="button" data-mapmode="matrix" data-i18n="Matrix" data-i18n-title="Latency table of all pairs" title="Latency table of all pairs">Matrix</button>
+      </span>
+    </div>
+    <div class="map" id="map">
+      <canvas id="map-dots"></canvas>
+      <svg id="map-svg" role="img" aria-label="Map of the tailnet" data-i18n-aria="Map of the tailnet"></svg>
+      <div class="matrix" id="matrix" hidden></div>
+    </div>
+    <div class="legend">
+      <span><i class="lg-line solid"></i><span data-i18n="direct">direct</span></span>
+      <span><i class="lg-line dash"></i><span data-i18n="relayed">relayed</span></span>
+      <span><i class="lg-line dot"></i><span data-i18n="public ping">public ping</span></span>
+      <span><i class="lg-sq on"></i><span data-i18n="online">online</span></span>
+      <span><i class="lg-sq off"></i><span data-i18n="offline">offline</span></span>
+      <span><i class="lg-sq warn"></i><span data-i18n="problem">problem</span></span>
+      <span class="legend-r" id="map-foot"></span>
+    </div>
+  </main>
+
+  <aside class="panel right" id="detail"></aside>
+
+  <section class="bottom">
+    <div class="panel log">
+      <div class="ph">
+        <span class="ph-t">EVENT LOG</span>
+        <span class="ph-r" data-i18n="click an event to open its node">click an event to open its node</span>
+        <span class="seg-tg" role="group" aria-label="Event filter" data-i18n-aria="Event filter">
+          <button type="button" data-logf="all" data-i18n="All">All</button>
+          <button type="button" data-logf="alert" data-i18n="Alerts">Alerts</button>
+          <button type="button" data-logf="sel" data-i18n="Selected">Selected</button>
+        </span>
+      </div>
+      <div class="log-body" id="log" aria-live="polite"></div>
+    </div>
+    <div class="panel tl">
+      <div class="ph">
+        <span class="ph-t" id="tl-title">LATENCY // 24H</span>
+        <span class="ph-r" id="tl-sub"></span>
+        <span class="seg-tg" role="group" aria-label="Time range" data-i18n-aria="Time range">
+          <button type="button" data-range="1">1H</button>
+          <button type="button" data-range="6">6H</button>
+          <button type="button" data-range="24">24H</button>
+          <button type="button" data-range="168">7D</button>
+        </span>
+      </div>
+      <div class="tl-body"><svg id="timeline"></svg></div>
+    </div>
+  </section>
+
+  <main class="page" id="page" hidden></main>
+</div>
+
+<aside class="drawer panel" id="drawer" role="dialog" aria-label="Display settings" data-i18n-aria="Display settings" hidden>
+  <div class="ph"><span class="ph-t">SETTINGS</span><button class="ib" type="button" data-close aria-label="Close" data-i18n-aria="Close">×</button></div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<div class="overlay" id="palette" hidden>
+  <div class="pal panel" role="dialog" aria-label="Search" data-i18n-aria="Search">
+    <div class="pal-in">
+      <span aria-hidden="true">⌕</span>
+      <input id="pal-q" type="text" placeholder="Search nodes, containers, services, Kuma monitors, locations or commands"
+        data-i18n-ph="Search nodes, containers, services, Kuma monitors, locations or commands"
+        autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-autocomplete="list">
+      <kbd>Esc</kbd>
+    </div>
+    <div class="pal-list" id="pal-list" role="listbox"></div>
+    <div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> <span data-i18n="select">select</span></span><span><kbd>Enter</kbd> <span data-i18n="open">open</span></span><span data-i18n="separate words with spaces to match all of them">separate words with spaces to match all of them</span></div>
+  </div>
+</div>
+
+<div class="overlay" id="help" hidden>
+  <div class="help panel" role="dialog" aria-label="Keyboard shortcuts" data-i18n-aria="Keyboard shortcuts">
+    <div class="ph"><span class="ph-t">KEYBOARD</span><button class="ib" type="button" data-close aria-label="Close" data-i18n-aria="Close">×</button></div>
+    <dl class="keys">
+      <dt><kbd>/</kbd> <kbd>⌘K</kbd></dt><dd data-i18n="Search nodes, containers, services, Kuma monitors, locations and commands">Search nodes, containers, services, Kuma monitors, locations and commands</dd>
+      <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd data-i18n="Previous / next node (list order)">Previous / next node (list order)</dd>
+      <dt><kbd>Enter</kbd></dt><dd data-i18n="Open the selected node's detail page (or double-click it)">Open the selected node's detail page (or double-click it)</dd>
+      <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd data-i18n="Previous / next node on a detail page">Previous / next node on a detail page</dd>
+      <dt><kbd>Esc</kbd></dt><dd data-i18n="Close a dialog → close the location card → back to the map">Close a dialog → close the location card → back to the map</dd>
+      <dt><kbd>m</kbd></dt><dd data-i18n="Map mode: selected → mesh → matrix">Map mode: selected → mesh → matrix</dd>
+      <dt><kbd>,</kbd></dt><dd data-i18n="Display settings">Display settings</dd>
+      <dt><kbd>?</kbd></dt><dd data-i18n="This help">This help</dd>
+    </dl>
+    <p class="help-note" data-i18n="On the map: hover a location for a preview, click it for its card, double-click a node in the card for details. Detail pages have their own URL.">On the map: hover a location for a preview, click it for its card, double-click a node in the card for details. Detail pages have their own URL.</p>
+  </div>
+</div>
+
+<div class="tip" id="tip" hidden></div>
+<script src="config.js"></script>
+<script src="vendor/d3.min.js"></script>
+<script src="vendor/topojson-client.min.js"></script>
+<script src="prefs.js"></script>
+<script src="i18n.js"></script>
+<script src="demo.js"></script>
+<script src="app.js"></script>
+<script src="page.js"></script>
+<script src="extras.js"></script>
+</body>
+</html>

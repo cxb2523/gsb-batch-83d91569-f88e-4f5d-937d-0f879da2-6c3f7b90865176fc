@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+# runtime data and personal config stay out of the repo
+/data/
+*.db
+*.db-wal
+*.db-shm
+meshatlas.toml
+meshatlas.json
+/site/
+.DS_Store
+.claude/

@@ -1,0 +1,19 @@
+# MeshAtlas with Docker Compose.
+# The container reads the host's Tailscale state through the tailscaled socket and listens on the host network,
+# so the page is reachable at http://<this machine's tailscale IP>:8765.
+services:
+  meshatlas:
+    image: ghcr.io/lij768423-svg/meshatlas:latest
+    # build: .
+    container_name: meshatlas
+    restart: unless-stopped
+    network_mode: host
+    command: ["run", "--host", "auto"]
+    environment:
+      MESHATLAS_DATA: /data
+      # MESHATLAS_TOKEN: change-me          # optional: require ?token=... once per browser
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+      - ./data:/data
+      # - ./meshatlas.toml:/app/meshatlas.toml:ro   # optional config (run `meshatlas init` to create one)
+      # - ~/.ssh:/home/meshatlas/.ssh:ro           # only if you configure `ssh` targets
