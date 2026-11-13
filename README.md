@@ -1,0 +1,499 @@
+# Facebook Marketplace Scraper — Listings, Prices and Locations in Python
+
+![release](https://img.shields.io/github/v/release/2scraper/facebook-marketplace-scraper?sort=semver)
+![tests](https://github.com/2scraper/facebook-marketplace-scraper/actions/workflows/tests.yml/badge.svg)
+![canary](https://github.com/2scraper/facebook-marketplace-scraper/actions/workflows/canary.yml/badge.svg)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![licence](https://img.shields.io/badge/licence-MIT-green)
+![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
+![no login](https://img.shields.io/badge/runs%20without-an%20account-success)
+
+**Facebook Marketplace scraper** — an open-source (MIT) Python tool that reads Marketplace search and category pages logged out and writes one row per listing — title, price, location, when it was listed, photo, sold/pending status and delivery options — to JSON or CSV. From one residential IP on 2026-10-05 and 2026-10-06 more than 30 search and listing pages read normally with no page load refused, while a datacentre address (a GitHub runner, measured 2026-10-15) was sent to the login page. Use it for price monitoring of local listings, or compare two runs with the included diff tool to spot price drops and sold listings.
+
+**Scrape Facebook Marketplace listings into clean JSON or CSV, without
+logging in.** Search by keyword or browse a category in any Marketplace
+location, filter by price and age, and get one row per listing: title,
+price, location, when it was listed, its photo, sold / pending, delivery
+options and, on vehicles, the mileage. With `--details`, also each
+listing's description, condition, category, every photo and the currency
+code.
+
+- **No account, no cookies, no key.** It reads what Marketplace shows any
+  logged-out visitor: the listings a search page embeds, then the page's
+  own pagination for the rest. From a home (residential) connection no
+  proxy is needed either; a datacentre address (a cloud server, a CI
+  runner) is sent to the login page on the same search URL, so there you
+  need a residential proxy (see [Volume and blocks](#volume-and-blocks)).
+- **Measured live on 2026-10-06:** 150 listings of one Chicago search in
+  35 seconds, paginated past the first 24; 10 listings with `--details`
+  in 102 seconds, every one with its description, condition, photos and
+  currency; and, before pagination was added, 5 searches in New York,
+  London, Berlin, Los Angeles and Chicago — the 24 each embeds — in 25
+  seconds, with no key and no proxy, from one residential IP.
+- **Nothing about sellers.** Sellers are private people; the tool never
+  writes a seller field (see [Sellers](#sellers)).
+- **Honest results.** A blocked, empty or partial run says so in its exit
+  code and a `.meta.json` file next to the output. A run that finds
+  nothing never overwrites your last good data.
+- **Three browser engines** (Playwright, Puppeteer, Selenium) running one
+  shared fetch loop, a browserless **Scraper API** mode, rotating proxies,
+  2Captcha's **Scraping Browser API** over CDP, and a run-to-run diff tool
+  that spots price drops and sold listings.
+
+Companion repos: [facebook-ads-scraper](https://github.com/2scraper/facebook-ads-scraper)
+(Meta's Ad Library) and [facebook-pages-scraper](https://github.com/2scraper/facebook-pages-scraper)
+(public Pages).
+
+## Quick start
+
+```bash
+git clone https://github.com/2scraper/facebook-marketplace-scraper.git
+cd facebook-marketplace-scraper
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-playwright.txt
+playwright install chromium
+
+python3 playwright_scraper.py --query bike --location nyc
+```
+
+Results land in `facebook_marketplace.json`, with
+`facebook_marketplace.json.meta.json` beside it. No `.env` is needed for
+this on a home (residential) connection. On a cloud server or CI runner
+the same command exits 3 at Facebook's login page; set `FACEBOOK_PROXY`
+to a residential proxy there.
+
+**When you need more than that:** for many searches, a specific exit
+country, or no browser on your machine, put a 2Captcha residential proxy
+or key in `.env` (`cp .env.example .env`, `FACEBOOK_PROXY=...`,
+`TWOCAPTCHA_KEY=...`). `python3 env_config.py` shows what was picked up,
+without printing secrets.
+
+## Examples
+
+```bash
+# a keyword search in a location (the slug from facebook.com/marketplace/<location>/)
+python3 playwright_scraper.py --query bike --location nyc
+
+# with the site's own filters: a price range, newest first, listed in the last 7 days, as CSV
+python3 playwright_scraper.py --query sofa --location london --min-price 50 --max-price 300 \
+    --sort creation_time_descend --days-since-listed 7 --format csv
+
+# browse a category instead of searching
+python3 playwright_scraper.py --category vehicles --location la
+
+# each listing's own page too: description, condition, category, photos, currency
+python3 playwright_scraper.py --query "standing desk" --location chicago --details
+
+# searches or listings copied from your browser, one per line (# comments allowed)
+python3 playwright_scraper.py --urls-file searches.txt
+python3 playwright_scraper.py --url "https://www.facebook.com/marketplace/item/1800446554437755/"
+
+# the same with Puppeteer, or Selenium
+python3 puppeteer_scraper.py --query bike --location nyc
+python3 selenium_scraper.py --query bike --location nyc
+
+# without a browser: 2Captcha's Scraper API (needs TWOCAPTCHA_KEY)
+python3 playwright_scraper.py --scraper-api --query bike --location nyc
+
+# what changed since last time: price drops, listings sold
+python3 diff_runs.py monday.json tuesday.json
+```
+
+## Sample output
+
+One row of `sample_output.json`, cut from a live run with `--details` on
+2026-10-06 (media URLs shortened here):
+
+```json
+{
+  "sku": "facebook-listing-1655081135947682",
+  "source": "facebook.com",
+  "category": "listing",
+  "title": "Kugoo Pink Kids Bike with Training Wheels",
+  "brand": null,
+  "price": 50.0,
+  "currency": "USD",
+  "price_source": "item_page",
+  "product_url": "https://www.facebook.com/marketplace/item/1655081135947682/",
+  "image_url": "https://scontent.fakx4-2.fna.fbcdn.net/v/t39.84726-6/8299099…",
+  "scraped_at": "2026-10-06T09:36:02Z",
+  "listing_id": "1655081135947682",
+  "price_text": "$50",
+  "original_price": null,
+  "city": "New York",
+  "state": "NY",
+  "location_text": "New York, NY",
+  "listed_at": "2026-10-02T20:30:44Z",
+  "is_sold": false,
+  "is_pending": false,
+  "status": "AVAILABLE",
+  "category_id": "1658310421102081",
+  "subtitle": null,
+  "delivery_types_json": "[\"IN_PERSON\"]",
+  "description": "Vibrant pink Kugoo kids bicycle has a white front basket and matching training wheels. …",
+  "category_name": "Bicycles",
+  "category_slug": "bicycles",
+  "condition": "Used - like new",
+  "attributes_json": "[{\"name\": \"Condition\", \"value\": \"Used - like new\"}]",
+  "photo_urls_json": "[\"https://scontent.fakx4-2.fna.fbcdn.net/v/t39.84726-6/82990…\"]",
+  "shipping_offered": false,
+  "search_url": "https://www.facebook.com/marketplace/nyc/search/?query=bike",
+  "position": 1
+}
+```
+
+What the columns mean:
+
+| Column | |
+|---|---|
+| `sku` / `listing_id` | `facebook-listing-{id}` / the listing's id. A listing two searches both found is one row |
+| `price`, `price_text`, `original_price` | the asking price as a number (0.0 for a free item), as displayed ("$1,100"), and a struck-out earlier price |
+| `currency` | an ISO code — from an unambiguous symbol in the displayed price (£ → GBP, € → EUR), or from the listing's own page with `--details`. **A bare "$" is left empty**: the search does not say which dollar |
+| `price_source` | `search` or `item_page` |
+| `city`, `state`, `location_text` | the listing's location as Marketplace shows it (city level) |
+| `listed_at` | when it was listed (UTC) |
+| `is_sold`, `is_pending`, `status` | as shown; `status` is the listing page's own status (`AVAILABLE` on every one seen), or `REMOVED` when `--details` found it gone |
+| `category_id`, `subtitle`, `delivery_types_json` | Marketplace's category id; on vehicles the mileage ("73K miles"); IN_PERSON, DOOR_PICKUP, DOOR_DROPOFF, PUBLIC_MEETUP (the values seen) |
+| `description`, `category_name`, `category_slug`, `condition`, `attributes_json`, `photo_urls_json`, `shipping_offered` | with `--details` only. `category_name` is the listing's own Marketplace category ("Household"); the breadcrumb a browser shows comes from another taxonomy ("Home Goods › Table Lamps" for the same lamp, checked 2026-10-06) |
+| `search_url`, `position` | the search the row came from, and its place in it (from 1, across the search's pagination) |
+| `brand` | not shown by Marketplace, always empty |
+
+Media URLs are signed CDN links and stop working after some days.
+
+## How a search is read
+
+1. Open the search (or category) logged out, with `locale=en_US` added
+   to the address so the page is in English whatever the machine's
+   language is.
+2. Read the 24 listings the page embeds.
+3. **Paginate.** A logged-out search embeds 24, and the page asks for more
+   only when it is really scrolled: the tool closes the login dialog,
+   scrolls with the mouse wheel in a 1366×900 window, keeps the request
+   the page sends (`CometMarketplaceSearchContentPaginationQuery`), and
+   sends it again from the page with each next cursor, 3 seconds apart.
+   Measured 2026-10-06: 150 listings of a Chicago search in 35 seconds;
+   25 pages in a row (573 listings) before Facebook answered "Rate limit
+   exceeded" — which 3.5 minutes of waiting did not lift, so the tool
+   stops that search there (`stop_reason: rate_limited`, partial, every
+   row kept) instead of waiting. Three things that do NOT work, found on
+   the way: a programmatic `window.scrollTo` (no request at all), a
+   1280×720 window (no request), and scrolling past the second page
+   without the replay (the page shows a "Log in or sign up" banner).
+4. With `--details`, open each listing's own page, in order, and read its
+   description, currency code, category, condition, location text,
+   photos and shipping. That is one more page load per listing (about 10
+   seconds each at the default pace).
+
+The site's filters in the URL are honoured: `minPrice` / `maxPrice` (a
+$100–$300 search returned 17 listings, all in range, cheapest first),
+`sortBy` and `daysSinceListed`. A search with no results says so ("No
+listings found") and is reported as empty — exit 4, not a failure. The
+bare location page (`/marketplace/nyc/`) has no search in it and is
+refused.
+
+## Sellers
+
+Sellers on Marketplace are private people. A logged-out visitor is
+sometimes sent the seller's name: `marketplace_listing_seller` was
+`null` on 353 of 370 listings captured from a Kazakh address on
+2026-10-05/06, and named a person on every listing of a New York search
+fetched through an EU proxy later the same day. **This tool never writes a seller field**, whether
+the page sends one or not, and the test suite checks that a listing
+carrying one gives a row without a trace of it. Listing descriptions are
+written as the seller published them.
+
+## Captchas
+
+None, so far. No page in the live runs of 2026-10-06 (Playwright,
+Puppeteer and Selenium, direct and through a residential proxy, and the
+Scraper API) carried a captcha widget, iframe or challenge. The generic
+captcha detection stays on, so a real one would be reported as blocked
+rather than read as data.
+
+## Volume and blocks
+
+From one residential IP on 2026-10-05 and 2026-10-06, more than 30
+search and listing pages read normally, 11 of them back to back at the
+default 2-second pace; no page load was refused. The limit that WAS found
+is on pagination: about 25 next-page requests (~600 listings) per search
+from one address, then "Rate limit exceeded" (see
+[How a search is read](#how-a-search-is-read)). If Facebook starts
+refusing an address, the tool reports it as **blocked** (a login page,
+or a page that is not facebook.com's under 401/403/429), never as an
+empty search. Without a proxy pool it stops after 3 blocked answers in a
+row — also during `--details` — and reports the rest as `not_attempted`,
+keeping every row already read. To read more: rotate residential exits
+with `--proxy-file`, and keep `--delay-between-pages` at 2 seconds or
+more.
+
+**A datacentre address is refused.** The route is the same search page
+that reads normally from a residential IP; what differs is the address
+type. Measured 2026-10-15 from a GitHub runner (Azure, westus3) with no
+proxy: both canary searches were sent to the login page (exit 3).
+Measured again 2026-11-05 from a Hetzner server (Helsinki) with no proxy,
+Playwright, `--query bike --location nyc`: login page, exit 3. Listing
+pages (`--details`) were not tried from a datacentre address, since a run
+stops at the refused search first. The weekly canary therefore needs the
+`FACEBOOK_PROXY` repo secret, and is red (not skipped) without it.
+
+The canary's two runs pass `--proxy-budget-mb 25`, above the scraper's own
+10 MB default, which is unchanged. Measured 2026-10-21 through
+`FACEBOOK_PROXY`: the search run used 3.5 MB and the `--details` run
+11.4 MB, so a 10 MB canary stopped a healthy run. The job summary shows each
+run's traffic against the budget recorded in its sidecar
+(`proxy_budget_bytes`), and a run that hits 25 MB still fails the job.
+
+## Proxy traffic: pre-check and media
+
+The pre-check, media blocking and the traffic budget below apply only to a **local** browser going through `--proxy` /
+`--proxy-file` (or `FACEBOOK_PROXY`). Nothing changes with
+`--cdp-endpoint` (the Scraping Browser API brings its own exit and is
+configured on its own side), with `--scraper-api` (no local proxy), or
+with no proxy.
+
+**Pre-check.** Before a browser is started, each engine sends ONE
+`HEAD https://www.facebook.com/robots.txt` through the proxy the first
+page will use. If the proxy gateway answers `407` (credential refused,
+or the traffic balance is exhausted) or `402` (traffic/balance
+exhausted), the run stops there with exit 5. The message names
+`FACEBOOK_PROXY` and never prints its value. `<out>.latest_attempt.meta.json`
+records `status: failed`, `stop_reason: proxy_auth_failed`; the data file
+and `<out>.meta.json` are left exactly as they were. Any other answer (a
+200, a 403 from the site, a timeout, a DNS error) is not a verdict on the
+proxy, and the run goes on as before. Selenium checks the proxy the way
+Chrome uses it there, without the password (its `--proxy-server` cannot
+send one), so a proxy that needs its password stops at the pre-check with
+the advice to allow your IP in the proxy's settings.
+
+**Media.** Behind a local proxy, images, video/audio and web fonts are
+aborted: every field this tool writes, photo URLs included, comes from
+the page's embedded data and its GraphQL answers, never from the files
+themselves, and they are most of a page's bytes. `--load-media` keeps
+them. `<out>.meta.json` records `media_blocked`.
+
+| Engine | How |
+|---|---|
+| Playwright | `context.route` by resource type (`image`, `media`, `font`) |
+| Puppeteer | CDP `Fetch`, by resource type. With a proxy password, the same `Fetch` interception that answers the proxy's login also fails these requests |
+| Selenium | `Network.setBlockedURLs` by file extension (`.jpg`, `.png`, `.webp`, `.mp4`, `.woff2`, …): an image served without an extension still loads |
+
+While a route is installed, Playwright does not use its HTTP cache.
+
+**Budget.** Every byte a local browser sends or receives through the proxy
+is counted, and `--proxy-budget-mb` (default `10`; `0` = unlimited) caps a
+run. Once the running total passes the budget, no further scroll,
+pagination request, search or `--details` page is started, the browser
+aborts any request it still tries, the listings already read are kept,
+and the run ends with `stop_reason: proxy_budget_exceeded`: exit 6 with
+rows, 5 without. It never goes on silently. At the end of a proxied run
+one line is printed, e.g. `Proxy traffic: 3.2 MB of 10 MB budget`, and the
+sidecar records `proxy_bytes`, `proxy_budget_bytes` and
+`proxy_budget_exceeded` (`null` / `null` / `false` when no local proxy was
+used). A proxied run that writes no rows records them in
+`<out>.latest_attempt.meta.json`, leaving the data and `<out>.meta.json`
+as they were.
+
+The count is an estimate of the tunnelled payload — request line, headers
+and body sent, response headers and body as received (compressed) — not
+the proxy's invoice: TLS records, the `CONNECT` exchange, WebSocket frames
+and Chrome's own background requests are not visible to it, so the bill is
+a few per cent higher. 1 MB = 1,000,000 bytes.
+
+| Engine | Counted from |
+|---|---|
+| Playwright | `request.sizes()` of every finished or failed request (request headers + body, response headers + body) |
+| Puppeteer | CDP `Network.loadingFinished.encodedDataLength` of every response that came over the network, plus each request's line, headers and body (`Network.requestWillBeSent`) |
+| Selenium | the same CDP events, from Chrome's performance log |
+
+**Not measured live.** On 2026-10-20, from a datacentre address with no
+proxy, the search was sent to the login page (exit 3) both with media
+and with blocking forced on, so the two could not be compared on real
+results. Pagination starts with a real mouse-wheel scroll of the page
+(see [How a search is read](#how-a-search-is-read)). If a search behind
+a proxy stops at its first 24 listings (`stalled`, pagination
+`no_request`), rerun it with `--load-media` and please report it.
+
+## Scraper API mode
+
+With `--scraper-api` no browser is driven: each search, and each listing
+with `--details`, is one 2Captcha Scraper API call (`TWOCAPTCHA_KEY` in
+`.env`), routed through the Scraping Browser profile in
+`FACEBOOK_CDP_ENDPOINT` when one is set. Everything this tool reads is in
+the page itself, so the rows are the same as a browser engine's.
+**Measured 2026-10-06: on the Scraper API's own pool, Marketplace
+answered with its login page** (reported as blocked, exit 3); routed
+through a Scraping Browser profile, it read the search — 14 listings
+rather than 24, the same as a browser on that profile. Set
+`FACEBOOK_CDP_ENDPOINT` for this mode. There is no live page to paginate
+in this mode: a search gives the listings its page embeds, and the run is
+marked `capped` when more were announced. A refused key, an empty balance or
+an empty answer ends the run with exit 5.
+
+## Run results and exit codes
+
+Every run writes `<out>` and `<out>.meta.json`: status, `stop_reason`,
+per input address what happened and how many rows it gave, how many
+listing pages `--details` read, `not_found_urls`, failed addresses with
+reasons, whether `--max-results` capped the run, solves spent, and a
+hash of the output file. A run that collects nothing writes neither, so
+it never replaces your previous good file. A run stopped by the proxy
+pre-check, or a proxied run that collects nothing, writes only
+`<out>.latest_attempt.meta.json` (see
+[Proxy traffic](#proxy-traffic-pre-check-and-media)).
+
+| Exit | Meaning |
+|---|---|
+| `0` | complete |
+| `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`rate_limited`, `stalled`, `blocked`, `not_painted`, `failed_pages`, `rejected_rows`, `parse_error`, `remote_api_error`, `proxy_pool_exhausted`, `proxy_budget_exceeded`) |
+| `3` | blocked, no rows |
+| `4` | no rows: no listings for the search, or the listing is gone |
+| `5` | nothing could be read (the proxy refused the pre-check with 407/402, the proxy budget ran out before any listing was read, or a fetch, parse or Scraper API failure); no rows |
+| `2` | bad usage, including input where every line was skipped |
+| `1` | crash (a bug; please report it) |
+
+**CSV and safe writes.** In a CSV export, text that a spreadsheet would
+run as a formula (starting with `=`, `+`, `-` or `@`, or with a literal
+leading apostrophe) gets a leading `'`; the sidecar records this
+(`csv_text_encoding: apostrophe-v1`, and `csv_cells_escaped`: how many
+formula-shaped cells were prefixed) and `diff_runs.py` restores the
+original text before comparing. JSON is unchanged, and `diff_runs.py`
+refuses to compare a JSON run with a CSV run. Every output file and
+sidecar is written to a temporary file first and swapped in only once
+complete, so a failed write never leaves a half-written file over the
+previous good one; a file being replaced keeps its permissions.
+
+## Monitoring changes
+
+```bash
+# price drops, listings sold, as JSON
+python3 diff_runs.py monday.json tuesday.json --json
+
+# exit 1 if anything changed (for cron or CI)
+python3 diff_runs.py monday.json tuesday.json --fail-on-change
+```
+
+`diff_runs.py` matches rows by listing id. A different price is a price
+change (and a different currency is reported apart, never as a price
+change); a listing marked sold or pending, re-titled, re-described or
+moved is a field change. A listing missing from the new run has usually
+just left the window a search shows, so it is `left_selection`; it is
+`removed` only when the new run opened its page and found it gone. The
+diff refuses runs of different searches, `--details` or `--max-results`,
+a run that did not complete, and a `.meta.json` that does not match its
+file.
+
+## Options
+
+Same flags for all three engines. Credentials go in `.env`
+(`TWOCAPTCHA_KEY`, `FACEBOOK_PROXY`, `FACEBOOK_CDP_ENDPOINT`), never on
+the command line.
+
+| Option | Default | |
+|---|---|---|
+| `--query` / `--category` | | a keyword search, or a category slug (vehicles, electronics, …) to browse — with `--location` |
+| `--location` | | the Marketplace location slug or id from `facebook.com/marketplace/<location>/`: nyc, la, london, berlin, … |
+| `--min-price` / `--max-price` | | a price range, in the location's currency |
+| `--sort` | best match | `price_ascend`, `price_descend`, `creation_time_descend`, `distance_ascend` |
+| `--days-since-listed` | | 1, 7 or 30 |
+| `--url` / `--urls-file` | | instead of the flags above: a Marketplace search, category or listing URL as copied from a browser, or a file of them |
+| `--details` | off | also open each listing's own page |
+| `--max-results` | 100 | listings to write in total; past the first 24 of a search the tool paginates (3s per 24) |
+| `--delay-between-pages` | 2s | pause between page loads |
+| `--format` / `--out` | json / `facebook_marketplace.<format>` | output format and path |
+| `--proxy` / `--proxy-file` / `--proxy-shuffle` | `FACEBOOK_PROXY` | one proxy or a rotating pool, for a local browser |
+| `--proxy-block-retries` | 3 | blocked answers before that proxy is dropped from the pool |
+| `--load-media` | off | load images, video and fonts behind a local proxy (blocked by default there; see [Proxy traffic](#proxy-traffic-pre-check-and-media)) |
+| `--proxy-budget-mb` | 10 | stop once this many MB went through a local proxy; `0` = unlimited (see [Proxy traffic](#proxy-traffic-pre-check-and-media)) |
+| `--scraper-api` | off | no browser: fetch each page through 2Captcha's Scraper API (needs `TWOCAPTCHA_KEY`) |
+| `--cdp-endpoint` | `FACEBOOK_CDP_ENDPOINT` | connect to a Scraping Browser API profile instead of launching a browser |
+| `--solve-captcha` | when-blocked | `off` disables the Browser API's own captcha auto-solve; there is no local solver |
+| `--max-solves` / `--min-score` | 8 / 0.3 | kept for the local solver, which is disabled; they change nothing today |
+| `--retries` / `--retry-delay` | 2 / 3s | navigation retries per page |
+| `--fingerprint` / `--fp-tags` / `--fp-country` | off | apply a 2Captcha Fingerprint API user agent (local browsers only) |
+| `--dump-html` | off | save each page's HTML next to the output, for debugging |
+| `--allow-empty` | off | write an output file even when nothing was found |
+| `--headless` / `--headful` | headless | show the browser window |
+
+## Engines
+
+- **Playwright** (`playwright_scraper.py`) is the recommended engine.
+- **Puppeteer** (`puppeteer_scraper.py`, via pyppeteer) supports the same
+  modes. pyppeteer itself is no longer maintained, and its own proxy login
+  no longer works on current Chromium, so this engine answers the proxy's
+  password prompt itself (over CDP `Fetch`).
+- **Selenium** (`selenium_scraper.py`) runs a local Chrome only.
+  chromedriver cannot authenticate a Scraping Browser endpoint (the run
+  exits 2 before fetching; use `--scraper-api` instead), and its
+  `--proxy-server` cannot use a proxy password (the credentials are
+  stripped, with a warning; a proxy that needs its password then answers
+  HTTP 407 and the run says so — allow your IP in the proxy's settings
+  instead).
+
+Install one engine per virtualenv (`requirements-playwright.txt`,
+`requirements-puppeteer.txt`, `requirements-selenium.txt`). Their
+dependencies conflict with each other.
+
+All three engines share one fetch loop (`page_flow.py`), so they agree on
+results, exit codes and when money is spent. Docker:
+`docker build -t facebook-marketplace-scraper .` gives an image with
+Playwright and Chromium.
+
+## Known limitations
+
+- **About 600 listings per search from one exit**, then Facebook's rate
+  limit (measured 2026-10-06). Split a search (price ranges, a category)
+  or rotate exits (`--proxy-file`) for more. A browser on the Scraping
+  Browser profile tried got 14 per page instead of 24.
+- **A price sort with `--days-since-listed` comes back empty.** Measured
+  2026-10-06 in New York and London: `price_ascend` or `price_descend`
+  together with `daysSinceListed` answered "No listings found", while each
+  alone, and `creation_time_descend` or `distance_ascend` with the days
+  filter, returned listings. The tool warns before running such a search.
+- **No seller information**, by design (see above).
+- **"$" has no currency code** without `--details`.
+- **Locations are slugs.** Use the one in the address bar when you open
+  Marketplace for a city (`nyc`, `la`, `chicago`, `london`, `berlin` were tested); a
+  numeric location id works too.
+
+## Is this allowed?
+
+Facebook's `robots.txt` disallows crawlers, and Meta's terms forbid
+automated collection without its permission. This tool reads only what
+Marketplace shows any logged-out visitor, does not log in, and never
+collects anything about sellers. Whether your use is permitted depends
+on your jurisdiction and purpose — check before you run it.
+
+## Development
+
+```bash
+python3 smoke_test.py            # offline checks, no network, no engine needed
+python3 .github/ci_checks.py     # credential scan
+python3 -m unittest discover -s tests -p 'test_*.py'  # failure and recovery scenarios
+```
+
+Parser and flow checks run on fixtures cut from real captures in
+`tests/fixtures/`. CI runs the offline suite on Python 3.9 and 3.12,
+installs the built wheel outside the checkout, builds the Docker image
+and launches Chromium in it, and runs each engine in its own virtualenv.
+`TESTING.md` describes live testing; `CHANGELOG.md` has the history.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [MakeMyTrip scraper](https://github.com/2scraper/makemytrip-scraper) — Hotel prices with taxes and fees, ratings, stars…
+- [Skyscanner scraper](https://github.com/2scraper/skyscanner-scraper) — Route and dates in — every itinerary with price, airline…
+- [Spinny scraper](https://github.com/2scraper/spinny-scraper) — Used-car listings and car detail pages
+- [Vrbo scraper](https://github.com/2scraper/vrbo-scraper) — Vacation rental prices, ratings and property details…
+- [Webmotors scraper](https://github.com/2scraper/webmotors-scraper) — Car and motorcycle listings from Brazil's webmotors.com.br…
+- [Zimmo scraper](https://github.com/2scraper/zimmo-scraper) — Zimmo.be sale and rent listings
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Licence
+
+MIT, see `LICENSE`.

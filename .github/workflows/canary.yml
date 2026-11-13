@@ -1,0 +1,111 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"   # weekly, Mondays (every run bills the proxy); avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  # A real run: a keyword search (100 listings: the 24 embedded and the
+  # page's own pagination for the rest) and a second search with
+  # --details for 3 listings, through a residential proxy, with a local
+  # Playwright Chromium. Measured 2026-10-15 (run 38694372411, an Azure
+  # westus3 runner, no proxy): facebook.com sent BOTH searches to its login
+  # page (exit 3). So the live path needs the FACEBOOK_PROXY secret, and
+  # without it this job FAILS naming the secret: a skipped canary is not a
+  # tested site, and must never show green.
+  #
+  # `vars.FACEBOOK_CANARY_LOCATION` / `vars.FACEBOOK_CANARY_QUERY` override
+  # the search (default nyc / bike). Blocked, empty, partial and
+  # remote-error outcomes are red; so is a row count below the floor.
+  canary:
+    runs-on: ubuntu-latest
+    env:
+      HAS_PROXY: ${{ secrets.FACEBOOK_PROXY != '' }}
+      CANARY_LOCATION: ${{ vars.FACEBOOK_CANARY_LOCATION || 'nyc' }}
+      CANARY_QUERY: ${{ vars.FACEBOOK_CANARY_QUERY || 'bike' }}
+      FACEBOOK_PROXY: ${{ secrets.FACEBOOK_PROXY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the FACEBOOK_PROXY secret
+        run: |
+          if [ "$HAS_PROXY" != "true" ]; then
+            echo "::error::The FACEBOOK_PROXY repo secret is not set. facebook.com sends a GitHub runner's datacentre address to its login page (measured 2026-10-15), so the canary cannot test the site without a residential http://login:password@host:port proxy. Add the secret; until then this canary is red on purpose."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright and Chromium
+        run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      # The proxy reaches the scraper through the environment only, never
+      # argv (env_config.py reads FACEBOOK_PROXY).
+      - name: One search, and one with --details
+        run: |
+          set +e
+          python3 playwright_scraper.py --query "$CANARY_QUERY" --location "$CANARY_LOCATION" \
+            --format json --out canary.json --dump-html --proxy-budget-mb 25
+          echo "canary_exit=$?" >> "$GITHUB_ENV"
+          python3 playwright_scraper.py --query "$CANARY_QUERY" --location "$CANARY_LOCATION" \
+            --sort creation_time_descend --details --max-results 3 --format json --out canary_details.json \
+            --proxy-budget-mb 25
+          echo "canary_details_exit=$?" >> "$GITHUB_ENV"
+
+      # What each run sent through FACEBOOK_PROXY and the budget it ran under,
+      # both read from its sidecar; red when it stopped at that budget
+      # (stop_reason proxy_budget_exceeded). The canary passes 25 MB, above
+      # the scraper's 10 MB default: measured 2026-10-21, the search run used
+      # 3.5 MB and the --details run 11.4 MB, over a 10 MB cap.
+      - name: Proxy traffic (search)
+        if: always()
+        run: python3 .github/proxy_traffic_summary.py canary.json "canary"
+
+      - name: Proxy traffic (details)
+        if: always()
+        run: python3 .github/proxy_traffic_summary.py canary_details.json "canary (details)"
+
+      - name: Require complete runs with full rows
+        run: |
+          python3 -c "
+          import json, os, sys, traceback
+          def annotate(kind, exc, tb):
+              traceback.print_exception(kind, exc, tb)
+              print('::error::canary row check failed: %s: %s' % (kind.__name__, str(exc)[:400].replace(chr(10), ' ')))
+          sys.excepthook = annotate
+          for name, code in (('canary', os.environ['canary_exit']), ('canary_details', os.environ['canary_details_exit'])):
+              print(name, 'exit', code)
+              if int(code) != 0:
+                  print('::error::%s exit %s through the FACEBOOK_PROXY secret (1 crash, 3 blocked, 4 zero rows, 5 content never obtained, 6 partial). A proxy that rejects its credential (HTTP 407) reaches Chromium as a navigation timeout, so on exit 5 check the FACEBOOK_PROXY secret first.' % (name, code))
+                  raise SystemExit(f'{name} requires EXIT_OK=0, got {code}')
+              meta = json.load(open(name + '.json.meta.json'))
+              print(json.dumps(meta, indent=2))
+              assert meta['status'] == 'complete', meta
+          rows = json.load(open('canary.json'))
+          assert len(rows) == 100, len(rows)  # past the 24 embedded: pagination works
+          first = json.load(open('canary.json.meta.json'))
+          assert first['pages'][0]['pagination'] == 'limit' and first['pages'][0]['pagination_answers'] >= 3, first['pages']
+          for r in rows:
+              assert r['sku'] == 'facebook-listing-' + r['listing_id'] and r['listing_id'].isdigit(), r
+              assert r['title'] and r['price'] is not None and r['city'] and r['listed_at'] and r['image_url'], r
+              assert not any('seller' in k for k in r), r
+          details = json.load(open('canary_details.json'))
+          assert len(details) == 3, len(details)
+          for r in details:
+              assert r['price_source'] == 'item_page' and r['currency'] and r['condition'] is not None, r
+          print('canary: OK')
+          "
+
+      - name: Upload artifacts on every run that reached the site
+        if: always() && env.HAS_PROXY == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ github.run_id }}
+          path: |
+            canary*.json
+            canary_debug_*.html
+          retention-days: 14
