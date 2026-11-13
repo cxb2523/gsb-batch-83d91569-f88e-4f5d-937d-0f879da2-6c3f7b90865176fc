@@ -1,0 +1,268 @@
+# Real runs against snapchat.com. tests.yml (deliberately) never touches the
+# site, a credential or a paid product; everything that does is here.
+#
+# WHY THIS CANARY IS NOT GATED ON A SECRET
+# ----------------------------------------
+# A canary that cannot pass must SKIP rather than fail,
+# because a check that is always red teaches everyone to ignore checks. The
+# other half of that rule: a canary that CAN pass without a
+# credential should never be gated on one.
+#
+# This repo is that case. Its central README claim is that a Snapchat
+# profile page answers a bare datacentre address with no key, no proxy and
+# no account — measured 2026-09-24, served to plain curl and to a browser
+# alike. A GitHub runner is a bare datacentre address in a different
+# network. So this job runs a real scrape every Monday and is EXPECTED to
+# be green, and if Snapchat ever puts the page behind a challenge the badge
+# goes red on the next weekly run and the claim is retested without anyone having to
+# remember to.
+#
+# The browser transport is exercised too (local Chromium, free), so the
+# fallback a challenge would trigger is not left untested.
+#
+# The paid path needs TWOCAPTCHA_KEY. Without it that job FAILS with an
+# ::error:: naming the secret: a job that skips green reads as a tested
+# path when nothing was tested.
+name: canary
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profiles:
+    name: real scrapes in two modes, with no credentials at all
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      # FOUR accounts rather than one, and each is here for an outcome a
+      # single account could not test:
+      #
+      #   @nasa             a public Organization, with JSON-LD
+      #   @mrbeast          a public Person with million-scale Spotlight views
+      #   @espn             an ORDINARY account — a username and nothing else,
+      #                     which must still be a row and not a failure
+      #   @nosuchacct99xyz  no account at all, so the run exercises the
+      #                     "Snapchat answered, and the answer was nothing"
+      #                     branch rather than only the happy one
+      #
+      # A canary should exercise pagination; a profile is one
+      # page, so the equivalent is more than one ACCOUNT and more than one
+      # outcome — and a second MODE, because the Spotlight columns come from
+      # a different part of the payload.
+      - name: Scrape four profiles
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py \
+            --url "nasa,mrbeast,espn,nosuchacct99xyz" \
+            --format both --out canary_profiles --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape Spotlight for two creators
+        id: spot
+        run: |
+          set +e
+          python playwright_scraper.py --url "nasa,mrbeast" --mode spotlight \
+            --format both --out canary_spotlight
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Install Chromium for the browser transport
+        run: python -m playwright install --with-deps chromium
+
+      # The default run never starts a browser, so without this step the
+      # fallback transport would have no live coverage at all.
+      - name: Scrape one profile through a local browser
+        id: browser
+        run: |
+          set +e
+          python playwright_scraper.py --url nasa --transport browser \
+            --format json --out canary_browser
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert what the runs actually produced
+        run: |
+          python - <<'PY'
+          import json, sys
+
+          fail = []
+
+          # Exit 5 is a DEFECT here, not an access condition: nothing in
+          # these runs uses a credential that can expire.
+          rc = int("${{ steps.run.outputs.exit_code }}")
+          meta = json.load(open("canary_profiles.meta.json"))
+          rows = json.load(open("canary_profiles.json"))
+          if rc != 0:
+              fail.append(f"profiles: exit {rc}")
+          if meta["status"] != "complete":
+              fail.append(f"profiles: status {meta['status']!r}")
+          if len(rows) != 3:
+              fail.append(f"profiles: {len(rows)} rows, expected 3")
+          if meta.get("handles_unavailable") != ["nosuchacct99xyz"]:
+              fail.append(f"handles_unavailable = "
+                          f"{meta.get('handles_unavailable')!r}, expected "
+                          f"exactly the one username with no account")
+          by = {r["username"]: r for r in rows}
+
+          # Floors, never equalities, and ORDERS OF MAGNITUDE below what was
+          # measured on 2026-09-24 (757,800 / 1,466,200): a floor taken
+          # from one run at one hour is how a sibling ended up with a canary
+          # that was red every morning.
+          for name, floor in (("nasa", 200_000), ("mrbeast", 300_000)):
+              r = by.get(name)
+              if r is None:
+                  fail.append(f"@{name} missing")
+                  continue
+              if r.get("public_profile") is not True:
+                  fail.append(f"@{name}: public_profile {r.get('public_profile')!r}")
+              subs = r.get("subscriber_count")
+              if not isinstance(subs, int) or subs < floor:
+                  fail.append(f"@{name}: subscriber_count {subs!r} below "
+                              f"the {floor:,} floor")
+              if len(r.get("sku") or "") != 36:
+                  fail.append(f"@{name}: sku {r.get('sku')!r} is not a UUID")
+          # Snapchat's page state is not a published contract. A served page
+          # that has lost a key the parser reads gives silent nulls, so the
+          # parser names such keys and this fails on them by name.
+          for label, m in (("profiles", meta),):
+              if m.get("payload_keys_missing"):
+                  fail.append(f"{label}: Snapchat moved key(s) the parser "
+                              f"reads: {m['payload_keys_missing']}")
+          # The default transport is plain HTTP; a browser here means the
+          # site refused it, which is the README's central claim failing.
+          if meta.get("transport") != "http":
+              fail.append(f"transport {meta.get('transport')!r}: the default "
+                          f"run did not stay on plain HTTP")
+          espn = by.get("espn")
+          if espn is None or espn.get("public_profile") is not False:
+              fail.append(f"@espn: expected an ordinary account row, got "
+                          f"{espn!r}")
+
+          rc = int("${{ steps.spot.outputs.exit_code }}")
+          smeta = json.load(open("canary_spotlight.meta.json"))
+          spot = json.load(open("canary_spotlight.json"))
+          if rc != 0:
+              fail.append(f"spotlight: exit {rc}")
+          if smeta["status"] != "complete":
+              fail.append(f"spotlight: status {smeta['status']!r}")
+          # 11 on 2026-09-24; the floor is about "the Spotlight part of the
+          # payload is still being read", not about today's number.
+          if len(spot) < 4:
+              fail.append(f"spotlight: {len(spot)} rows, expected at least 4")
+          bad = [r["sku"] for r in spot
+                 if not isinstance(r.get("view_count"), int) or r["view_count"] <= 0]
+          if bad:
+              fail.append(f"spotlight: {len(bad)} row(s) without a positive "
+                          f"view_count — an empty slot read as a video?")
+          if smeta.get("payload_keys_missing"):
+              fail.append(f"spotlight: Snapchat moved key(s) the parser "
+                          f"reads: {smeta['payload_keys_missing']}")
+          pairs = [(r["page"], r["position"]) for r in spot]
+          if len(set(pairs)) != len(pairs):
+              fail.append("spotlight: page+position is not unique")
+
+          rc = int("${{ steps.browser.outputs.exit_code }}")
+          bmeta = json.load(open("canary_browser.meta.json"))
+          brows = json.load(open("canary_browser.json"))
+          if rc != 0:
+              fail.append(f"browser: exit {rc}")
+          if bmeta.get("transport") != "browser":
+              fail.append(f"browser: transport {bmeta.get('transport')!r}")
+          if len(brows) != 1:
+              fail.append(f"browser: {len(brows)} rows, expected 1")
+          elif not isinstance(brows[0].get("subscriber_count"), int) \
+                  or brows[0]["subscriber_count"] < 200_000:
+              fail.append(f"browser: @nasa subscriber_count "
+                          f"{brows[0].get('subscriber_count')!r} below the floor")
+
+          if fail:
+              print("::error::canary FAILED")
+              for line in fail:
+                  print(f"  - {line}")
+              sys.exit(1)
+          print(f"canary OK: {len(rows)} profiles (1 correctly not found), "
+                f"{len(spot)} Spotlight rows, 1 profile through a browser, "
+                f"all runs complete")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary
+          path: |
+            canary_profiles.*
+            canary_spotlight.*
+            canary_profiles_profile_*.json
+            canary_browser.*
+          retention-days: 7
+
+  scraper-api:
+    name: the paid path (fails without TWOCAPTCHA_KEY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # `secrets` is not available in a job-level `if`, so presence is
+      # tested through job env and read in each step's `if`.
+      HAS_KEY: ${{ secrets.TWOCAPTCHA_KEY != '' }}
+    steps:
+      - name: Require the secret this job tests
+        if: env.HAS_KEY != 'true'
+        run: |
+          echo "::error::TWOCAPTCHA_KEY is not set as a repository secret,"\
+               "so the Scraper API path was NOT tested. Add it with"\
+               "gh secret set TWOCAPTCHA_KEY --repo 2scraper/snapchat-scraper"
+          exit 1
+
+      - uses: actions/checkout@v4
+        if: env.HAS_KEY == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAS_KEY == 'true'
+        with:
+          python-version: "3.13"
+
+      - name: Install the core
+        if: env.HAS_KEY == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch one profile through the Scraper API
+        if: env.HAS_KEY == 'true'
+        env:
+          # Through the ENVIRONMENT, never a --flag: a secret in argv is
+          # readable by anything that can run `ps`.
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python scraper_api_client.py --url nasa --mode spotlight \
+            --format json --out canary_api
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Scraper API run exited $rc"; exit 1
+          fi
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary_api.json"))
+          bad = [r for r in rows if not isinstance(r.get("view_count"), int)]
+          if not rows or bad:
+              print(f"::error::Scraper API: {len(rows)} rows, "
+                    f"{len(bad)} without a view_count")
+              sys.exit(1)
+          print(f"Scraper API OK: {len(rows)} Spotlight rows")
+          PY
