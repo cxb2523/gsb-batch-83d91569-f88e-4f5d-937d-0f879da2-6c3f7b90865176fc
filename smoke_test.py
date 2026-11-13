@@ -268,7 +268,7 @@ def _finish(outcomes, requested, allow_empty=False, prefix=None):
     with redirect_stdout(io.StringIO()):
         rc = finish_run(outcomes, out, "both", allow_empty, mode="cadastral",
                         engine="test", queries_requested=requested)
-    meta = (json.load(open(out + ".meta.json")) if os.path.exists(out + ".meta.json") else None)
+    meta = (json.load(open(out + ".meta.json", encoding="utf-8")) if os.path.exists(out + ".meta.json") else None)
     return rc, meta, out
 
 
@@ -517,7 +517,7 @@ def run_fake(argv, site, solver, key="k" * 32):
         lookup_flow.Solver = orig
     meta_path = args.out + ".meta.json"
     _last_meta_path[0] = meta_path
-    return rc, (json.load(open(meta_path)) if os.path.exists(meta_path) else None)
+    return rc, (json.load(open(meta_path, encoding="utf-8")) if os.path.exists(meta_path) else None)
 
 
 def check_flow_on_measured_behaviour():
@@ -585,7 +585,14 @@ def check_flow_on_measured_behaviour():
     rc, m = run_fake(["--mode", "address", "--address", "Москва, ул. Тверская, д. 13"], site, sol)
     eq("address: 100 lines, no captcha, same-origin fetch",
        (rc, m["records"], sol.calls), (0, 100, 0))
-    eq("...and flagged as hitting the site's cap", m["address_capped"], [1])
+    eq("...and flagged as hitting the site's cap, with the address and the call",
+       m["address_capped"],
+       [{"index": 1, "address": "Москва, ул. Тверская, д. 13", "call": 1, "lines": 100}])
+    eq("...and the per-call record answers 'did it touch the cap?' explicitly",
+       m["address_checks"],
+       [{"index": 1, "address": "Москва, ул. Тверская, д. 13", "call": 1,
+         "lines": 100, "capped": True}])
+    eq("...and one consistent call earns no instability entry", m["address_unstable"], [])
 
     site, sol = FakeSite(), FakeSolver()
     rc, m = run_fake(["--mode", "address", "--address", "Москва, ул. Тверская, д. 13",
@@ -618,7 +625,7 @@ def check_flow_on_measured_behaviour():
     rc, m = run_fake(["--mode", "address", "--address", "A", "--details", "--max-objects", "5"], site, sol)
     eq("an address whose lines ALL became full records is not 'not found'",
        (rc, m["queries_not_found"], m["records"]), (0, [], 2))
-    rows = json.load(open(re.sub(r"\.meta\.json$", ".json", _last_meta_path[0])))
+    rows = json.load(open(re.sub(r"\.meta\.json$", ".json", _last_meta_path[0]), encoding="utf-8"))
     eq("...and the full records sit in the list's own order",
        [(r["sku"], r["detail_level"]) for r in rows],
        [(KN, "full"), ("77:01:0001044:2981", "full")])
@@ -670,6 +677,81 @@ def check_flow_on_measured_behaviour():
     rc, m = run_fake(["--cad-number", KN, "--cad-number", "77:01:0001044:2"], site, sol)
     eq("a driver error fails its query, not the run (5, no traceback)", rc, EXIT_FETCH_FAILED)
     eq("...and buys nothing", sol.calls, 0)
+
+
+def check_address_cap_and_stability():
+    """The sidecar answers, per address search: did this call touch the
+    100-line cap, and did repeated asks of one address serve the same set."""
+    print("\n[the address search's cap and instability, in the sidecar]")
+
+    def list_body(cadnums):
+        return json.dumps([{"cadnum": c, "full_name": "a", "actual": True, "type": "FLAT"}
+                           for c in cadnums])
+
+    class ScriptedLists(FakeSite):
+        """The address search answers with the next scripted body each call."""
+        def __init__(self, bodies):
+            super().__init__()
+            self.bodies = list(bodies)
+
+        def fetch_text(self, url):
+            if "/address/search" in url:
+                body = self.bodies.pop(0) if len(self.bodies) > 1 else self.bodies[0]
+                return 200, body
+            return super().fetch_text(url)
+
+    # 1. Exactly 100 lines: the cap is touched, and the sidecar says which
+    #    address and which call.
+    capped = list_body(f"77:01:0001044:{n}" for n in range(100))
+    site = ScriptedLists([capped])
+    rc, m = run_fake(["--mode", "address", "--address", "Москва, ул. Тверская, д. 13"],
+                     site, FakeSolver())
+    eq("exactly 100 lines: the call is recorded as capped",
+       (rc, m["address_checks"]),
+       (0, [{"index": 1, "address": "Москва, ул. Тверская, д. 13", "call": 1,
+             "lines": 100, "capped": True}]))
+    eq("...and address_capped names the address and the call",
+       m["address_capped"],
+       [{"index": 1, "address": "Москва, ул. Тверская, д. 13", "call": 1, "lines": 100}])
+    eq("...and a single call cannot be unstable", m["address_unstable"], [])
+    notes = diff_runs.caveats(re.sub(r"\.meta\.json$", ".json", _last_meta_path[0]),
+                              "no-such-file.json")
+    check("diff_runs reads the new address_capped entries into its caveat",
+          len(notes) == 1 and "Москва, ул. Тверская, д. 13" in notes[0]
+          and "call 1" in notes[0])
+
+    # 2. One address asked twice, two different sets served: the sidecar
+    #    lists the missing and added identifiers between the calls.
+    first = list_body(["77:01:0001044:1", "77:01:0001044:2", "77:01:0001044:3"])
+    second = list_body(["77:01:0001044:1", "77:01:0001044:3", "77:01:0001044:4"])
+    site = ScriptedLists([first, second])
+    rc, m = run_fake(["--mode", "address", "--address", "A", "--address", "A"],
+                     site, FakeSolver())
+    eq("two asks, two sets: both calls recorded, neither capped",
+       (rc, m["address_checks"], m["address_capped"]),
+       (0, [{"index": 1, "address": "A", "call": 1, "lines": 3, "capped": False},
+            {"index": 2, "address": "A", "call": 2, "lines": 3, "capped": False}], []))
+    eq("...and the instability entry names the missing and added identifiers",
+       m["address_unstable"],
+       [{"address": "A",
+         "calls": [{"index": 1, "call": 1, "lines": 3},
+                   {"index": 2, "call": 2, "lines": 3}],
+         "differences": [{"from_call": 1, "to_call": 2,
+                          "missing": ["77:01:0001044:2"],
+                          "added": ["77:01:0001044:4"]}]}])
+
+    # 3. One address asked twice, the same few lines both times: no warning
+    #    entry of either kind — only the per-call records.
+    stable = list_body(["77:01:0001044:1", "77:01:0001044:2"])
+    site = ScriptedLists([stable, stable])
+    rc, m = run_fake(["--mode", "address", "--address", "A", "--address", "A"],
+                     site, FakeSolver())
+    eq("two asks, one set, under the cap: no capped and no unstable entries",
+       (rc, m["address_capped"], m["address_unstable"]), (0, [], []))
+    eq("...and the per-call records still answer 'did it touch the cap?'",
+       m["address_checks"],
+       [{"index": 1, "address": "A", "call": 1, "lines": 2, "capped": False},
+        {"index": 2, "address": "A", "call": 2, "lines": 2, "capped": False}])
 
 
 def check_budget_has_one_gate():
@@ -782,7 +864,7 @@ def check_rotation_survives_a_failed_launch():
             rc = cli.run(args, factory, "test")
     finally:
         lookup_flow.Solver = orig
-    meta = json.load(open(args.out + ".meta.json"))
+    meta = json.load(open(args.out + ".meta.json", encoding="utf-8"))
     eq("a launch that fails on the next exit fails ITS query, not the run",
        (rc, meta["records"], [f["reason"] for f in meta["queries_failed"]]),
        (EXIT_PARTIAL, 1, ["browser_start_failed"]))
@@ -881,7 +963,7 @@ def check_audit_2026_09_29():
     o2 = QueryOutcome(index=2, query="B", answered=True,
                       records=[Record(sku="1:1:1:1", detail_level="full", price=123.0)])
     _, _, out = _finish([o1, o2], 2)
-    rows = json.load(open(out + ".json"))
+    rows = json.load(open(out + ".json", encoding="utf-8"))
     eq("list(A) then full(B) of one object keeps the FULL record, where A put it",
        [(r["sku"], r["detail_level"], r["price"]) for r in rows],
        [("1:1:1:1", "full", 123.0), ("1:1:1:2", "list", None)])
@@ -1574,7 +1656,7 @@ def main(argv=None) -> int:
               check_page_recognition, check_exit_codes, check_csv_safety, check_output_file_modes,
               check_no_private_citations,
               check_flow_on_measured_behaviour, check_audit_2026_09_29, check_exit_advice,
-              check_budget_has_one_gate,
+              check_address_cap_and_stability, check_budget_has_one_gate,
               check_cli_contract, check_rotation_survives_a_failed_launch,
               check_engine_without_cdp, check_engines_share_one_cli, check_env_contract,
               check_credentials_never_leak, check_cdp_connect_policy,

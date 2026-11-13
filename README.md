@@ -175,7 +175,11 @@ from 2Captcha's own reported `cost`), `captcha_rejected` and `autosolved`:
 the bill, measured. It also records the run's `query_spec` (mode, filters,
 `--details` reach), which `diff_runs.py` requires to match, and
 `malformed_rows` — elements of the site's answers that were not records and
-were left out rather than silently dropped.
+were left out rather than silently dropped. For `--mode address` it also
+records, per address search, whether the 100-line cap was touched
+(`address_checks`, `address_capped`) and whether repeated asks of one
+address served the same object set (`address_unstable`) — see
+[Traps that look like bugs](#traps-that-look-like-bugs).
 
 `--mode scan` reports a captcha as `solved` only when the page, read again
 after the token went in (or after auto-solve said it finished), no longer
@@ -230,8 +234,13 @@ A run that obtains nothing never overwrites a previous good output.
 
 - **The address search returns at most 100 lines — and not always the same
   100.** Two calls 25 s apart returned 100 each with only 94 in common, in a
-  different order. Such queries are listed in `address_capped`. Narrow the
-  address (house, building, room); nothing else helps.
+  different order. The sidecar makes both checkable: `address_checks` records
+  every address search of the run (which address, which call, how many lines,
+  whether it touched the cap), `address_capped` lists the calls that hit the
+  cap (address and call number), and `address_unstable` lists addresses asked
+  more than once whose served object sets differed, with the cadastral
+  numbers missing and added between consecutive calls. Narrow the address
+  (house, building, room); nothing else helps.
 - **The address search ignores the object kind.** `objType=PARCEL`, `OKS`,
   `FLAT` and the object-type codes all returned the same 100 mixed lines, so
   `--list-kind` filters on this side, after the site chose its 100.

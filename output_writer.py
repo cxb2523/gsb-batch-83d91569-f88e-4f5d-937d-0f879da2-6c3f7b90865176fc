@@ -299,6 +299,7 @@ def run_meta(*, status: str, stop_reason: str, mode: str, engine: str,
              queries_requested: int, duplicates_dropped: int,
              files: Optional[Dict[str, dict]] = None,
              address_results: Optional[int] = None,
+             address_report: Optional[dict] = None,
              spec: Optional[dict] = None,
              csv_cells_escaped: int = 0) -> dict:
     """The sidecar for a finished run.
@@ -315,6 +316,13 @@ def run_meta(*, status: str, stop_reason: str, mode: str, engine: str,
     `captcha_solves` / `captcha_rejected` / `autosolved` are the bill and its
     quality, measured rather than estimated: one paid image solve per full
     record, plus one for every answer the site refused.
+
+    `address_report` is lookup_flow.AddressTracker.sidecar(): per-call
+    `address_checks` (did this call touch the 100-line cap), `address_capped`
+    (which address, which call), and `address_unstable` (repeated asks of one
+    address whose served object sets differed, with the missing/added
+    identifiers). Without it (a cadastral run), the three keys are empty and
+    `address_capped` falls back to the outcome flags.
     """
     failed = [{"index": o.index, "query": o.query, "reason": o.reason,
                # A full record the run planned itself (--details), not a
@@ -322,6 +330,7 @@ def run_meta(*, status: str, stop_reason: str, mode: str, engine: str,
                "derived": o.derived}
               for o in outcomes if not o.answered]
     asked = [o.query for o in outcomes if not o.derived]
+    report = address_report or {}
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": str(uuid.uuid4()),
@@ -351,10 +360,21 @@ def run_meta(*, status: str, stop_reason: str, mode: str, engine: str,
         "records": records,
         "duplicates_dropped": duplicates_dropped,
         "address_results": address_results,
+        # Every answered address search of the run: {"index", "address",
+        # "call", "lines", "capped"} — so "did this query touch the 100-line
+        # cap?" is answered per call, not inferred from a warning's absence.
+        "address_checks": report.get("address_checks", []),
         # Address queries whose answer hit the site's 100-line cap: those
         # lines are a sample that differs between calls, not every object
-        # at the address.
-        "address_capped": [o.index for o in outcomes if o.capped],
+        # at the address. Each entry names the address and which call of it
+        # hit the cap: {"index", "address", "call", "lines"}.
+        "address_capped": report.get(
+            "address_capped", [o.index for o in outcomes if o.capped]),
+        # Addresses asked more than once in this run whose served object
+        # sets differed between calls: {"address", "calls", "differences"},
+        # each difference listing the identifiers missing and added between
+        # two consecutive calls. Absent entry == consistent (or asked once).
+        "address_unstable": report.get("address_unstable", []),
         "captcha_solves": sum(o.captcha_solves for o in outcomes),
         # Summed from getTaskResult's own `cost` field for solved tasks — the
         # figure 2Captcha states, not an estimate made here.
@@ -405,6 +425,7 @@ def finish_run(outcomes: List[QueryOutcome], out_prefix: str, fmt: str,
                allow_empty: bool, *, mode: str, engine: str,
                queries_requested: int, stop_reason: str = "completed",
                address_results: Optional[int] = None,
+               address_report: Optional[dict] = None,
                spec: Optional[dict] = None) -> int:
     """Merge, write output + sidecar, return the exit code.
 
@@ -456,7 +477,8 @@ def finish_run(outcomes: List[QueryOutcome], out_prefix: str, fmt: str,
         write_run_meta(out_prefix, run_meta(
             status=status, stop_reason=stop_reason, mode=mode, engine=engine,
             outcomes=outcomes, records=len(merged), queries_requested=queries_requested,
-            duplicates_dropped=duplicates, address_results=address_results, spec=spec,
+            duplicates_dropped=duplicates, address_results=address_results,
+            address_report=address_report, spec=spec,
             csv_cells_escaped=stats.get("csv_cells_escaped", 0),
             files={ext: file_digest(f"{out_prefix}.{ext}")
                    for ext in ("json", "csv") if fmt in (ext, "both")}))

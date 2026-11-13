@@ -487,7 +487,77 @@ def _fetch(session, url):
         return None, None
 
 
-def run_address(session, args, index: int, address: str) -> Tuple[QueryOutcome, Optional[int]]:
+@dataclass
+class AddressCall:
+    """One answered address search, as the site served it."""
+    index: int                          # the query's input position (1-based)
+    address: str
+    call: int                           # the nth time THIS address was asked this run
+    lines: int                          # lines served (before any --list-kind filter)
+    capped: bool                        # the site returned its maximum: a sample
+    ids: List[str] = field(default_factory=list)   # object identifiers served
+
+
+class AddressTracker:
+    """Every answered address search of a run, so the cap and the instability
+    are checkable from the sidecar.
+
+    The site serves at most ADDRESS_CAP lines per address search, and two
+    calls for one address do not serve the same hundred (measured: 94 of 100
+    in common). One boolean cannot say that checkably, so every answered call
+    is recorded here — whether it touched the cap, and which object
+    identifiers it served — and sidecar() turns that into the three keys the
+    run's .meta.json carries:
+
+      address_checks    every call: did it touch the 100-line cap, yes or no
+      address_capped    the calls that did (which address, which call)
+      address_unstable  addresses asked more than once whose served sets
+                        differed, with the missing/added identifiers per pair
+                        of consecutive calls
+
+    An address that never touched the cap and served the same set every time
+    appears in address_checks alone — it earns no warning entry.
+    """
+
+    def __init__(self):
+        self.calls: List[AddressCall] = []
+
+    def record(self, index: int, address: str, records: List[Record]) -> None:
+        n = sum(1 for c in self.calls if c.address == address)
+        self.calls.append(AddressCall(
+            index=index, address=address, call=n + 1, lines=len(records),
+            capped=len(records) >= ra.ADDRESS_CAP,
+            ids=[r.sku for r in records if r.sku]))
+
+    def sidecar(self) -> dict:
+        checks = [{"index": c.index, "address": c.address, "call": c.call,
+                   "lines": c.lines, "capped": c.capped} for c in self.calls]
+        capped = [{"index": c.index, "address": c.address, "call": c.call,
+                   "lines": c.lines} for c in self.calls if c.capped]
+        by_address: dict = {}
+        for c in self.calls:
+            by_address.setdefault(c.address, []).append(c)
+        unstable = []
+        for address, calls in by_address.items():
+            differences = []
+            for prev, cur in zip(calls, calls[1:]):
+                before, after = set(prev.ids), set(cur.ids)
+                if before != after:
+                    differences.append({"from_call": prev.call, "to_call": cur.call,
+                                        "missing": sorted(before - after),
+                                        "added": sorted(after - before)})
+            if differences:
+                unstable.append({"address": address,
+                                 "calls": [{"index": c.index, "call": c.call,
+                                            "lines": c.lines} for c in calls],
+                                 "differences": differences})
+        return {"address_checks": checks, "address_capped": capped,
+                "address_unstable": unstable}
+
+
+def run_address(session, args, index: int, address: str,
+                tracker: Optional[AddressTracker] = None
+                ) -> Tuple[QueryOutcome, Optional[int]]:
     """The free address search: one GET, no captcha. (outcome, n_results)."""
     outcome = QueryOutcome(index=index, query=address)
     url = ra.address_search_url(address)
@@ -515,6 +585,11 @@ def run_address(session, args, index: int, address: str) -> Tuple[QueryOutcome, 
             outcome.answered, outcome.reason = True, None
             served = len(outcome.records)
             outcome.found = served
+            if tracker is not None:
+                # The site's own answer, before the client-side --list-kind
+                # filter: the cap and the instability are the site's, so they
+                # are measured on what it served.
+                tracker.record(index, address, outcome.records)
             if served >= ra.ADDRESS_CAP:
                 outcome.capped = True
                 logger.warning("The address search returned its maximum of %d lines "

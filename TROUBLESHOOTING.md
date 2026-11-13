@@ -99,10 +99,14 @@ sidecar's `queries_not_found`.
 
 That is the site's cap, and the 100 are a SAMPLE that changes between calls:
 two calls 25 s apart returned 100 lines each with only 94 in common, in a
-different order. The sidecar lists such queries in `address_capped`. Narrow
-the address itself (house, building, room number): the site offers no other
-filter. It ignores every `objType` value it is sent (measured: the same 100
-mixed lines for `PARCEL`, `OKS`, `FLAT` and the object-type codes), so
+different order. The sidecar records every address search in `address_checks`
+(which address, which call, how many lines, `capped` true/false), lists the
+calls that hit the cap in `address_capped`, and — when one address was asked
+more than once in a run and the served sets differed — lists the cadastral
+numbers missing and added between consecutive calls in `address_unstable`.
+Narrow the address itself (house, building, room number): the site offers no
+other filter. It ignores every `objType` value it is sent (measured: the same
+100 mixed lines for `PARCEL`, `OKS`, `FLAT` and the object-type codes), so
 `--list-kind` filters on this side, after the site has chosen its 100.
 
 ## "Budget exhausted"

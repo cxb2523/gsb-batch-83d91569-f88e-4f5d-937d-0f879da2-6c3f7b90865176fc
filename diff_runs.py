@@ -159,9 +159,16 @@ def caveats(old_path: str, new_path: str) -> List[str]:
     out = []
     for label, path in (("--old", old_path), ("--new", new_path)):
         meta = _meta(path) or {}
-        if meta.get("address_capped"):
-            out.append(f"{label} ({path}): address queries {meta['address_capped']} hit "
-                       f"the site's 100-line cap — a sample that changes between calls")
+        capped = meta.get("address_capped") or []
+        if capped:
+            # New sidecars name the address and the call; older ones listed
+            # bare query indices. Both read as the same caveat.
+            desc = "; ".join(
+                f"{c['address']!r} (query {c['index']}, call {c['call']})"
+                if isinstance(c, dict) else f"query {c}" for c in capped)
+            out.append(f"{label} ({path}): the address search hit the site's "
+                       f"100-line cap for {desc} — a sample that changes "
+                       f"between calls")
     return out
 
 

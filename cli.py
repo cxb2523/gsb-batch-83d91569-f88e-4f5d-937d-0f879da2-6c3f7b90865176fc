@@ -417,6 +417,10 @@ def _run_address(args, session, solver, budget, engine, interrupt) -> int:
     total, index, planned = 0, 1, 0
     stop_reason = "completed"
     visited = 0
+    # Every answered address search is recorded, so the sidecar can say per
+    # call whether the 100-line cap was touched, and whether repeated asks of
+    # one address served the same object set.
+    tracker = lookup_flow.AddressTracker()
     for address in args.address:
         if interrupt.hit:
             stop_reason = "interrupted"
@@ -425,7 +429,7 @@ def _run_address(args, session, solver, budget, engine, interrupt) -> int:
             # --delay between addresses too, not only between numbers (audit #7).
             session.wait(args.delay)
         visited += 1
-        o, n = lookup_flow.run_address(session, args, index, address)
+        o, n = lookup_flow.run_address(session, args, index, address, tracker)
         outcomes.append(o)
         index += 1
         total += n or 0
@@ -464,7 +468,7 @@ def _run_address(args, session, solver, budget, engine, interrupt) -> int:
                          mode="address" + ("+details" if args.details else ""),
                          engine=engine, queries_requested=requested,
                          stop_reason=stop_reason, address_results=total,
-                         spec=query_spec(args))
+                         address_report=tracker.sidecar(), spec=query_spec(args))
 
 
 def _put_full_records_in_place(address_outcome, detail_outcomes) -> None:
