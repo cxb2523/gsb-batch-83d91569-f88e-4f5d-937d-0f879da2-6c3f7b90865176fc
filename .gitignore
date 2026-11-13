@@ -1,0 +1,52 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.log
+
+# Coverage
+coverage/
+
+# Internal Docs
+test_artifacts/
+
+# Agent Files
+agents.md
+*CLAUDE.md
+.claude/
+.mcp.json
+.nodeterm/
+
+# MCP Registry tokens
+.mcpregistry_*
+.vercel
+docs-internal/internal
+
+# Local operator config for HTTP/remote mode (holds publicOrigin etc; token via env, never here)
+charlotte.config.json
+charlotte.config.local.json
+
+# Throwaway spike/experiment scripts written to the repo root during design work
+/scratchpad/
+
+# Playwright MCP snapshot spill (benchmark byproduct)
+.playwright-mcp/
+
+# Drift benchmark version cache (npm installs + git worktree builds per release)
+benchmarks/.drift-cache/

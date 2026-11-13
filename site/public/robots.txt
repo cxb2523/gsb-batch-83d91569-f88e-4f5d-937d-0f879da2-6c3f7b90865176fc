@@ -1,0 +1,6 @@
+User-Agent: *
+Allow: /
+
+Sitemap: https://charlotte-rose.vercel.app/sitemap.xml
+Agents: https://charlotte-rose.vercel.app/.well-known/agents.json
+LLMs: https://charlotte-rose.vercel.app/llms.txt

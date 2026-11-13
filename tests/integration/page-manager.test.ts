@@ -1,0 +1,312 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import type { Page, Browser } from "puppeteer";
+import { BrowserManager } from "../../src/browser/browser-manager.js";
+import { resolveTestNoSandbox } from "../helpers/sandbox-env.js";
+import { PageManager } from "../../src/browser/page-manager.js";
+import { createDefaultConfig } from "../../src/types/config.js";
+
+describe("PageManager", () => {
+  let browserManager: BrowserManager;
+
+  beforeAll(async () => {
+    // This test launches a real Chromium. The sandbox is ON by default
+    // (issue #184), so opt out here to keep it portable across CI/dev hosts
+    // where the kernel sandbox is unavailable.
+    browserManager = new BrowserManager(undefined, { noSandbox: resolveTestNoSandbox() });
+    await browserManager.launch();
+  });
+
+  afterAll(async () => {
+    await browserManager.close();
+  });
+
+  describe("tab lifecycle", () => {
+    let pageManager: PageManager;
+
+    beforeEach(() => {
+      pageManager = new PageManager();
+    });
+
+    it("starts with no pages", () => {
+      expect(pageManager.hasPages()).toBe(false);
+    });
+
+    it("opens a tab and sets it as active", async () => {
+      const tabId = await pageManager.openTab(browserManager);
+
+      expect(tabId).toMatch(/^tab-\d+$/);
+      expect(pageManager.hasPages()).toBe(true);
+      expect(pageManager.getActiveTabId()).toBe(tabId);
+    });
+
+    it("opens a tab with a URL", async () => {
+      const tabId = await pageManager.openTab(browserManager, "about:blank");
+
+      expect(tabId).toBeTruthy();
+      const page = pageManager.getActivePage();
+      expect(page.url()).toBe("about:blank");
+    });
+
+    it("lists tabs with correct info", async () => {
+      const tabIdA = await pageManager.openTab(browserManager);
+      const tabIdB = await pageManager.openTab(browserManager);
+
+      const tabs = await pageManager.listTabs();
+
+      expect(tabs).toHaveLength(2);
+      expect(tabs.find((t) => t.id === tabIdA)).toBeDefined();
+      expect(tabs.find((t) => t.id === tabIdB)).toBeDefined();
+
+      // Most recent tab should be active
+      const activeTab = tabs.find((t) => t.active);
+      expect(activeTab).toBeDefined();
+      expect(activeTab!.id).toBe(tabIdB);
+    });
+
+    it("switches tabs", async () => {
+      const tabIdA = await pageManager.openTab(browserManager);
+      await pageManager.openTab(browserManager);
+
+      await pageManager.switchTab(tabIdA);
+
+      expect(pageManager.getActiveTabId()).toBe(tabIdA);
+    });
+
+    it("throws when switching to non-existent tab", async () => {
+      await pageManager.openTab(browserManager);
+
+      await expect(pageManager.switchTab("tab-nonexistent")).rejects.toThrow("not found");
+    });
+
+    it("closes a tab", async () => {
+      const tabIdA = await pageManager.openTab(browserManager);
+      const tabIdB = await pageManager.openTab(browserManager);
+
+      await pageManager.closeTab(tabIdA);
+
+      const tabs = await pageManager.listTabs();
+      expect(tabs).toHaveLength(1);
+      expect(tabs[0].id).toBe(tabIdB);
+    });
+
+    it("switches to remaining tab when active tab is closed", async () => {
+      const tabIdA = await pageManager.openTab(browserManager);
+      const tabIdB = await pageManager.openTab(browserManager);
+
+      // tabIdB is active, close it
+      await pageManager.closeTab(tabIdB);
+
+      expect(pageManager.getActiveTabId()).toBe(tabIdA);
+    });
+
+    it("throws when closing non-existent tab", async () => {
+      await pageManager.openTab(browserManager);
+
+      await expect(pageManager.closeTab("tab-nonexistent")).rejects.toThrow("not found");
+    });
+
+    it("throws when no active tab and getActivePage is called", () => {
+      expect(() => pageManager.getActivePage()).toThrow("No active tab");
+    });
+  });
+
+  describe("console and network accessors", () => {
+    let pageManager: PageManager;
+
+    beforeEach(() => {
+      pageManager = new PageManager(createDefaultConfig());
+    });
+
+    it("getConsoleMessages returns empty array when no pages", () => {
+      expect(pageManager.getConsoleMessages()).toEqual([]);
+    });
+
+    it("getConsoleMessages with level filter returns empty array when no pages", () => {
+      expect(pageManager.getConsoleMessages("error")).toEqual([]);
+    });
+
+    it("getNetworkRequests returns empty array when no pages", () => {
+      expect(pageManager.getNetworkRequests()).toEqual([]);
+    });
+
+    it("clearConsoleMessages does not throw when no pages", () => {
+      expect(() => pageManager.clearConsoleMessages()).not.toThrow();
+    });
+
+    it("clearNetworkRequests does not throw when no pages", () => {
+      expect(() => pageManager.clearNetworkRequests()).not.toThrow();
+    });
+
+    it("getConsoleErrors returns empty array when no pages", () => {
+      expect(pageManager.getConsoleErrors()).toEqual([]);
+    });
+
+    it("getNetworkErrors returns empty array when no pages", () => {
+      expect(pageManager.getNetworkErrors()).toEqual([]);
+    });
+  });
+
+  describe("dialog tracking", () => {
+    let pageManager: PageManager;
+
+    beforeEach(() => {
+      pageManager = new PageManager(createDefaultConfig());
+    });
+
+    it("getPendingDialogInfo returns null when no dialog pending", async () => {
+      await pageManager.openTab(browserManager);
+      expect(pageManager.getPendingDialogInfo()).toBeNull();
+    });
+
+    it("getPendingDialog returns null when no dialog pending", async () => {
+      await pageManager.openTab(browserManager);
+      expect(pageManager.getPendingDialog()).toBeNull();
+    });
+
+    it("clearPendingDialog does not throw when no dialog pending", async () => {
+      await pageManager.openTab(browserManager);
+      expect(() => pageManager.clearPendingDialog()).not.toThrow();
+    });
+
+    it("clearPendingDialog does not throw when no pages exist", () => {
+      expect(() => pageManager.clearPendingDialog()).not.toThrow();
+    });
+  });
+});
+
+describe("PageManager.adoptExistingPages", () => {
+  function createMockPage(url: string, title: string): Page {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>();
+    return {
+      url: () => url,
+      title: () => Promise.resolve(title),
+      on: (event: string, handler: (...args: unknown[]) => unknown) => {
+        listeners.set(event, handler);
+      },
+      removeAllListeners: () => {},
+      mainFrame: () => ({}),
+      bringToFront: () => Promise.resolve(),
+      close: () => Promise.resolve(),
+    } as unknown as Page;
+  }
+
+  function createMockBrowser(pages: Page[]): Browser {
+    return {
+      pages: () => Promise.resolve(pages),
+    } as unknown as Browser;
+  }
+
+  it("adopts all existing pages and sets first as active", async () => {
+    const pageManager = new PageManager();
+    const mockPages = [
+      createMockPage("https://example.com", "Example"),
+      createMockPage("https://google.com", "Google"),
+      createMockPage("about:blank", "Blank"),
+    ];
+    const mockBrowser = createMockBrowser(mockPages);
+
+    await pageManager.adoptExistingPages(mockBrowser);
+
+    const tabs = await pageManager.listTabs();
+    expect(tabs).toHaveLength(3);
+    expect(tabs[0].active).toBe(true);
+    expect(tabs[0].url).toBe("https://example.com");
+  });
+
+  it("does nothing when browser has no pages", async () => {
+    const pageManager = new PageManager();
+    const mockBrowser = createMockBrowser([]);
+
+    await pageManager.adoptExistingPages(mockBrowser);
+
+    expect(pageManager.hasPages()).toBe(false);
+  });
+
+  it("wires listeners on adopted pages", async () => {
+    const pageManager = new PageManager();
+    const mockPage = createMockPage("https://example.com", "Example");
+    const onSpy = vi.spyOn(mockPage, "on" as never);
+    const mockBrowser = createMockBrowser([mockPage]);
+
+    await pageManager.adoptExistingPages(mockBrowser);
+
+    // wirePageListeners registers: console, response, dialog, framenavigated, popup, close
+    const registeredEvents = onSpy.mock.calls.map((call) => call[0]);
+    expect(registeredEvents).toContain("console");
+    expect(registeredEvents).toContain("response");
+    expect(registeredEvents).toContain("dialog");
+    expect(registeredEvents).toContain("close");
+  });
+});
+
+// #201/#202: crash-safety and resilience. Driven with mock pages (no browser).
+describe("PageManager crash-safety and resilience (issues #201, #202)", () => {
+  function deadPage(): Page {
+    // A page bound to a dead connection: url() throws, close() rejects.
+    return {
+      url: () => {
+        throw new Error("Protocol error: connection closed");
+      },
+      title: () => Promise.reject(new Error("Protocol error: connection closed")),
+      on: () => {},
+      removeAllListeners: () => {},
+      mainFrame: () => ({}),
+      bringToFront: () => Promise.resolve(),
+      close: () => Promise.reject(new Error("Protocol error: Session closed")),
+    } as unknown as Page;
+  }
+
+  function livePage(url: string, title: string): Page {
+    return {
+      url: () => url,
+      title: () => Promise.resolve(title),
+      on: () => {},
+      removeAllListeners: () => {},
+      mainFrame: () => ({}),
+      bringToFront: () => Promise.resolve(),
+      close: () => Promise.resolve(),
+    } as unknown as Page;
+  }
+
+  /** Inject a page directly into PageManager's map via adoptExistingPages. */
+  async function adopt(pageManager: PageManager, pages: Page[]): Promise<void> {
+    await pageManager.adoptExistingPages({
+      pages: () => Promise.resolve(pages),
+    } as unknown as Browser);
+  }
+
+  it("closeTab removes the tab even when page.close() throws (#201)", async () => {
+    const pageManager = new PageManager();
+    await adopt(pageManager, [deadPage()]);
+    const [tab] = await pageManager.listTabs();
+
+    // Old behavior: close() rejects before pages.delete(), so the tab is never
+    // removed and the server wedges. New behavior: cleanup completes regardless.
+    await expect(pageManager.closeTab(tab.id)).resolves.toBeUndefined();
+    expect(pageManager.hasPages()).toBe(false);
+  });
+
+  it("reset() clears all tabs and the active id after a disconnect (#201)", async () => {
+    const pageManager = new PageManager();
+    await adopt(pageManager, [deadPage(), deadPage()]);
+    expect(pageManager.hasPages()).toBe(true);
+
+    pageManager.reset();
+
+    expect(pageManager.hasPages()).toBe(false);
+    expect(() => pageManager.getActiveTabId()).toThrow("No active tab");
+  });
+
+  it("listTabs survives a dead page with a fallback title (#202)", async () => {
+    const pageManager = new PageManager();
+    await adopt(pageManager, [livePage("https://ok.example", "OK"), deadPage()]);
+
+    // Old behavior: one rejecting page.title() rejected the whole listing.
+    const tabs = await pageManager.listTabs();
+
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0].title).toBe("OK");
+    expect(tabs[1].title).toBe("(unavailable)");
+    expect(tabs[1].url).toBe("about:blank");
+  });
+});

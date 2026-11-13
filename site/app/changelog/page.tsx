@@ -1,0 +1,320 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+
+export const metadata: Metadata = {
+  title: "Changelog — Charlotte",
+  description: "Release history for Charlotte, the MCP server for structured web browsing.",
+};
+
+interface ChangeEntry {
+  type: "added" | "changed" | "fixed" | "removed";
+  text: string;
+}
+
+interface Release {
+  version: string;
+  date: string;
+  entries: ChangeEntry[];
+}
+
+const releases: Release[] = [
+  {
+    version: "0.8.0",
+    date: "2026-08-09",
+    entries: [
+      { type: "added", text: "Charlotte Remote — optional streamable-HTTP transport (charlotte --http): a stateless /mcp endpoint with a mandatory bearer token, an unauthenticated /healthz status endpoint, and a single implicit session per server process, alongside the existing stdio transport." },
+      { type: "added", text: "OAuth facade for claude.ai's custom connector — satisfies the remote-connector OAuth flow with HMAC-derived tokens computed on demand from the configured secret; nothing is persisted server-side. Direct MCP clients keep plain bearer auth." },
+      { type: "added", text: "One-command demo mode — docker run with no configuration stands up Charlotte behind a cloudflared quick tunnel and prints the claude.ai connector URL and a generated token. Override with a mounted config, CHARLOTTE_TUNNEL=off, or CHARLOTTE_PUBLIC_ORIGIN." },
+      { type: "added", text: "Session idle-TTL sweep, crash/restart recovery, inline artifact delivery (256 KB cap), charlotte doctor --http preflight, and a full HTTP configuration surface via charlotte.config.json and environment variables." },
+      { type: "added", text: "Security guards, mandatory in HTTP mode: an outbound SSRF navigation guard (resolves targets at request time and default-denies loopback, RFC1918/link-local, and cloud-metadata addresses) and an inbound Host-header DNS-rebind guard." },
+      { type: "added", text: "Release-drift and per-task benchmark instruments with first published results — orientation cost and tool-definition size across every release v0.2.0–v0.8.0 plus a Playwright MCP baseline, and total-token cost for three scripted tasks." },
+      { type: "added", text: "Docs restructure — SELF_HOSTING.md rewritten as a short quickstart; new SECURITY.md covering the trust boundary, network guards, OAuth mechanics, sizing, and known accepted risks." },
+      { type: "changed", text: "CDP attach now recovers from a dropped transport — after a host sleep/wake, the next tool call re-attaches to a --cdp-endpoint browser and re-runs page adoption instead of failing until restart." },
+      { type: "changed", text: "v0.7.0 was merged but never published as a standalone release; its changes (sandbox-on default, security hardening, config file, element-ID format) ship as part of v0.8.0. The v0.7.0 git tag exists for reference only." },
+    ],
+  },
+  {
+    version: "0.6.3",
+    date: "2026-04-17",
+    entries: [
+      { type: "fixed", text: "Republished with correct dist/ artifacts — the v0.6.2 npm tarball was packaged from a stale dist/ and did not include the v0.6.2 source changes despite them being present at the git tag. v0.6.3 ships the intended feature set with correct compiled output; no source-level changes versus v0.6.2. Fixes #164." },
+      { type: "added", text: "prepublishOnly script (npm run build && npm test) so npm publish rebuilds and re-tests before packaging, preventing stale-dist publishes." },
+    ],
+  },
+  {
+    version: "0.6.2",
+    date: "2026-04-16",
+    entries: [
+      { type: "added", text: "--cdp-endpoint CLI option — Connect to a running Chrome/Chromium instance via its DevTools Protocol endpoint instead of launching a new browser. Supports ws:// URLs and channel:chrome shorthand. Closes GAP-33." },
+      { type: "added", text: "Iframe interaction — Interaction tools (click, type, select, toggle, submit, scroll, hover, key, wait_for, upload, fill_form) now work against elements inside child frames. Closes #66." },
+      { type: "changed", text: "Reduced CDP session churn — Interaction helpers reuse CDP sessions instead of repeatedly attaching and detaching. Closes #113." },
+      { type: "fixed", text: "Cross-frame drag validation — charlotte_drag now rejects drags between elements in different frames with a CharlotteError instead of silently producing undefined behavior." },
+      { type: "fixed", text: "Stale frame sessions in CDPSessionManager — Frame sessions are cleaned up on frame detach and empty reverse-index entries are pruned. Closes #67." },
+      { type: "fixed", text: "Batched startup tool.disable() into a single sendToolListChanged() notification, mirroring the v0.6.1 runtime fix." },
+      { type: "fixed", text: "Viewport of pre-existing pages is preserved when connecting via --cdp-endpoint." },
+    ],
+  },
+  {
+    version: "0.6.1",
+    date: "2026-04-09",
+    entries: [
+      { type: "fixed", text: "Runtime tool group activation — Tools enabled via charlotte_tools were not callable by MCP clients due to notification flooding. Now sends a single batched notification per enable/disable action. Fixes #146." },
+    ],
+  },
+  {
+    version: "0.6.0",
+    date: "2026-04-03",
+    entries: [
+      { type: "added", text: "charlotte_fill_form — Batch form fill tool. Fill an entire form in one tool call with an array of {element_id, value} pairs. Closes GAP-04." },
+      { type: "added", text: "Slow typing — charlotte_type now accepts slowly and character_delay parameters for character-by-character input. Closes GAP-05." },
+      { type: "added", text: "Lazy Chromium initialization — Browser launches on first tool call instead of at startup, preventing idle instances." },
+      { type: "added", text: "MCP logging capability — Server declares logging capability for client compatibility." },
+      { type: "added", text: "CLI improvements — parseArgs migration, --help flag, improved --no-headless handling." },
+      { type: "added", text: "Default viewport increased to 1440×900 for more realistic rendering." },
+      { type: "changed", text: "BREAKING: All tool names renamed from charlotte:xxx to charlotte_xxx for MCP spec compliance. Closes #57." },
+      { type: "changed", text: "Node.js requirement relaxed from >=22 to >=20." },
+      { type: "fixed", text: "pollUntilCondition JS evaluation — Replaced new Function with CDP Runtime.evaluate for consistency." },
+      { type: "fixed", text: "Screenshot stale compositor frame — Flush before capture to prevent stale SPA screenshots." },
+      { type: "fixed", text: "CVE-2026-31988 — Override yauzl to 3.2.1." },
+      { type: "fixed", text: "Server version now read from package.json instead of being hardcoded." },
+    ],
+  },
+  {
+    version: "0.5.1",
+    date: "2026-03-14",
+    entries: [
+      { type: "added", text: "Popup and target=\"_blank\" tab capture — Clicks on target=\"_blank\" links and window.open() now auto-capture the new tab in PageManager. Surfaced as opened_tabs in tool responses. Fixes #103, #98." },
+      { type: "added", text: "Contributor issue templates — Bug report, feature request, and tool request templates. Community links in README." },
+      { type: "changed", text: "Renamed AXIOM to ASM across Charlotte site." },
+    ],
+  },
+  {
+    version: "0.5.0",
+    date: "2026-03-09",
+    entries: [
+      { type: "added", text: "Iframe content extraction — Child frame content (interactive elements, text, summaries) merged into parent page representation. Configurable depth." },
+      { type: "added", text: "Structural tree view — charlotte:observe accepts view: \"tree\" and \"tree-labeled\" for hierarchical text output with optional element IDs." },
+      { type: "added", text: "File output — charlotte:observe and charlotte:screenshot accept output_file to write results to disk, reducing token consumption. Closes GAP-13." },
+      { type: "added", text: "Screenshot artifact management — screenshots, screenshot_get, screenshot_delete tools for persistent screenshot files." },
+      { type: "fixed", text: "wait_for JS evaluation now uses CDP Runtime.evaluate, fixing multi-statement conditions that silently returned undefined." },
+      { type: "fixed", text: "Browser reconnection race — getBrowser() auto-recovers via ensureConnected() instead of throwing immediately." },
+      { type: "fixed", text: "Renderer pipeline resilience — malformed AX properties, failed content nodes, bad iframes, and transient CDP errors no longer crash renders." },
+      { type: "fixed", text: "Event listener cleanup on tab close, dialog handler error handling, and dev mode shutdown resilience." },
+      { type: "fixed", text: "Form field matching null guard, landmark ID cross-frame collision, CLI arg parsing with = in paths, and Zod bounds validation." },
+      { type: "changed", text: "README rewritten with problem-first opening. MCP client configs added for Cursor, Windsurf, VS Code, Cline, and Amp." },
+    ],
+  },
+  {
+    version: "0.4.2",
+    date: "2026-03-06",
+    entries: [
+      { type: "added", text: "charlotte:upload — Set files on <input type=\"file\"> elements via CDP. Validates file existence and element type. Closes GAP-02." },
+      { type: "added", text: "File input detection — File inputs now correctly identified as file_input type instead of button." },
+      { type: "added", text: "charlotte:key enhancement — Added keys (sequence), element_id (focus targeting), and delay parameters for keyboard-driven UIs." },
+      { type: "fixed", text: "Boolean parameter validation — All boolean parameters now accept string-coerced values (\"true\"/\"false\") from MCP clients." },
+      { type: "fixed", text: "click_at hover simulation — Moves mouse to coordinates and pauses before clicking, fixing framework-managed link navigation." },
+    ],
+  },
+  {
+    version: "0.4.1",
+    date: "2026-03-05",
+    entries: [
+      { type: "added", text: "charlotte:click_at — Click at specific page coordinates for non-semantic elements (custom widgets, canvas, SVG)." },
+      { type: "added", text: "CSS selector mode for charlotte:find — Query the DOM directly via selector parameter, returning elements with Charlotte IDs." },
+      { type: "fixed", text: "charlotte:evaluate silent null on multi-statement code — Replaced with CDP Runtime.evaluate for correct completion values." },
+    ],
+  },
+  {
+    version: "0.4.0",
+    date: "2026-03-03",
+    entries: [
+      { type: "added", text: "Tiered tool visibility — Startup profiles control which tools load into the agent's context. Six profiles: core (7), browse (22), interact (27), develop (30), audit (13), full (40). Granular group selection via --tools." },
+      { type: "added", text: "charlotte:tools meta-tool — Runtime tool group management. List, enable, and disable tool groups mid-session without restarting." },
+      { type: "added", text: "Profile benchmark suite — Four tests measuring tool definition overhead across full, browse, and core profiles." },
+      { type: "added", text: "charlotte:drag — Drag an element to another element using mouse primitives. Closes GAP-01." },
+      { type: "added", text: "Landmark IDs — Landmarks now have stable hash-based IDs (rgn-xxxx) for tool referencing." },
+      { type: "added", text: "charlotte:console — Retrieve console messages with level filtering and buffer clearing. Closes GAP-21." },
+      { type: "added", text: "charlotte:requests — Retrieve network request history with URL, resource type, and status filters. Closes GAP-22." },
+      { type: "added", text: "Modifier key clicks — charlotte:click now accepts ctrl, shift, alt, meta modifiers for all click types." },
+      { type: "fixed", text: "Pseudo-element content duplication — extractFullContent() no longer emits duplicate text from CSS ::before/::after pseudo-elements." },
+      { type: "changed", text: "Default startup profile is now browse (22 tools) instead of loading all 40 tools. Use --profile=full for the previous behavior." },
+      { type: "changed", text: "PageManager now captures all console messages and network responses (not just errors). Ring buffers capped at 1000 entries." },
+      { type: "changed", text: "Static server binds to 127.0.0.1 instead of 0.0.0.0. Directory traversal prevention via allowedWorkspaceRoot." },
+    ],
+  },
+  {
+    version: "0.3.0",
+    date: "2026-02-24",
+    entries: [
+      { type: "added", text: "charlotte:dialog — Accept or dismiss JavaScript dialogs (alert, confirm, prompt, beforeunload). Closes GAP-03." },
+      { type: "added", text: "Dialog-aware action racing — Clicks that trigger dialogs return immediately instead of hanging for 30s." },
+      { type: "added", text: "dialog_auto_dismiss configuration — Auto-handle dialogs via charlotte:configure. Options: none, accept_alerts, accept_all, dismiss_all." },
+      { type: "added", text: "Dialog-blocking stub responses — Minimal stub representation when a dialog is blocking, so agents always know a dialog needs handling." },
+      { type: "changed", text: "PageManager now accepts CharlotteConfig in its constructor for dialog auto-dismiss configuration." },
+    ],
+  },
+  {
+    version: "0.2.0",
+    date: "2026-02-22",
+    entries: [
+      { type: "changed", text: "Compact response format — Responses are 50-99% smaller. Charlotte's navigate returns 336 chars for Hacker News vs Playwright MCP's 61,230." },
+      { type: "changed", text: "Interactive summary for minimal detail — Element counts by landmark region instead of full element lists. Wikipedia dropped from 711K to 7.7K chars." },
+      { type: "changed", text: "Default state stripping — Interactive elements omit redundant defaults (enabled: true, visible: true, focused: false)." },
+      { type: "changed", text: "Navigation defaults to minimal detail. Pass detail: \"summary\" or \"full\" for more context." },
+      { type: "removed", text: "Removed unused alerts field from page representation." },
+    ],
+  },
+  {
+    version: "0.1.3",
+    date: "2026-02-22",
+    entries: [
+      { type: "added", text: "Benchmark suite for comparing Charlotte against Playwright MCP across real websites." },
+    ],
+  },
+  {
+    version: "0.1.2",
+    date: "2026-02-22",
+    entries: [
+      { type: "changed", text: "Added mcpName field for MCP registry publishing." },
+    ],
+  },
+  {
+    version: "0.1.1",
+    date: "2026-02-22",
+    entries: [
+      { type: "added", text: "get_cookies — Retrieve cookies for the active page with optional URL filtering." },
+      { type: "added", text: "clear_cookies — Clear cookies with optional name filtering." },
+      { type: "fixed", text: "Session integration tests now use HTTP URLs for cookie operations." },
+    ],
+  },
+  {
+    version: "0.1.0",
+    date: "2026-02-13",
+    entries: [
+      { type: "added", text: "Initial release. All six implementation phases complete: navigation, observation, interaction, session, development, and utility tools." },
+      { type: "added", text: "Renderer pipeline: accessibility tree + layout geometry + interactive element extraction." },
+      { type: "added", text: "Hash-based element IDs stable across re-renders." },
+      { type: "added", text: "Snapshot store with ring buffer and structural diffing." },
+      { type: "added", text: "222 tests across 19 test files (unit + integration)." },
+    ],
+  },
+];
+
+const typeBadgeClass: Record<ChangeEntry["type"], string> = {
+  added: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+  changed: "bg-amber-500/15 text-amber-400 border-amber-500/20",
+  fixed: "bg-blue-500/15 text-blue-400 border-blue-500/20",
+  removed: "bg-red-500/15 text-red-400 border-red-500/20",
+};
+
+export default function ChangelogPage() {
+  return (
+    <div className="min-h-screen bg-background" data-asm-page-type="documentation" data-asm-page-purpose="View the complete release history for Charlotte, including new features, changes, fixes, and removals for each version.">
+      {/* Nav */}
+      <header>
+      <nav aria-label="Site navigation" className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-sm border-b border-surface-border">
+        <div className="max-w-5xl mx-auto px-6 sm:px-8 lg:px-12 h-14 flex items-center justify-between">
+          <Link href="/" className="font-mono font-bold text-foreground">
+            charlotte
+          </Link>
+          <div className="flex items-center gap-6 text-sm text-muted">
+            <Link href="/" className="hover:text-foreground transition-colors">
+              Home
+            </Link>
+            <Link href="/vs-playwright" className="hover:text-foreground transition-colors">
+              Compare
+            </Link>
+            <a
+              href="https://github.com/TickTockBent/charlotte"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted hover:text-foreground transition-colors"
+              aria-label="GitHub repository"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+              </svg>
+            </a>
+          </div>
+        </div>
+      </nav>
+      </header>
+
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            itemListElement: [
+              { "@type": "ListItem", position: 1, name: "Home", item: "https://charlotte-rose.vercel.app/" },
+              { "@type": "ListItem", position: 2, name: "Changelog", item: "https://charlotte-rose.vercel.app/changelog/" },
+            ],
+          }),
+        }}
+      />
+
+      {/* Content */}
+      <main className="max-w-5xl mx-auto px-6 sm:px-8 lg:px-12 pt-28 pb-20">
+        <nav aria-label="Breadcrumb" className="text-sm text-muted mb-6">
+          <ol className="flex items-center gap-1.5">
+            <li><Link href="/" className="hover:text-foreground transition-colors">Home</Link></li>
+            <li aria-hidden="true" className="text-surface-border">/</li>
+            <li aria-current="page" className="text-foreground">Changelog</li>
+          </ol>
+        </nav>
+        <h1 className="text-3xl sm:text-4xl font-bold mb-2">Changelog</h1>
+        <p className="text-muted mb-12">
+          All notable changes to Charlotte, documented by release.
+        </p>
+
+        <div className="space-y-16">
+          {releases.map((release) => (
+            <section key={release.version} id={`v${release.version}`}>
+              <div className="flex items-baseline gap-4 mb-6">
+                <h2 className="text-xl font-bold font-mono text-accent">
+                  v{release.version}
+                </h2>
+                <time dateTime={release.date} className="text-sm text-muted">{release.date}</time>
+              </div>
+
+              <div className="space-y-3">
+                {release.entries.map((entry, entryIndex) => (
+                  <div
+                    key={entryIndex}
+                    className="flex gap-3 items-start"
+                  >
+                    <span
+                      className={`inline-flex items-center shrink-0 mt-0.5 px-2 py-0.5 text-xs font-mono font-medium rounded border ${typeBadgeClass[entry.type]}`}
+                    >
+                      {entry.type}
+                    </span>
+                    <p className="text-sm text-foreground/90 leading-relaxed">
+                      {entry.text}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="py-12 px-6 sm:px-8 lg:px-12 border-t border-surface-border">
+        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-4 text-sm text-muted">
+            <a href="https://github.com/TickTockBent/charlotte" target="_blank" rel="noopener noreferrer" className="hover:text-foreground transition-colors">GitHub</a>
+            <span className="text-surface-border">|</span>
+            <a href="https://www.npmjs.com/package/@ticktockbent/charlotte" target="_blank" rel="noopener noreferrer" className="hover:text-foreground transition-colors">npm</a>
+            <span className="text-surface-border">|</span>
+            <a href="https://github.com/TickTockBent/charlotte/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="hover:text-foreground transition-colors">MIT License</a>
+            <span className="text-surface-border">|</span>
+            <Link href="/privacy" className="hover:text-foreground transition-colors">Privacy</Link>
+          </div>
+          <p className="text-sm text-muted">Built with Charlotte.</p>
+        </div>
+      </footer>
+    </div>
+  );
+}

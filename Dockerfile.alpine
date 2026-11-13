@@ -1,0 +1,57 @@
+# Charlotte MCP Server Docker Image (Alpine)
+# Uses system Chromium (currently ~1.2GB due to transitive dependencies)
+# stdio/local-use image only. Sandbox-enabled operation was verified for the
+# Debian Dockerfile (spike R4 / D22); the surgical seccomp profile has NOT
+# been tested against Alpine's system Chromium, so this image keeps the
+# sandbox disabled (CHARLOTTE_NO_SANDBOX=1) below. Use the Debian Dockerfile
+# for the HTTP self-host, sandbox-enabled image.
+
+FROM node:22-alpine
+
+# Install Chromium and dependencies
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont \
+    dumb-init
+
+# Tell Puppeteer to use system Chromium instead of downloading its own
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
+# Create non-root user
+RUN addgroup -S charlotte && adduser -S -G charlotte charlotte \
+    && mkdir -p /home/charlotte/Downloads \
+    && chown -R charlotte:charlotte /home/charlotte
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies (skips bundled Chromium download due to PUPPETEER_SKIP_DOWNLOAD)
+RUN npm ci
+
+# Copy source and build
+COPY tsconfig*.json ./
+COPY src/ ./src/
+
+RUN npm run build
+
+# Fix permissions for node_modules (needed for some edge cases)
+RUN chown -R charlotte:charlotte /app
+
+# Switch to non-root user
+USER charlotte
+
+# The Chromium sandbox is ON by default (issue #184), but inside a container
+# the kernel sandbox usually cannot be set up, so opt out explicitly here.
+# On bare metal the sandbox stays enabled. Override with CHARLOTTE_NO_SANDBOX=0
+# if you run with a seccomp profile / user namespaces that support the sandbox.
+ENV CHARLOTTE_NO_SANDBOX=1
+
+# Charlotte MCP uses stdio transport
+CMD ["dumb-init", "node", "dist/index.js"]

@@ -1,0 +1,432 @@
+---
+title: Charlotte changelog and release notes
+sidebarTitle: Changelog
+description: "Full release notes and versioned history for Charlotte MCP server: new features, fixes, and unreleased changes on main from v0.1.0 onward."
+icon: clock-rotate-left
+---
+
+This is Charlotte's canonical changelog — every release from v0.1.0 through the current version, plus unreleased changes on `main`. Tagged releases with published artifacts live on [GitHub Releases](https://github.com/TickTockBent/charlotte/releases).
+
+## [Unreleased]
+
+Week of 2026-10-26: Charlotte moves to Puppeteer 25.16 and Chrome for Testing 156, because Chrome 145 no longer receives security fixes. One breaking change: Charlotte now requires Node.js 22.12 or later. Chrome 156 reports forms and some accessible names differently, which changes output and element IDs on some pages, and double-clicks now send one extra `click` event. The upgrade clears both accepted `extract-zip` advisories, and a lockfile bump clears a `body-parser` advisory that was reachable in HTTP mode. Hand-written HTTP clients must now send the `MCP-Protocol-Version` header on requests that use MCP protocol version 2026-07-28, and restarting `charlotte_dev_serve` no longer stalls for about 46 seconds.
+
+### Changed
+
+- **Breaking: Charlotte now requires Node.js 22.12 or later.** `engines.node` moves from `>=20.0.0` to `>=22.12.0`, which is Puppeteer 25's own minimum. This reverses the Node 20 relaxation from [#136](https://github.com/TickTockBent/charlotte/issues/136). Node 20 reached end-of-life in April 2026. Both Docker images already use `node:22`. CI now tests on Node 22 and 24.
+- **Charlotte now uses Puppeteer 25.16.0, which pins Chrome for Testing 156.** It was on Puppeteer 24.37.3, which pins Chrome for Testing 145, and Chrome 145 no longer receives security fixes. Puppeteer 25 no longer installs `extract-zip` or `tar-fs` (see Security below), so the `yauzl` override is removed.
+- **Charlotte now depends on `yauzl` directly, so Chrome for Testing still installs on hosts without `unzip`.** Puppeteer 25's browser downloader dropped its bundled zip extractor. It now unpacks Chrome with the system `unzip` command, or with `yauzl` if that package is installed, and npm does not install it on its own. Without either, the download fails during `npm install` without failing the install, and Charlotte later reports that it cannot find Chrome. Without this change the Debian Docker image (`node:22-slim`, which has no `unzip`) would have shipped without Chrome; release testing caught it.
+- **Charlotte now depends on `proxy-agent` directly, so Chrome for Testing downloads still honor `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`.** Puppeteer 25's browser downloader only routes through a proxy when `proxy-agent` is installed, and npm does not install it on its own. Without it, the download ignores proxy settings and connects directly, so on a network that requires a proxy, `npm install` finishes without Chrome. Adding it restores Puppeteer 24's behavior. It also brings `basic-ftp` back into the tree through `get-uri`, so the `basic-ftp` override to 6.2.3 from the week of 2026-10-17 stays in place, and GHSA-c475-qrg2-pj4r stays cleared.
+- **Double-click sends one more `click` event.** This applies to `charlotte_click` and `charlotte_click_at` with `click_type: "double"`, which share one code path. Puppeteer 25 removed the `clickCount` mouse option. Its replacement, `count: 2`, replays the first click before the double-click. Pages now receive `mousedown`, `mouseup` and `click` with `detail` 1, then `mousedown`, `mouseup`, `click` and `dblclick` with `detail` 2. That is one `click` more than before, and it matches what a real user's double-click produces.
+- **Chrome 156 exposes every `<form>` as a `form` landmark, named or not.** Before, only forms with an accessible name were landmarks. Orientation responses on form-heavy pages get slightly larger. On pages with unnamed forms:
+  - `structure.landmarks` gains `form` entries.
+  - The `forms` array lists those forms, so `charlotte_submit` can target them by form ID. Charlotte's own per-task benchmark (2026-08-09) had recorded unnamed forms as unreachable by `charlotte_submit`.
+  - `content_summary`, and `interactive_summary` at `detail: "minimal"`, group their fields under `form`.
+  - Controls inside those forms get new element IDs, because the nearest landmark is part of the ID.
+- **Accessible names no longer keep leading whitespace.** Chrome 156 trims it, so `" Enable notifications"` becomes `"Enable notifications"`, and those elements get new IDs. Element IDs are per-session handles, so the practical effect of this change and the form change above is that IDs saved from an older Charlotte, or from a run against a different Chrome, won't match.
+- **HTTP requests on MCP protocol version 2026-07-28 must send the `MCP-Protocol-Version` header** ([#297](https://github.com/TickTockBent/charlotte/pull/297)). Since 2.1.0, `@modelcontextprotocol/server` rejects such a request without the header, with HTTP 400 and JSON-RPC error `-32020`. MCP SDK clients already send the header. If you wrote your own client for Charlotte's HTTP endpoint, make sure it sends it too.
+
+### Fixed
+
+- **Restarting `charlotte_dev_serve` and shutting Charlotte down no longer stall for about 46 seconds** ([#301](https://github.com/TickTockBent/charlotte/issues/301)). Chrome 156 opens speculative TCP connections to the served origin and never sends a request on them. Stopping the dev server waited for those idle sockets until Node's header-timeout sweep closed them. It now closes all open connections when it stops. This also affected anyone already pointing Charlotte at a newer Chrome with `--cdp-endpoint`.
+
+### Security
+
+- **Cleared: GHSA-27r3-jxmh-p828 (`body-parser` 2.x before 2.4.0, high).** Trailing bytes after a compressed request body could cause a denial of service. `body-parser` arrives through `express`. In HTTP mode, Charlotte's OAuth-facade endpoints parse JSON and form bodies with it (`express.json` and `express.urlencoded`, with inflate on by default), and those endpoints accept unauthenticated requests, so the bug was reachable in HTTP mode. Lockfile bump to 2.4.0, which also moves `qs` from 6.16.0 to 6.16.1; no source change.
+- **Cleared: GHSA-jmr9-qjv8-65gv and GHSA-7pqw-9j4j-h8q3 (`extract-zip` ≤ 2.0.1, high).** Puppeteer 25 no longer installs `extract-zip`, so both accepted risks are gone. They are removed from the CI audit allowlist (`scripts/audit-check.mts`, now empty) and from **Known accepted risks** in [Security](https://charlotte.mintlify.site/security).
+- **Cleared: GHSA-jm63-cq47-j5jp (`@modelcontextprotocol/server`, high), which did not affect Charlotte.** An HTTP server could deliver one client's messages to another client when a transport or server instance was shared. Charlotte's HTTP mode builds a fresh `McpServer` for every request (`createMcpHandler` with a factory), which the advisory lists as not affected. [#297](https://github.com/TickTockBent/charlotte/pull/297) moved `@modelcontextprotocol/server` from 2.0.0 to 2.3.1, which clears it anyway. [#296](https://github.com/TickTockBent/charlotte/pull/296) moved the SDK client, a dev dependency, to 2.3.0 alongside it.
+
+Week of 2026-10-17: dependency maintenance and Docker work for ARM users. A transitive `basic-ftp` advisory is cleared with an npm override, the Docker images are now built and smoke-tested natively on arm64 as well as amd64, and the Docker docs stop claiming arm64 images are already published. One behavior fix: `charlotte_fill_form` and `charlotte_type` now report an error instead of success when a typed value doesn't fully land in the field.
+
+### Changed
+
+- **Docker images are built and smoke-tested natively on both architectures** ([#22](https://github.com/TickTockBent/charlotte/issues/22)). The image workflow no longer cross-builds arm64 under QEMU. Each architecture builds on its own native GitHub runner (`ubuntu-24.04` / `ubuntu-24.04-arm`), and both images are smoke-tested there: the stdio tool suite for Alpine, and `doctor --http` with the sandbox required ON for Debian. A release publishes those tested per-arch builds, combined into the multi-arch tags, and fails if any tag is missing an architecture. The same build and smoke tests run, without publishing, on PRs that touch the images. [Testing](https://charlotte.mintlify.site/docker#testing) has the details.
+
+### Fixed
+
+- **`charlotte_fill_form` and `charlotte_type` no longer report success for a truncated text field** ([#293](https://github.com/TickTockBent/charlotte/issues/293)). A CI run caught `fill_form` reporting success while First Name held `"J"` instead of `"Jane"`. After typing into a cleared text field, Charlotte now reads the field back. If it holds only the start of the typed text, the call fails with `ELEMENT_NOT_INTERACTIVE`, and the error says how many characters landed and whether focus left the field. `fill_form` names the failing field; fields listed before it stay filled. Values the page reshapes (input masks, case changes, autocomplete) and values cut short by the field's own `maxlength` still succeed. The check covers native text inputs and textareas only, not date, time, or color inputs or `contenteditable` elements. Field values are never echoed in the error.
+- **Docker docs no longer claim arm64 images are published** ([#22](https://github.com/TickTockBent/charlotte/issues/22)). The `linux/arm64` build landed after v0.8.0 was tagged, so every published tag is still amd64-only; the arm64 images ship with the next release. [Supported platforms](https://charlotte.mintlify.site/docker#supported-platforms) now says so, explains how to build natively on an ARM host in the meantime, and records the first hardware report (Raspberry Pi 4 and Apple Silicon M4 Pro, both images passing `doctor` and a `navigate` + `observe` round-trip) along with what it did not cover.
+
+### Security
+
+- **Cleared: GHSA-c475-qrg2-pj4r (`basic-ftp` ≤ 6.2.0, high).** A malicious FTP server could freeze the process with a crafted directory listing (quadratic regex backtracking in `Client.list()`). The package arrives through `puppeteer` → `@puppeteer/browsers` → `proxy-agent` → `pac-proxy-agent` → `get-uri`, which only fetches over FTP for an `ftp://` PAC-file proxy URL. Charlotte never does that at runtime, so this was install-time exposure at most. There is no patched 5.x release, and even the newest `get-uri` (8.0.1) still requires `basic-ftp` ^5, so a new `overrides` entry pins `basic-ftp` to 6.2.3. That release also carries the 6.2.2 and 6.2.3 hardening fixes (GHSA-5rfr-xx34-2xxv, GHSA-r4jh-29pc-gfqr). The only breaking change in 6.0 (separate FTP transfer hosts are refused by default) does not affect `get-uri`; a mock-server check confirmed `get-uri` FTP downloads work on 6.2.3. The override can go with the Puppeteer 25 upgrade, whose `@puppeteer/browsers` 3.x drops `proxy-agent` entirely.
+
+Week of 2026-09-11: dependency maintenance. The test runner moves to vitest 4.1.11 (with its coverage provider in lockstep) to clear a moderate advisory, transitive `js-yaml`, `hono`, and `@humanfs/node` advisories are cleared through lockfile bumps, the marketing site takes the Next.js 16.3.5 patch, and a second advisory ID for the already-accepted `extract-zip` risk is documented. No behavior changes.
+
+### Security
+
+- **Cleared: GHSA-2883-xcg3-v3hh (`js-yaml` 4.3.1).** CPU exhaustion in merge-key handling, transitive through `puppeteer` → `cosmiconfig`. Lockfile bump to 4.3.2; no source change.
+- **Cleared: GHSA-82fw-gwwq-j7x9 (`@vitest/mocker` < 4.1.11).** Dev-only. `vitest` and `@vitest/coverage-v8` move together to 4.1.11 (the coverage provider pins its vitest peer exactly, so the pair cannot move independently). Vitest 5 is deferred to its own verified slice.
+- **Cleared: moderate `hono` and `@humanfs/node` advisories** via lockfile bumps to 4.13.7 and 0.16.8 in both the server and the site.
+- **Documented accepted risk: GHSA-7pqw-9j4j-h8q3 (`extract-zip` ≤ 2.0.1).** A second advisory ID for the same symlink archive-entry write already accepted as GHSA-jmr9-qjv8-65gv: same package, same version, same install-time-only exposure, still no patched release. Added to the audit allowlist under the existing rationale and listed under **Known accepted risks** in [Security](https://charlotte.mintlify.site/security); clears with the same Puppeteer 25 upgrade.
+
+Week of 2026-08-21: persistent init scripts, named device emulation in `charlotte_viewport`, `linux/arm64` Docker images, a privacy page and cookieless analytics on the marketing site, plus faster in-site navigation, and a server fix for selector-mode (`dom-`) element IDs in `charlotte_toggle` and the `charlotte_find` spatial filters.
+
+### Added
+
+- **Persistent init scripts** ([#18](https://github.com/TickTockBent/charlotte/issues/18)). Charlotte's equivalent of Playwright's `--init-script`: JavaScript that runs on every new document in every tab, before any page script, via Puppeteer's `evaluateOnNewDocument`. Configure at startup with `browser.initScripts` in the config file (relative paths resolve against the config file's directory), `--init-script <path>` (repeatable), or `CHARLOTTE_INIT_SCRIPT` (several paths separated by the OS path delimiter); files are read once at startup and a missing file fails startup with the path named. At runtime, `charlotte_dev_inject` gains `persist: true`, which re-applies the given CSS or JS on every future page load for the rest of the session (CSS is wrapped to append a `<style>` once the document has a head). Popups' very first document is not covered — Puppeteer resumes a new target before Charlotte can attach to it — but every document after it is. See [Init scripts](https://charlotte.mintlify.site/configuration#init-scripts).
+- **Named device emulation in `charlotte_viewport`** ([#24](https://github.com/TickTockBent/charlotte/issues/24)). `device` now accepts any Puppeteer `KnownDevices` name (e.g. `"iPhone 15"`, `"iPhone 15 landscape"`, `"Pixel 5"`, `"iPad Pro"`), matched case-insensitively, alongside the generic `mobile`/`tablet`/`desktop` presets. A named device applies the full descriptor via `page.emulate()`: viewport, device pixel ratio, touch support, mobile mode, and user agent. The response then carries an `emulation` object (`device`, `user_agent`, `device_scale_factor`, `has_touch`, `is_mobile`). Switching back to a generic preset or custom `width`/`height` resets DPR, touch, and mobile mode and restores the browser's default user agent, so emulation does not leak between calls. Unknown names fail with `INVALID_ARGUMENT` and up to five close `KnownDevices` suggestions.
+- **`linux/arm64` Docker images** ([#22](https://github.com/TickTockBent/charlotte/issues/22)). Both the Debian (`:latest`) and Alpine images are now published as multi-arch manifests for `linux/amd64` and `linux/arm64`, so Apple Silicon Macs and ARM servers can run them natively instead of under emulation. The arm64 variants are built and smoke-tested on native arm64 CI runners, and a community report has confirmed both images on a Raspberry Pi 4 and an Apple Silicon Mac. More ARM reports are welcome in the issue. Chrome for Testing has no Linux arm64 build, so the Debian arm64 variant uses Debian's `chromium` package and the entrypoint points Puppeteer at it; amd64 images are unchanged. See [Supported platforms](https://charlotte.mintlify.site/docker#supported-platforms).
+- **Privacy page and cookieless analytics** on the [Charlotte site](https://charlotte.mintlify.site/). Vercel Web Analytics is enabled at the site root and collects aggregate, cookieless traffic data only. No personal data is collected and no third-party trackers are loaded. A new **Privacy** link now appears in the shared footer, the changelog's inline footer, and the sitemap.
+
+### Changed
+
+- **Client-side navigation on the marketing site.** Internal links in the homepage nav and shared footer now route through Next.js client-side navigation instead of full page reloads. Moving between the homepage, [changelog](https://charlotte.mintlify.site/changelog), [benchmarks](https://charlotte.mintlify.site/benchmarks), and privacy pages is instant. Hash anchors and external links are unchanged.
+
+Week of 2026-08-18: a screenshot ergonomics improvement for very long pages, and a documented security exception for a transitive install-time advisory. No breaking changes.
+
+### Added
+
+- **`max_height` on `charlotte_screenshot`** — clips full-page screenshots from the top when the page exceeds this height (default 2000px), instead of paying Chromium's super-linear compositor cost on very long pages. When a clip fires, the response now carries a `clipped` text block (`captured_height`, `full_page_height`, and a steering message) alongside the image so callers can tell a complete short capture from the top slice of a taller page. Set `max_height: 16384` to disable clipping and always capture the full page.
+
+### Security
+
+- **Documented accepted risk: GHSA-jmr9-qjv8-65gv (`extract-zip` ≤ 2.0.1).** The advisory is transitive through `puppeteer` → `@puppeteer/browsers` and has no patched version upstream. Exposure is install-time only (extract-zip runs when `@puppeteer/browsers` unpacks the Chromium archive from Google's CDN); Charlotte never extracts archives at runtime. The entry, its clearing condition (the planned Puppeteer 25 upgrade, which drops extract-zip entirely), and other current exceptions are listed under **Known accepted risks** in [Security](https://charlotte.mintlify.site/security). New high/critical advisories outside this allowlist still fail the release pipeline.
+
+## [0.8.0] - 2026-08-09
+
+This release introduces **Charlotte Remote** — an optional streamable-HTTP transport that lets Charlotte run as a self-hosted, network-reachable MCP server alongside its existing stdio transport. Read the **Security** section before exposing an instance to a network; several guards below are new and are mandatory whenever HTTP mode is enabled.
+
+Re-verified benchmarks: Charlotte's `navigate` orientation is still ~10–140x smaller than a full Playwright MCP `browser_snapshot` on content-heavy pages (measured against Playwright MCP v0.0.79, 2026-08-08).
+
+> **Note:** v0.7.0 was merged but never published as a standalone release; its changes (sandbox-on default, security hardening, config file, element-ID format) ship as part of v0.8.0. The `v0.7.0` git tag exists for reference only.
+
+### Added
+
+- **Streamable HTTP transport (`charlotte --http`)** — a stateless `/mcp` endpoint with a single implicit session per server process, plus an unauthenticated `/healthz` endpoint reporting version, uptime, and browser-connection state. A bearer token is mandatory for `/mcp`.
+- **OAuth facade for claude.ai's connector** — satisfies claude.ai's remote-connector OAuth flow with HMAC-derived tokens computed on demand from the configured secret; nothing is persisted server-side. Direct MCP clients continue to authenticate with a plain bearer token.
+- **Session idle-TTL sweep** and **crash/restart recovery** for the HTTP transport, so abandoned sessions and a browser crash mid-session don't leave the server wedged.
+- **Artifact delivery over HTTP** — artifacts up to 256 KB are delivered inline; over-cap artifacts are refused with a steering message rather than falling back to a server-local filesystem path, since an HTTP client has no way to dereference one.
+- **Read-only `charlotte_tools` reporter in HTTP mode** — reports the tool profile fixed at server startup; enable/disable requests are refused with a steering message pointing at the `http.profile` config option instead.
+- **`tools/list` cache hint** (`ttlMs` 1 hour, `private`) so HTTP clients can avoid re-fetching the tool listing on every call.
+- **Docker HTTP image** with the Chromium sandbox **enabled** by default, using a surgical seccomp profile scoped to what the sandbox needs, plus a `docker-compose.yml` for running Charlotte in HTTP mode.
+- **`charlotte doctor --http`** — a preflight smoke check for HTTP transport configuration.
+- **One-command demo mode in the Docker image** — `docker run` with no configuration stands up Charlotte behind a cloudflared quick tunnel (pinned binary baked into the image) and prints the claude.ai connector URL and a generated token once the server is healthy. Operators override the ladder with a mounted `charlotte.config.json`, `CHARLOTTE_TUNNEL=off` (local bearer-only), or `CHARLOTTE_PUBLIC_ORIGIN` (bring your own tunnel/proxy); explicit container commands still run verbatim.
+- **Release-drift and per-task benchmark instruments** — `benchmarks/run-drift.ts` measures orientation cost and tool-definition size for every release v0.2.0–v0.8.0 against the same live pages same-day (plus a Playwright MCP baseline); `benchmarks/run-tasks.ts` measures total token cost for three scripted tasks with documented per-server call paths. First canonical results published under `benchmarks/results/`.
+- **Docs restructure** — `SELF_HOSTING.md` rewritten as a short quickstart; new `SECURITY.md` covers the trust boundary, network guards, OAuth handshake mechanics, sizing, and known accepted risks.
+- **Full HTTP configuration surface** via `charlotte.config.json` and environment variables (including `CHARLOTTE_AUTH_TOKEN`), covering transport, auth, host/origin allowlisting, and session limits.
+
+### Security
+
+- **Outbound SSRF navigation guard.** An in-process filtering proxy resolves navigation targets at request time and default-denies loopback, RFC1918/link-local, and cloud-metadata addresses, with an operator-configurable CIDR allowlist for intentional exceptions.
+- **Inbound Host-header DNS-rebind guard.** Incoming HTTP requests are checked against an allowlist built from loopback, the configured bind host, `publicOrigin`, and any operator-configured `allowedHosts`.
+
+### Changed
+
+- **CDP attach now recovers from a dropped transport.** Previously, once the control websocket to a `--cdp-endpoint` browser was lost (most commonly after the host slept), every subsequent tool call failed with "Cannot reconnect in CDP mode" until Charlotte was restarted. Charlotte now re-attaches to the endpoint on the next tool call and re-runs page adoption, reusing the existing crash-recovery state reset (#201). A clear error is only raised if the re-attach itself fails (the remote browser is genuinely gone).
+
+## [0.7.0] - 2026-06-09
+
+This release hardens Charlotte for untrusted pages, fixes a long tail of silent-failure and lifecycle bugs, cuts per-render overhead, and adds a JSON configuration file. Read the **Behavior changes** below before upgrading — two of them (sandbox default, element-ID format) can affect existing setups.
+
+### Behavior changes
+
+- **The Chromium sandbox is now ON by default.** Earlier releases baked `--no-sandbox` into every launch; the sandbox is the primary defense between an untrusted page and the account Charlotte runs as, so it is now enabled by default. Disable it explicitly with the `--no-sandbox` flag, `CHARLOTTE_NO_SANDBOX=1`, or `browser.noSandbox` in the config file. The provided Dockerfiles set `CHARLOTTE_NO_SANDBOX=1` (containers usually cannot set up the kernel sandbox), and `docker-compose.yml` no longer runs `seccomp=unconfined` — Docker's default syscall filter is restored. **Bare-metal-as-root users:** Chromium refuses to launch with the sandbox enabled when running as root; run as a non-root user or opt out explicitly. (#184)
+- **Element-ID hashes are now 6 hex characters** (e.g. `btn-a3f1c2`), up from 4, drastically reducing cross-element collisions on large pages. This is a deliberate ID format change — re-`find` elements rather than reusing IDs cached from a pre-0.7.0 session. (#190)
+- **`charlotte_fill_form` checkbox/radio/toggle now use set-semantics:** the desired state is expressed via `value` (`"true"`/`"false"`) and the element is only clicked when its current state differs, making fills idempotent. (#204)
+- **Response-shape changes:** `charlotte_tab_open`, `charlotte_dev_serve`, and dialog responses now use the standard stripped, size-capped page format; the dialog page payload is no longer nested under a `page` key. (#204)
+- **The dev static server now reports `127.0.0.1`** in its URL to match the address it actually binds. (#203)
+
+### Added
+
+- **JSON configuration file** via `--config <path>` (and an auto-loaded `charlotte.config.json` in the working directory). Settings resolve with precedence **CLI args > env vars > config file > defaults**, validated with zod; an invalid config produces a clear startup error on stderr and a non-zero exit. New env vars: `CHARLOTTE_NO_SANDBOX`, `CHARLOTTE_OUTPUT_DIR`, `CHARLOTTE_CDP_ENDPOINT`. See [Configuration](https://charlotte.mintlify.site/configuration). (#19)
+- **Configurable output-size caps** (`limits.maxInteractiveElements`, `limits.maxFullContentChars`, `limits.maxResponseBytes`, `limits.maxEvaluateBytes`) so large or adversarial pages can no longer overflow the client's context window. Page responses now carry a `truncation` marker and degrade to a compact summary (with an `output_file` suggestion) above the byte ceiling; `charlotte_evaluate` results are capped independently. (#188)
+- **`output_file` support in `charlotte_find`** for large selector/match result sets. (#72)
+- **`charlotte_screenshot` `full_page` option** (default true) for viewport-only capture. (#204)
+- **Slow-typing duration guard** — `charlotte_type` now rejects slow-typing requests whose estimated duration would risk an MCP tool timeout, failing fast with `INVALID_ARGUMENT` instead of typing partway and timing out. The estimate (`text.length * character_delay`) is capped at 30s with a per-keystroke margin, and the `character_delay` schema description documents the ceiling. Fixes #127. (#174, #180)
+- **Server instructions now advertise partially-enabled tool groups** (e.g. "interaction (7/13 enabled)"). (#204)
+- **Tri-state checkbox state** — indeterminate checkboxes now report `state.checked: "mixed"` instead of collapsing to `true`. (#190)
+
+### Changed
+
+- **Crash recovery** — a Chromium crash no longer permanently wedges the server. The next tool call relaunches the browser, clears the dead tab and CDP-session caches, and opens a fresh blank tab automatically. (#201)
+- **Render performance** — cut per-render CDP round-trips: file-input reclassification probes button candidates concurrently instead of one blocking `DOM.describeNode` per button; form-field association uses an O(1) reverse lookup instead of an O(forms x descendants x elements) scan; layout extraction deduplicates backend node IDs before issuing `DOM.getBoxModel` calls. (#194, #196, #199, #213)
+- **`charlotte_key` sequences and full-speed `charlotte_type`** are now bounded by the typing-duration guard, preventing MCP timeouts on huge payloads. (#204)
+- **`detail=minimal` interactive summary** now preserves per-landmark grouping for elements inside iframes instead of collapsing them into a single `(iframe)` bucket; main-frame landmark grouping is also retained when iframes are present. (#68)
+- **Interaction helpers reuse the cached per-page CDP session** instead of creating and detaching their own. (#202)
+- Centralized Puppeteer internal frame-session access behind a documented `frameClient()` helper, with smoke tests guarding against Puppeteer upgrades removing the internals it depends on (`Frame.client` / frame `_id` remain internal in puppeteer 24.x). (#84)
+
+### Fixed
+
+- **`charlotte_select`** now errors (`ELEMENT_NOT_FOUND`, listing valid options) instead of silently succeeding when the requested option does not exist. (#186)
+- **`charlotte_submit`** performs a real native form submission via `form.requestSubmit()` for forms without a submit button, so plain server-rendered forms actually submit. (#189)
+- **Dialog-race hangs** — `charlotte_type` (with `press_enter`), `charlotte_toggle`, `charlotte_select`, `charlotte_key`, `charlotte_fill_form`, and `charlotte_drag` no longer hang when an action triggers a JavaScript dialog; they surface `pending_dialog` like the click/submit tools. (#182)
+- **`charlotte_drag`** now works when source and target are far apart: it scrolls the target into view mid-drag instead of pressing on stale source coordinates. (#185)
+- **Same-origin iframe bounds** were double-offset by the iframe's position, making `charlotte_click_at` and reported bounds wrong; same-process iframes now share the main-frame coordinate space and only out-of-process (cross-origin) iframes get the content offset. (#183)
+- **Collision-disambiguated element IDs** no longer migrate onto a base ID between renders (a salted hash replaces the traversal-order `-N` suffix), so cached IDs no longer resolve to the wrong element and the differ no longer reports phantom add/remove pairs. (#191)
+- **Selector-mode (`dom-`) IDs from `charlotte_find`** are now durable: they survive subsequent renders/interactions, work with `fill_form`, and are re-resolved against the live DOM by re-running their selector; they are cleared on cross-document navigation. (#191)
+- **`charlotte_find` reclassified file inputs** now carry the correct `inp-` prefix (was `btn-`), so `findSimilar` and prefix-based reasoning work. (#190)
+- **Content summary** no longer reports a self-referential "1 forms" on the form you are viewing. (#190)
+- **`charlotte_diff`** no longer reports spurious `content_summary` changes when comparing snapshots of different detail levels, truncates very long summary values, and keys landmark diffs by ID so duplicate unnamed landmarks are tracked independently. (#190)
+- **`charlotte_wait_for` `state:"exists"`** no longer polls a frozen element-ID map; the `exists` and `removed` branches re-render on every poll so newly-appearing and truly-gone elements are detected. (#193)
+- **`charlotte_wait_for` JS conditions** — a lambda (`() => ...`) instead of an expression now returns `INVALID_ARGUMENT` immediately; a condition that returns a non-serializable/cyclic result (e.g. `window`, or an object with a self-reference) now fails fast with `INVALID_ARGUMENT` instead of polling to `TIMEOUT` — only transient protocol errors (navigation/context teardown) are still treated as "not satisfied" and retried; expression exceptions during polling are surfaced in the `TIMEOUT` response instead of being folded into "condition not met"; the timeout response now strips empty fields like the success path. The same handling was applied to `pollUntilCondition` in `src/utils/wait.ts`. (#198)
+- **Lifecycle / CDP resilience:** closing a tab whose page is already dead no longer hangs or leaks the entry; `charlotte_reload --hard` no longer times out on fast local pages or leaks its CDP session; `charlotte_back`/`charlotte_forward` correctly traverse same-URL history entries (e.g. SPA `pushState`); listing tabs no longer fails entirely when one tab's page is dead; concurrent page renders are serialized per page; cross-origin iframe navigations (OOPIF swaps) and detached CDP sessions are detected and refreshed. (#201, #202, #205)
+- **`charlotte_network` URL blocking** was a no-op — `setBlockedURLs` now runs on the cached CDP session with Network explicitly enabled. (#192)
+- **Argument-validation failures** across interaction/observation/dev tools now return `INVALID_ARGUMENT` instead of `SESSION_ERROR`, giving agents the correct "fixable by caller" recovery signal. (#187)
+- **`charlotte_find` `near`/`within` filters** now error instead of silently returning unfiltered results when the reference element has no bounds. (#204)
+- **`charlotte_type` `clear_first`** now reliably replaces existing text on macOS-hosted Chromium (was prepending due to Ctrl+A vs Cmd+A); selection now happens in page context, platform-independent. (#204)
+- **`charlotte_toggle`** now rejects non-toggleable elements, pointing callers to `charlotte_click`. (#204)
+- **`charlotte_wait_for`** now rejects `state` supplied without `element_id`. (#204)
+- **Dev-mode hardening:** static-server path boundary uses a separator-anchored check (was bare `startsWith`, allowing prefix-match escapes); `express.static` no longer serves dotfiles (e.g. `.git/config`); `dev_audit` link checks filter private/loopback/link-local ranges to block SSRF via page-supplied hrefs; `charlotte_configure` validates `screenshot_dir`/`output_dir` against the workspace root; `resolveOutputPath` lstat-checks for pre-planted leaf symlinks; the artifact index validates IDs and writes atomically; `FileWatcher` post-ready errors are no longer swallowed and mid-reload changes schedule a trailing reload. (#203)
+
+### Internal
+
+- **Test infrastructure:** added a shared in-memory MCP harness (`tests/helpers/mcp-harness.ts`) and `pollUntil` waiter (`tests/helpers/poll.ts`); the integration suite now exercises tools through their real MCP handlers via `callTool` instead of reimplementing handler logic with raw CDP/Puppeteer. Eliminated fixed-sleep timing races in dialog, popup, monitoring, and keyboard tests by polling on observable state; capped the vitest fork pool to bound concurrent Chromium instances; fixed a stale-`ElementHandle` leak in `dialog.test.ts`. (#195, #206, #166)
+- **New tests:** `tests/integration/agent-flow.test.ts` (end-to-end navigate→observe→find→click→type→fill_form→submit→back→forward→diff through MCP handlers); `tests/integration/handler-smoke.test.ts` (screenshot, monitoring, dev_mode); unit suites for the `content-extractor`, `layout-extractor`, `accessibility-extractor`, and `frame-discovery` renderer modules (99 new tests), pinning documented invariants (Chromium AX uses role `"image"` not `"img"`; null `backendDOMNodeId` skips layout extraction). vitest now excludes `.claude/**` worktrees from collection. (#195, #209)
+- **CI:** coverage thresholds enforced by a new coverage job (global + stricter on `src/tools`); Puppeteer Chromium cached between runs (keyed on `package-lock.json`); test matrix on Node 20 and 22; the docker-publish workflow now builds the image, runs `tests/docker-smoke-test.mjs` against it, and only pushes on success; added an `npm audit --audit-level=high` job. (#207)
+- Replaced CDP `send()` `as any` casts with proper types. (#171)
+- Removed unused `Page`/`Network` CDP domain enables and a duplicated interactive-role set from the render session; made the `ZERO_BOUNDS` layout sentinel genuinely immutable; extracted a shared `clickAtCoordinates()` so click_at and element clicks share one implementation. (#204, #205)
+
+## [0.6.3] - 2026-04-17
+
+### Fixed
+
+- **Republished with correct `dist/` artifacts** — The v0.6.2 tarball on npm was packaged from a stale `dist/` directory and did not actually include the `--cdp-endpoint` CLI option, iframe interaction, or other v0.6.2 source changes, despite those features being present at the v0.6.2 git tag. v0.6.3 ships the same intended feature set with the correct compiled output. No source-level changes versus v0.6.2. Fixes #164.
+
+### Internal
+
+- Added `prepublishOnly` script (`npm run build && npm test`) so `npm publish` rebuilds and re-tests before packaging, preventing stale-dist publishes.
+
+## [0.6.2] - 2026-04-16
+
+### Added
+
+- **`--cdp-endpoint` CLI option** — Connect to a running Chrome/Chromium instance via its DevTools Protocol endpoint instead of launching a new browser. Supports raw `ws://` URLs and a `channel:chrome` shorthand that auto-discovers the endpoint. `BrowserManager` gains a connected mode that uses `puppeteer.connect()`, and `PageManager.adoptExistingPages()` picks up pre-existing tabs. Closes GAP-33. (#153)
+- **Iframe interaction** — Interaction tools (click, type, select, toggle, submit, scroll, hover, key, wait_for, upload, fill_form) now work against elements inside child frames. Complements the iframe content extraction added in v0.5.0, so agents can both see and act on iframe contents. Closes #66. (#160)
+- **CI workflow** — GitHub Actions workflow runs lint, typecheck, and full test suite on push and PR. Closes #56, #58. (#154)
+- **End-to-end MCP protocol tests** — New test suite exercises the server over an in-memory MCP transport to catch protocol-level regressions. Closes #60. (#156)
+
+### Changed
+
+- **Reduced CDP session churn** — Interaction helpers no longer repeatedly attach/detach CDP sessions. Sessions are reused across calls, cutting per-action overhead. Closes #113. (#159)
+- Applied Prettier formatting across all source and test files.
+- Dependency updates: hono (#161), next (#152), basic-ftp (#151).
+
+### Fixed
+
+- **Cross-frame drag validation** — `charlotte_drag` now validates that source and target elements belong to the same frame and surfaces a `CharlotteError` instead of producing undefined mouse behavior. (#160)
+- **Stale frame sessions in `CDPSessionManager`** — Frame sessions are now cleaned up when frames detach, and empty reverse-index entries are pruned. Prevents leaks when navigating pages with many iframes. Closes #67. (#155)
+- **Batched startup `tool.disable()`** — Disabling tools at startup based on profile no longer floods the client with a `sendToolListChanged()` notification per tool. Mirrors the batching fix for runtime enable/disable in v0.6.1. (#158)
+- **Viewport preserved on CDP connect** — When connecting via `--cdp-endpoint`, Charlotte no longer overrides the viewport of pages already open in the target browser.
+
+### Internal
+
+- Mixed-state group enable/disable tests added to cover partial-enable scenarios in the meta-tool. Closes #149. (#157)
+
+## [0.6.1] - 2026-04-09
+
+### Fixed
+
+- **Runtime tool group activation** — Tools enabled via `charlotte_tools` were not callable by MCP clients. Each `tool.enable()` call triggered a separate `sendToolListChanged()` notification, flooding the client before the tool response was returned. Now batches state changes and sends a single notification per enable/disable action. Fixes #146. (#147)
+
+### Changed
+
+- Dependency updates: vite (#142), npm_and_yarn group (#144), basic-ftp (#145)
+
+## [0.6.0] - 2026-04-03
+
+### Added
+
+- **`charlotte_fill_form`** — Batch form fill tool that accepts an array of `{element_id, value}` pairs and fills an entire form in a single tool call. Supports text inputs, textareas, selects, checkboxes, radios, toggles, date inputs, and color inputs. Closes GAP-04. (#134)
+- **Slow typing** — `charlotte_type` now accepts `slowly` (boolean) and `character_delay` (ms) parameters for character-by-character input. Required for sites with key-by-key event handlers (autocomplete, search-as-you-type). Closes GAP-05. (#126)
+- **Lazy Chromium initialization** — Browser launch is deferred to the first tool call instead of startup, preventing idle Chromium instances when MCP clients spawn multiple server processes simultaneously. (#138)
+- **MCP logging capability** — Server now declares `logging: {}` capability so the MCP SDK handles `logging/setLevel` requests from clients. (#138)
+- **CLI improvements** — Migrated to `node:util` `parseArgs`, added `--help` flag, improved `--no-headless` handling. (#130, #133)
+- **Default viewport 1440×900** — Increased from 800×600 for more realistic rendering. Centralized viewport config with device presets. (#121)
+
+### Changed
+
+- **BREAKING: Tool name prefix migration** — All 43 MCP tool names renamed from `charlotte:xxx` to `charlotte_xxx` to comply with the MCP spec's `[A-Za-z0-9_.-]` character constraint and silence SDK v1.26.0+ validation warnings. Closes #57. (#139)
+- **Node.js requirement relaxed to >=20** — No Node 22-only APIs are used. Opens Charlotte to the broader Node 20 LTS user base. (#136)
+- Select options capped at 50 to prevent oversized responses. (#126)
+
+### Fixed
+
+- **`pollUntilCondition` JS evaluation** — Replaced `new Function("return " + expr)` with CDP `Runtime.evaluate` in the wait utility, fixing multi-statement silent-return bug. Consistent with `evaluate.ts` and `wait-for.ts`. (#135)
+- **Screenshot stale compositor frame** — Flush compositor frame before capture to prevent stale screenshots on SPA page transitions. (#120)
+- **Timer leak in `waitForCompositorFrame`** — `clearTimeout` moved to `finally` block. (#120)
+- **CDP error logging** — Unexpected CDP errors in layout extraction are now logged instead of silently swallowed. (#117)
+- **macOS symlink test paths** — File output integration tests resolve `/var` symlinks on macOS. (#122)
+- **CVE-2026-31988** — Override yauzl to 3.2.1 to address zip extraction vulnerability. (#106)
+- **Server version from package.json** — Version string is now read from `package.json` at module load instead of being hardcoded. (#101)
+
+### Improved
+
+- **Snapshot store O(1) lookup** — Added Map index for constant-time snapshot retrieval by ID. (#116)
+- **Interaction module split** — `interaction.ts` refactored into focused modules for maintainability. (#112, #114)
+
+## [0.5.1] - 2026-03-14
+
+### Added
+
+- **Popup and target="\_blank" tab capture** — Clicks on `target="_blank"` links and `window.open()` calls were silently lost because PageManager had no `popup` event handler. New tabs are now auto-captured via `page.on("popup")`, auto-cleaned when pages close themselves, and surfaced as `opened_tabs` in tool responses using single-consumption semantics. Fixes #103, #98.
+- **Contributor issue templates** — Bug report, feature request, and tool request templates added to the repository. Community links added to README. (#102)
+
+### Changed
+
+- Renamed AXIOM to ASM across Charlotte site (#100).
+- Bumped hono dependency (#99).
+
+## [0.5.0] - 2026-03-09
+
+### Added
+
+- **Iframe content extraction** — Child frames are now discovered and their content (interactive elements, content summaries, full text) is merged into the parent page representation. Configurable depth limit (default 3). Iframe interactive elements are included in the `interactive` array and `interactive_summary`. Closes #23.
+- **Structural tree view** — `charlotte:observe` now accepts a `view` parameter with `"tree"` and `"tree-labeled"` modes that render the page as a hierarchical tree with indentation, replacing the flat JSON representation. Tree-labeled mode annotates interactive elements with their IDs for direct use.
+- **File output for large responses** — `charlotte:observe` and `charlotte:screenshot` accept an `output_file` parameter to write results to disk instead of returning inline, reducing token consumption for large pages. Relative paths resolve against `output_dir` (configurable via `charlotte:configure` or `--output-dir` CLI flag). Closes GAP-13, #16.
+- **Screenshot artifact management** — `charlotte:screenshots` (list), `charlotte:screenshot_get` (retrieve), `charlotte:screenshot_delete` (remove) tools for managing persistent screenshot files. `charlotte:screenshot` gains a `save` parameter for persistence.
+- **Code quality tooling** — ESLint, Prettier, and coverage configuration added to the project.
+
+### Fixed
+
+- **`wait_for` JS evaluation** — Replaced `new Function("return " + expr)` with CDP `Runtime.evaluate`, fixing multi-statement JS conditions that silently returned `undefined` due to ASI. Now consistent with `charlotte:evaluate`. Fixes #73.
+- **Browser reconnection race** — `getBrowser()` now calls `ensureConnected()` to auto-recover instead of throwing immediately. `ensureConnected()` verifies browser health after awaiting concurrent launches. Fixes #83.
+- **Renderer pipeline resilience** — Malformed AX properties no longer crash accessibility extraction (#86). Content extraction skips failed nodes instead of aborting (#79). Recursive frame traversal catches errors per-frame (#74). Batch layout extraction uses `Promise.allSettled()` for partial failure tolerance (#77).
+- **Event listener cleanup** — `closeTab()` now explicitly removes all page event listeners before `page.close()` to prevent memory leaks across tab cycles. Fixes #89.
+- **Dialog handler error handling** — Dialog event handler wrapped in try/catch to prevent unhandled promise rejections when dialog is already dismissed. Fixes #75.
+- **Dev mode shutdown resilience** — `DevModeState.stopAll()` catches errors per substep so a file watcher or static server failure doesn't prevent browser cleanup. Fixes #80.
+- **Form field matching null guard** — `resolveId()` null return no longer produces false-positive form field matches. Fixes #76.
+- **Landmark ID collision** — Main-frame landmarks now pass explicit `"main"` frameId for consistent hash input, preventing rare cross-frame ID collisions. Fixes #82.
+- **CLI argument parsing** — `--output-dir=`, `--profile=`, and `--tools=` flags now use `substring(indexOf("=") + 1)` instead of `split("=")[1]`, preserving paths containing `=`. Fixes #70.
+- **Zod bounds validation** — Added `.min()`/`.max()` constraints to `quality` (1-100), viewport `width`/`height` (>=1), and key `delay` (>=0). Fixes #81.
+- **Test cleanup** — File output integration test no longer leaks artifact store temp directory. Fixes #71.
+- **File output security** — Path traversal prevention, mkdir-before-validation fix, and CLI `output-dir` initialization hardened. Fixes security issues from #16 review.
+
+### Changed
+
+- README rewritten with problem-first opening, expanded MCP client setup configs (Cursor, Windsurf, VS Code, Cline, Amp), and updated tool counts.
+- npm package description and keywords updated for discoverability.
+- Site meta descriptions updated to lead with token-efficiency comparison.
+
+## [0.4.2] - 2026-03-06
+
+### Added
+
+- **`charlotte:upload`** — Set files on `<input type="file">` elements via CDP `DOM.setFileInputFiles`. Validates file existence and element type before upload. Closes GAP-02 from the Playwright MCP gap analysis.
+- **File input detection** — File inputs (`<input type="file">`) are now correctly identified as `file_input` type in page representations. Previously they appeared as `button` because Chromium's accessibility tree represents them with a button role. A post-extraction reclassification step checks the underlying DOM node.
+- **`charlotte:key` enhancement** — Added `keys` (sequence of key presses), `element_id` (focus a specific element before sending keys), and `delay` (milliseconds between sequence presses) parameters. Enables keyboard-driven interaction with non-input elements like game UIs, terminals, and code editors. Closes #49, #51.
+
+### Fixed
+
+- **Boolean parameter validation error** — `charlotte:console` and `charlotte:requests` `clear` parameter (and `charlotte:type` `clear_first`/`press_enter`) rejected string-coerced booleans (`"true"`/`"false"`) sent by some MCP clients. All boolean parameters now accept both native booleans and their string representations. Fixes #50.
+- **`click_at` skipped hover on framework-managed links** — `click_at` now moves the mouse to target coordinates and pauses 50ms before clicking, matching real user behavior. Previously, framework links (e.g., Next.js `<Link>`) that depend on hover-triggered prefetch would skip client-side navigation. Fixes #48.
+
+### Changed
+
+- Dialog integration tests hardened with MCP end-to-end testing via `InMemoryTransport`, sequential dialog coverage, and dialog-aware action racing tests. Test count 17 → 25. Closes #30, #33, #34.
+
+## [0.4.1] - 2026-03-05
+
+### Added
+
+- **`charlotte:click_at`** — Click at specific page coordinates (x, y). Enables interaction with non-semantic elements (custom widgets, canvas regions, SVG graphics) that don't appear in the accessibility tree. Supports left/right/double click and modifier keys.
+- **CSS selector mode for `charlotte:find`** — New `selector` parameter queries the DOM directly via `DOM.querySelectorAll`, returning elements with Charlotte IDs usable by all interaction tools. Complements the existing accessibility tree search for elements that lack semantic roles.
+
+### Fixed
+
+- **`charlotte:evaluate` silent null on multi-statement code** — Replaced `new Function('return ' + expr)` with CDP `Runtime.evaluate`, which evaluates JavaScript as a program and returns the completion value of the last expression-statement. The previous implementation suffered from ASI (Automatic Semicolon Insertion) silently converting `return\n...` into `return;`, causing multi-line scripts to return null without error.
+
+## [0.4.0] - 2026-03-03
+
+### Added
+
+- **Tiered tool visibility** — Startup profiles control which tools load into the agent's context. `--profile=browse` (default, 22 tools) replaces the previous behavior of loading all 40 tools. Six profiles available: `core` (7), `browse` (22), `interact` (27), `develop` (30), `audit` (13), `full` (40). Granular group selection via `--tools=group1,group2`.
+- **`charlotte:tools` meta-tool** — Runtime tool group management. Agents can list available groups, enable groups to activate tools mid-session, and disable groups to reduce overhead — without restarting the server. Always registered regardless of profile.
+- **Profile benchmark suite** — `npx tsx benchmarks/run-benchmarks.ts --suite profiles` runs tool definition overhead benchmarks across full, browse, and core profiles. Four tests: pure overhead measurement, 5-site browsing session, form interaction, and runtime toggle correctness. Results archived under `benchmarks/results/raw/tiered-profiles-v1/`.
+- **`charlotte:drag`** — Drag an element to another element using mouse primitives (mousedown → intermediate moves → mouseup). Accepts `source_id` and `target_id` element IDs. Closes GAP-01 from the Playwright MCP gap analysis.
+- **Landmark IDs** — Landmarks now have stable hash-based IDs (`rgn-xxxx`) like headings and interactive elements, making them referenceable by tools (e.g., as drag-and-drop targets).
+- **`charlotte:console`** — Retrieve console messages from the active page at all severity levels (log, info, warn, error, debug) with timestamps. Supports level filtering and buffer clearing. Closes GAP-21 from the Playwright MCP gap analysis.
+- **`charlotte:requests`** — Retrieve network request history from the active page with method, status, resource type, and timestamps. Supports filtering by URL pattern, resource type, and minimum status code. Closes GAP-22 from the Playwright MCP gap analysis.
+- **Modifier key clicks** — `charlotte:click` now accepts an optional `modifiers` parameter (`ctrl`, `shift`, `alt`, `meta`, or combinations) for Ctrl+Click, Shift+Click, etc. Works with all click types (left, right, double).
+
+### Fixed
+
+- **Pseudo-element content duplication** — `extractFullContent()` was emitting both content-role node names and their StaticText children, causing duplicate text when CSS `::before`/`::after` pseudo-elements were present.
+
+### Changed
+
+- Default startup profile is now `browse` (22 tools) instead of loading all 40 tools. Use `--profile=full` for the previous behavior.
+- PageManager now captures all console messages and all network responses (not just errors). Ring buffers capped at 1000 entries each. Backward-compatible: `getConsoleErrors()` and `getNetworkErrors()` still return only errors for `PageRepresentation.errors`.
+- Static server now binds to `127.0.0.1` instead of `0.0.0.0`, preventing external network access. Directory traversal prevention via `allowedWorkspaceRoot` validation with `fs.realpathSync()`.
+
+## [0.3.0] - 2026-02-24
+
+### Added
+
+- **`charlotte:dialog`** — Accept or dismiss JavaScript dialogs (`alert`, `confirm`, `prompt`, `beforeunload`). Dialogs are captured by PageManager and surfaced as `pending_dialog` in every tool response while blocking. Response includes `dialog_handled` metadata confirming what was resolved. Closes GAP-03 from the Playwright MCP gap analysis.
+- **Dialog-aware action racing** — Interaction tools (`click`, `submit`) now race the action against dialog detection. Clicks that trigger dialogs return immediately with `pending_dialog` instead of hanging for 30s.
+- **`dialog_auto_dismiss` configuration** — New parameter on `charlotte:configure` to auto-handle dialogs without explicit tool calls. Options: `"none"` (default, queue for manual handling), `"accept_alerts"`, `"accept_all"`, `"dismiss_all"`.
+- **Dialog-blocking stub responses** — When a dialog is open, `renderActivePage` returns a minimal stub representation (since `page.title()` hangs while dialogs are blocking). The stub includes `pending_dialog` so agents always know a dialog needs handling.
+
+### Changed
+
+- `PageManager` now accepts `CharlotteConfig` in its constructor for dialog auto-dismiss configuration.
+- Config initialization moved before `PageManager` creation in `src/index.ts`.
+
+## [0.2.0] - 2026-02-22
+
+### Changed
+
+- **Compact response format** — Responses are now dramatically smaller, reducing context window consumption by 50-99% depending on the page. Charlotte's `navigate` returns 336 characters for Hacker News vs Playwright MCP's 61,230.
+- **Interactive summary for minimal detail** — Navigation tools now return interactive element counts grouped by landmark region instead of listing every element individually. Wikipedia's minimal response dropped from 711K to 7.7K characters.
+- **Default state stripping** — Interactive elements no longer include redundant default state fields (`enabled: true`, `visible: true`, `focused: false`). Only non-default values are serialized.
+- **Compact JSON serialization** — All tool responses use compact JSON with empty fields stripped.
+- **Navigation defaults to minimal** — `navigate`, `back`, `forward`, and `reload` now return minimal detail by default. Pass `detail: "summary"` or `detail: "full"` for more context.
+- **Updated tool descriptions** — `navigate` and `observe` descriptions now guide agents through the minimal-then-find workflow.
+
+### Removed
+
+- Removed unused `alerts` field from page representation.
+
+## [0.1.3] - 2026-02-22
+
+### Added
+
+- Benchmark suite for comparing Charlotte against Playwright MCP across real websites.
+
+## [0.1.2] - 2026-02-22
+
+### Changed
+
+- Added `mcpName` field for MCP registry publishing.
+
+## [0.1.1] - 2026-02-22
+
+### Added
+
+- **`get_cookies`** — Retrieve cookies for the active page with optional URL filtering. Returns cookie name, value, domain, path, and security flags.
+- **`clear_cookies`** — Clear cookies from the browser with optional name filtering. Supports clearing all cookies or specific cookies by name.
+
+### Fixed
+
+- Session integration tests now use HTTP URLs for cookie operations (CDP requires http/https for `Network.deleteCookies`).
+
+## [0.1.0] - 2026-02-13
+
+Initial release. All six implementation phases complete.
+
+### Tools
+
+**Navigation**: `navigate`, `back`, `forward`, `reload`
+
+**Observation**: `observe` (minimal/summary/full detail levels, CSS selector scoping, computed styles), `find` (text, role, type, spatial near/within filters), `screenshot` (PNG/JPEG/WebP, element or full page), `diff` (structural comparison against snapshots)
+
+**Interaction**: `click` (left/right/double), `type` (with clear_first, press_enter), `select`, `toggle`, `submit`, `scroll` (page/container, directional), `hover`, `key` (with modifiers), `wait_for` (element state, text, selector, JS expression)
+
+**Session**: `tabs`, `tab_open`, `tab_switch`, `tab_close`, `set_cookies`, `set_headers`, `viewport` (mobile/tablet/desktop presets), `network` (3G/4G/offline throttling, URL blocking), `configure` (snapshot depth, auto-snapshot mode)
+
+**Development**: `dev_serve` (static server + file watching with auto-reload), `dev_inject` (CSS/JS injection with delta), `dev_audit` (a11y, performance, SEO, contrast, broken links)
+
+**Utilities**: `evaluate` (JS execution with timeout and promise awaiting)
+
+### Architecture
+
+- Renderer pipeline: accessibility tree + layout geometry + interactive element extraction
+- Hash-based element IDs stable across re-renders
+- Snapshot store with ring buffer and structural diffing
+- Chromium crash recovery with automatic relaunch
+- Dev mode reload events surfaced through existing tool responses (zero integration overhead)
+
+### Testing
+
+222 tests across 19 test files (unit + integration).

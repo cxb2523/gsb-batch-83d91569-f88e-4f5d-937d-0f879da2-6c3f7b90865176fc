@@ -1,0 +1,74 @@
+services:
+  # Primary service: Debian image, HTTP transport, Chromium sandbox ENABLED
+  # (decision D22 — spike R4 verified this in-container without --privileged).
+  # Full walkthrough (token generation, publicOrigin/OAuth facade, tunnel
+  # setup): https://charlotte.mintlify.site/self-hosting. Sandbox posture
+  # details: https://charlotte.mintlify.site/docker.
+  charlotte:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: charlotte:http
+    container_name: charlotte-mcp
+    # Chromium's own sandbox (namespaces + seccomp-BPF) is kept ON in this
+    # image (CHARLOTTE_NO_SANDBOX is unset — see Dockerfile). Docker's
+    # DEFAULT seccomp profile blocks the unprivileged-userns syscalls that
+    # sandbox setup needs, so we swap in the surgical profile below, which
+    # un-gates exactly the 23 syscalls Chromium needs and nothing else.
+    # Docker's default AppArmor profile is kept as-is (do NOT add
+    # `apparmor:unconfined` — on hosts with the Ubuntu unprivileged-userns
+    # AppArmor restriction, default AppArmor is what grants the userns
+    # exemption in the first place; removing it breaks the sandbox again).
+    security_opt:
+      - "seccomp:./docker/chrome-seccomp.json"
+    # Fallback for hosts where mounting a custom seccomp profile is awkward
+    # (e.g. some managed container platforms): grant SYS_ADMIN with Docker's
+    # DEFAULT seccomp instead of swapping the profile. This also verified as
+    # sandbox-enabled in spike R4, but SYS_ADMIN is a broad capability (far
+    # more than the syscalls the sandbox actually needs), so the seccomp
+    # profile above is the narrower, preferred posture. Swap them by
+    # commenting out `security_opt` above and uncommenting below:
+    # cap_add:
+    #   - SYS_ADMIN
+    #
+    # On hosts that don't carry the unprivileged-userns AppArmor restriction
+    # (i.e. not Ubuntu 23.10+/24.04-like), Chromium's sandbox may already
+    # work with neither relaxation — try default first if you're unsure.
+    shm_size: '2gb'
+    ports:
+      - "3737:3737"
+    environment:
+      # REQUIRED: export CHARLOTTE_AUTH_TOKEN before `docker compose up` — HTTP
+      # mode refuses to start without it. Generate one: `openssl rand -hex 32`.
+      - CHARLOTTE_AUTH_TOKEN=${CHARLOTTE_AUTH_TOKEN:?export CHARLOTTE_AUTH_TOKEN first (openssl rand -hex 32)}
+      - NODE_ENV=production
+      # CHARLOTTE_NO_SANDBOX intentionally NOT set here — leaving it unset
+      # keeps the sandbox ON (see Dockerfile comment / D22).
+    volumes:
+      # Supplies the `http` block (host, port, publicOrigin, allowedHosts,
+      # profile, ...) — see charlotte.config.example.json and
+      # https://charlotte.mintlify.site/self-hosting.
+      # `host` must be "0.0.0.0" here so the server is reachable from outside
+      # the container; the code default (127.0.0.1) is loopback-only and
+      # would only be reachable from inside this container's own network
+      # namespace.
+      - ./charlotte.config.json:/app/charlotte.config.json:ro
+
+  # Local/dev alternative: Alpine image, stdio transport, sandbox DISABLED.
+  # Sandbox-enabled operation is UNVERIFIED for Alpine's system Chromium
+  # (only the Debian image above was verified under D22/spike R4) — this
+  # variant keeps CHARLOTTE_NO_SANDBOX=1 (set in Dockerfile.alpine) rather
+  # than guessing. Not exposed by default: `docker compose --profile local up`.
+  charlotte-stdio:
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+    image: charlotte:alpine
+    container_name: charlotte-mcp-alpine
+    stdin_open: true
+    shm_size: '2gb'
+    environment:
+      - NODE_ENV=production
+      - CHARLOTTE_NO_SANDBOX=1
+    profiles:
+      - local  # Only starts with: docker compose --profile local up

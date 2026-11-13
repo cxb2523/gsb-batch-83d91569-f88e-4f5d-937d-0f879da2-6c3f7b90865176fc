@@ -1,0 +1,345 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import * as path from "node:path";
+import * as os from "node:os";
+import * as fs from "node:fs/promises";
+import { BrowserManager } from "../../src/browser/browser-manager.js";
+import { resolveTestNoSandbox } from "../helpers/sandbox-env.js";
+import { PageManager } from "../../src/browser/page-manager.js";
+import { CDPSessionManager } from "../../src/browser/cdp-session.js";
+import { RendererPipeline } from "../../src/renderer/renderer-pipeline.js";
+import { ElementIdGenerator } from "../../src/renderer/element-id-generator.js";
+import { SnapshotStore } from "../../src/state/snapshot-store.js";
+import { ArtifactStore } from "../../src/state/artifact-store.js";
+import { createDefaultConfig } from "../../src/types/config.js";
+import type { CharlotteConfig } from "../../src/types/config.js";
+import type { ToolDependencies } from "../../src/core/tool-helpers.js";
+import { renderActivePage, renderAfterAction } from "../../src/core/tool-helpers.js";
+import { setupMcpHarness, parseToolJson, type McpHarness } from "../helpers/mcp-harness.js";
+import type { InteractiveElement } from "../../src/types/page-representation.js";
+import { pollUntil } from "../helpers/poll.js";
+
+const DRAG_FIXTURE = `file://${path.resolve(import.meta.dirname, "../fixtures/pages/drag.html")}`;
+const FIXTURES_DIR = path.resolve(import.meta.dirname, "../fixtures/pages");
+
+describe("Drag and drop integration", () => {
+  let browserManager: BrowserManager;
+  let config: CharlotteConfig;
+  let pageManager: PageManager;
+  let elementIdGenerator: ElementIdGenerator;
+  let deps: ToolDependencies;
+  let artifactDirectory: string;
+
+  beforeAll(async () => {
+    browserManager = new BrowserManager(undefined, { noSandbox: resolveTestNoSandbox() });
+    await browserManager.launch();
+    config = createDefaultConfig();
+    pageManager = new PageManager(config);
+    await pageManager.openTab(browserManager);
+    const cdpSessionManager = new CDPSessionManager();
+    elementIdGenerator = new ElementIdGenerator();
+    const rendererPipeline = new RendererPipeline(cdpSessionManager, elementIdGenerator);
+    artifactDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "charlotte-drag-test-"));
+    const artifactStore = new ArtifactStore(artifactDirectory);
+    await artifactStore.initialize();
+    deps = {
+      browserManager,
+      pageManager,
+      cdpSessionManager,
+      rendererPipeline,
+      elementIdGenerator,
+      snapshotStore: new SnapshotStore(config.snapshotDepth),
+      artifactStore,
+      config,
+    };
+  });
+
+  afterAll(async () => {
+    await browserManager.close();
+    await fs.rm(artifactDirectory, { recursive: true, force: true }).catch(() => {});
+  });
+
+  beforeEach(async () => {
+    const page = pageManager.getActivePage();
+    await page.goto(DRAG_FIXTURE, { waitUntil: "load" });
+    // Render to populate element IDs
+    await renderActivePage(deps, { source: "action" });
+  });
+
+  async function getResultText(): Promise<string> {
+    const page = pageManager.getActivePage();
+    return page.evaluate(() => {
+      return document.getElementById("result")?.textContent ?? "";
+    });
+  }
+
+  /** The fixture sets body[data-drag-state] to "released" on the document-level mouseup. */
+  async function getDragState(): Promise<string> {
+    const page = pageManager.getActivePage();
+    return page.evaluate(() => document.body.dataset.dragState ?? "");
+  }
+
+  async function getZoneChildren(zoneId: string): Promise<string[]> {
+    const page = pageManager.getActivePage();
+    return page.evaluate((id) => {
+      const zone = document.getElementById(id);
+      if (!zone) return [];
+      return Array.from(zone.querySelectorAll(".draggable")).map((el) => el.id);
+    }, zoneId);
+  }
+
+  function findInteractiveByLabel(
+    representation: Awaited<ReturnType<typeof renderActivePage>>,
+    label: string,
+  ) {
+    return representation.interactive.find((el) => el.label === label);
+  }
+
+  function findLandmarkByLabel(
+    representation: Awaited<ReturnType<typeof renderActivePage>>,
+    label: string,
+  ) {
+    return representation.structure.landmarks.find((lm) => lm.label === label);
+  }
+
+  /** Get the center coordinates of an element by its backend node ID. */
+  async function getCenter(backendNodeId: number) {
+    const page = pageManager.getActivePage();
+    const session = await page.createCDPSession();
+    try {
+      await session.send("DOM.scrollIntoViewIfNeeded", { backendNodeId });
+      const { model } = await session.send("DOM.getBoxModel", { backendNodeId });
+      const quad = model.content;
+      return {
+        x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+        y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4,
+      };
+    } finally {
+      await session.detach();
+    }
+  }
+
+  /**
+   * Perform a drag from source to target by backend node IDs. Returns as soon as
+   * the mouse is released; callers poll the observable outcome (zone children,
+   * result text, drag state) rather than sleeping.
+   */
+  async function performDrag(sourceNodeId: number, targetNodeId: number) {
+    const page = pageManager.getActivePage();
+    const sourceCenter = await getCenter(sourceNodeId);
+    const targetCenter = await getCenter(targetNodeId);
+
+    await page.mouse.move(sourceCenter.x, sourceCenter.y);
+    await page.mouse.down();
+    // Intermediate move to trigger drag start
+    await page.mouse.move(
+      sourceCenter.x + (targetCenter.x - sourceCenter.x) * 0.25,
+      sourceCenter.y + (targetCenter.y - sourceCenter.y) * 0.25,
+      { steps: 5 },
+    );
+    // Intentional gesture pacing, not a race: gives the page a frame between move
+    // batches so mouseenter/mouseleave fire on zones like a real drag would.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await page.mouse.move(targetCenter.x, targetCenter.y, { steps: 10 });
+    // Intentional gesture pacing (see above) before releasing over the target.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await page.mouse.up();
+  }
+
+  describe("basic drag operations", () => {
+    it("drags an item from zone A to zone B", async () => {
+      const representation = await renderActivePage(deps, { source: "action" });
+      const item1 = findInteractiveByLabel(representation, "Item 1");
+      const zoneB = findLandmarkByLabel(representation, "Zone B");
+      expect(item1).toBeDefined();
+      expect(zoneB).toBeDefined();
+
+      const sourceNodeId = elementIdGenerator.resolveId(item1!.id);
+      const targetNodeId = elementIdGenerator.resolveId(zoneB!.id);
+      expect(sourceNodeId).not.toBeNull();
+      expect(targetNodeId).not.toBeNull();
+
+      await performDrag(sourceNodeId!, targetNodeId!);
+
+      // Verify item moved to zone B
+      const zoneBChildren = await pollUntil(
+        async () => {
+          const children = await getZoneChildren("zone-b");
+          return children.includes("item-1") ? children : null;
+        },
+        { message: "item-1 never appeared in zone-b after drop" },
+      );
+      expect(zoneBChildren).toContain("item-1");
+
+      const resultText = await getResultText();
+      expect(resultText).toContain("dropped");
+      expect(resultText).toContain("item-1");
+      expect(resultText).toContain("zone-b");
+    });
+
+    it("item remains in original zone if dropped outside a valid target", async () => {
+      // Item should stay in zone A if mouse is released elsewhere
+      const zoneAChildrenBefore = await getZoneChildren("zone-a");
+      expect(zoneAChildrenBefore).toContain("item-1");
+      expect(zoneAChildrenBefore).toContain("item-2");
+
+      const representation = await renderActivePage(deps, { source: "action" });
+      const item1 = findInteractiveByLabel(representation, "Item 1");
+      expect(item1).toBeDefined();
+
+      const sourceNodeId = elementIdGenerator.resolveId(item1!.id);
+      expect(sourceNodeId).not.toBeNull();
+
+      const sourceCenter = await getCenter(sourceNodeId!);
+
+      const page = pageManager.getActivePage();
+      // Drag to empty area (outside any dropzone) and release
+      await page.mouse.move(sourceCenter.x, sourceCenter.y);
+      await page.mouse.down();
+      await page.mouse.move(sourceCenter.x + 10, sourceCenter.y + 10, { steps: 3 });
+      // Intentional gesture pacing, not a race: a frame between move batches so the
+      // page observes a real drag motion before the release.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await page.mouse.move(600, 400, { steps: 5 }); // empty area
+      await page.mouse.up();
+
+      // Wait for the positive signal that the gesture finished (document mouseup
+      // handler ran) before asserting the negative: nothing moved.
+      await pollUntil(async () => (await getDragState()) === "released", {
+        message: "drag fixture never reported the release",
+      });
+
+      // Items should still be in zone A
+      const zoneAChildrenAfter = await getZoneChildren("zone-a");
+      expect(zoneAChildrenAfter).toContain("item-1");
+    });
+
+    it("can drag multiple items sequentially", async () => {
+      const representation = await renderActivePage(deps, { source: "action" });
+      const item1 = findInteractiveByLabel(representation, "Item 1");
+      const item2 = findInteractiveByLabel(representation, "Item 2");
+      const zoneB = findLandmarkByLabel(representation, "Zone B");
+      expect(item1).toBeDefined();
+      expect(item2).toBeDefined();
+      expect(zoneB).toBeDefined();
+
+      // Drag item 1 to zone B
+      await performDrag(
+        elementIdGenerator.resolveId(item1!.id)!,
+        elementIdGenerator.resolveId(zoneB!.id)!,
+      );
+
+      let zoneBChildren = await pollUntil(
+        async () => {
+          const children = await getZoneChildren("zone-b");
+          return children.includes("item-1") ? children : null;
+        },
+        { message: "item-1 never appeared in zone-b after first drop" },
+      );
+      expect(zoneBChildren).toContain("item-1");
+
+      // Re-render to get updated element positions and IDs
+      const updatedRep = await renderActivePage(deps, { source: "action" });
+      const freshItem2 = findInteractiveByLabel(updatedRep, "Item 2");
+      const freshZoneB = findLandmarkByLabel(updatedRep, "Zone B");
+      expect(freshItem2).toBeDefined();
+      expect(freshZoneB).toBeDefined();
+
+      // Drag item 2 to zone B
+      await performDrag(
+        elementIdGenerator.resolveId(freshItem2!.id)!,
+        elementIdGenerator.resolveId(freshZoneB!.id)!,
+      );
+
+      zoneBChildren = await pollUntil(
+        async () => {
+          const children = await getZoneChildren("zone-b");
+          return children.includes("item-2") ? children : null;
+        },
+        { message: "item-2 never appeared in zone-b after second drop" },
+      );
+      expect(zoneBChildren).toContain("item-1");
+      expect(zoneBChildren).toContain("item-2");
+
+      // Zone A should be empty of draggables
+      const zoneAChildren = await getZoneChildren("zone-a");
+      expect(zoneAChildren).toHaveLength(0);
+    });
+  });
+
+  describe("page representation after drag", () => {
+    it("renderAfterAction produces a delta diff", async () => {
+      const representation = await renderActivePage(deps, { source: "action" });
+      const item1 = findInteractiveByLabel(representation, "Item 1");
+      const zoneB = findLandmarkByLabel(representation, "Zone B");
+      expect(item1).toBeDefined();
+      expect(zoneB).toBeDefined();
+
+      await performDrag(
+        elementIdGenerator.resolveId(item1!.id)!,
+        elementIdGenerator.resolveId(zoneB!.id)!,
+      );
+      await pollUntil(async () => (await getZoneChildren("zone-b")).includes("item-1"), {
+        message: "item-1 never appeared in zone-b after drop",
+      });
+
+      const afterDrag = await renderAfterAction(deps);
+
+      // The representation should still be valid
+      expect(afterDrag.url).toContain("drag.html");
+      expect(afterDrag.title).toBe("Drag and Drop Test Page");
+      // Delta should be present (snapshot was taken before the action)
+      expect(afterDrag.delta).toBeDefined();
+    });
+  });
+
+  // ─── Issue #187: cross-frame drag is caller-fixable → INVALID_ARGUMENT ───────
+  describe("cross-frame drag (via MCP handler)", () => {
+    let harness: McpHarness;
+
+    beforeAll(async () => {
+      // Iframes need HTTP (not file://) and the render pipeline must descend
+      // into them so iframe elements get IDs.
+      harness = await setupMcpHarness({
+        profile: "full",
+        serveDirectory: FIXTURES_DIR,
+        configOverrides: (cfg) => {
+          cfg.includeIframes = true;
+          cfg.iframeDepth = 3;
+        },
+      });
+      await harness.callTool("charlotte_navigate", {
+        url: `${harness.fixtureServer!.url}/iframe-parent.html`,
+      });
+    });
+
+    afterAll(async () => {
+      await harness.teardown();
+    });
+
+    it("returns INVALID_ARGUMENT (not SESSION_ERROR) when dragging across frames", async () => {
+      // observe descends into the iframe (includeIframes), so the interactive
+      // list contains both main-frame elements (no `frame`) and iframe elements
+      // (with a `frame` URL). Pick one of each so source and target live in
+      // different frames.
+      const observe = parseToolJson<{ interactive?: InteractiveElement[] }>(
+        await harness.callTool("charlotte_observe", { detail: "summary" }),
+      );
+      const interactive = observe.interactive ?? [];
+      const mainFrameElement = interactive.find((el) => el.frame === undefined);
+      const iframeElement = interactive.find((el) => el.frame !== undefined);
+      expect(mainFrameElement).toBeDefined();
+      expect(iframeElement).toBeDefined();
+
+      const result = await harness.callTool("charlotte_drag", {
+        source_id: mainFrameElement!.id,
+        target_id: iframeElement!.id,
+      });
+
+      expect(result.isError).toBe(true);
+      const parsed = parseToolJson<{ error: { code: string; message: string } }>(result);
+      expect(parsed.error.code).toBe("INVALID_ARGUMENT");
+      expect(parsed.error.code).not.toBe("SESSION_ERROR");
+      expect(parsed.error.message).toContain("frame");
+    });
+  });
+});

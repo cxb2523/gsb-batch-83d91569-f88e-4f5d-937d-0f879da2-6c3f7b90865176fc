@@ -1,0 +1,139 @@
+/**
+ * Lightweight MCP client for benchmark harness.
+ * Spawns an MCP server over stdio, sends tool calls, captures responses with timing.
+ */
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { Client } from "@modelcontextprotocol/client";
+import { ToolCallMetrics, captureToolCall } from "./metrics.js";
+
+export interface ServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+export interface ToolCallResult {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  response: unknown;
+  metrics: ToolCallMetrics;
+  isError: boolean;
+}
+
+export interface ToolListMetrics {
+  toolCount: number;
+  toolNames: string[];
+  definitionChars: number;
+  estimatedDefinitionTokens: number;
+  rawToolsJson: string;
+}
+
+export class BenchmarkMcpClient {
+  private client: Client;
+  private transport: StdioClientTransport;
+  private serverConfig: ServerConfig;
+  private connected = false;
+  public callHistory: ToolCallResult[] = [];
+
+  constructor(serverConfig: ServerConfig) {
+    this.serverConfig = serverConfig;
+    this.client = new Client(
+      { name: "charlotte-benchmark", version: "1.0.0" },
+      { capabilities: {} }
+    );
+    this.transport = new StdioClientTransport({
+      command: serverConfig.command,
+      args: serverConfig.args,
+      env: serverConfig.env,
+      cwd: serverConfig.cwd,
+      stderr: "pipe",
+    });
+  }
+
+  async connect(): Promise<void> {
+    await this.client.connect(this.transport);
+    this.connected = true;
+  }
+
+  async listTools(): Promise<string[]> {
+    const response = await this.client.listTools();
+    return response.tools.map((tool) => tool.name);
+  }
+
+  async listToolsWithMetrics(): Promise<ToolListMetrics> {
+    const response = await this.client.listTools();
+    const toolNames = response.tools.map((tool) => tool.name);
+    const rawToolsJson = JSON.stringify(response.tools);
+    const definitionChars = rawToolsJson.length;
+    const estimatedDefinitionTokens = Math.ceil(definitionChars / 3.5);
+
+    return {
+      toolCount: toolNames.length,
+      toolNames,
+      definitionChars,
+      estimatedDefinitionTokens,
+      rawToolsJson,
+    };
+  }
+
+  async callTool(
+    toolName: string,
+    args: Record<string, unknown> = {}
+  ): Promise<ToolCallResult> {
+    if (!this.connected) {
+      throw new Error("Client not connected. Call connect() first.");
+    }
+
+    const { result: response, metrics } = await captureToolCall(async () => {
+      return this.client.callTool({ name: toolName, arguments: args });
+    });
+
+    const toolCallResult: ToolCallResult = {
+      toolName,
+      arguments: args,
+      response,
+      metrics,
+      isError: response.isError === true,
+    };
+
+    this.callHistory.push(toolCallResult);
+    return toolCallResult;
+  }
+
+  getCumulativeMetrics(): {
+    totalChars: number;
+    totalEstimatedTokens: number;
+    totalWallTimeMs: number;
+    totalCalls: number;
+  } {
+    let totalChars = 0;
+    let totalEstimatedTokens = 0;
+    let totalWallTimeMs = 0;
+
+    for (const call of this.callHistory) {
+      totalChars += call.metrics.responseChars;
+      totalEstimatedTokens += call.metrics.estimatedTokens;
+      totalWallTimeMs += call.metrics.wallTimeMs;
+    }
+
+    return {
+      totalChars,
+      totalEstimatedTokens,
+      totalWallTimeMs,
+      totalCalls: this.callHistory.length,
+    };
+  }
+
+  resetHistory(): void {
+    this.callHistory = [];
+  }
+
+  async disconnect(): Promise<void> {
+    if (this.connected) {
+      await this.client.close();
+      this.connected = false;
+    }
+  }
+}

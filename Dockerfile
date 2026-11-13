@@ -1,0 +1,132 @@
+# Charlotte MCP Server Docker Image — HTTP mode, sandbox-enabled self-host image
+# Uses Puppeteer's bundled Chromium for reliability. Chromium's own sandbox is
+# left ON (verified via spike R4 / decision D22): run this with the surgical
+# seccomp profile at docker/chrome-seccomp.json (or the SYS_ADMIN fallback —
+# see docker-compose.yml and DOCKER.md). Do NOT add `--security-opt
+# apparmor=unconfined`; Docker's default AppArmor profile is required for the
+# sandbox to initialize on hosts with the unprivileged-userns AppArmor
+# restriction (Ubuntu 23.10+/24.04).
+
+FROM node:22-slim
+
+# TARGETARCH is supplied by BuildKit (amd64 / arm64). It picks the cloudflared
+# asset below and decides where Chromium comes from:
+#   amd64 -> Puppeteer's bundled Chrome for Testing (downloaded by `npm ci`).
+#            This is the configuration the seccomp/sandbox posture in
+#            docs/docker.mdx was validated against; it does not change.
+#   arm64 -> Debian's `chromium` package. Chrome for Testing has no Linux
+#            arm64 build, so `npm ci` skips the download and
+#            docker/entrypoint.sh points Puppeteer at /usr/bin/chromium.
+ARG TARGETARCH
+
+# Install dependencies for Puppeteer/Chromium
+RUN apt-get update && apt-get install -y \
+    # Chromium dependencies
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    # Fonts for proper text rendering
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    # Utilities
+    ca-certificates \
+    dumb-init \
+    --no-install-recommends \
+    # arm64 only: Debian's Chromium (pulls its own runtime deps) — see header.
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+         apt-get install -y --no-install-recommends chromium; \
+       fi \
+    && rm -rf /var/lib/apt/lists/*
+
+# cloudflared — powers the zero-config demo tunnel in docker/entrypoint.sh (D27).
+# Pinned to a specific release and fetched at build time so the image is
+# reproducible and needs no network fetch at container start. Downloaded with
+# Node's fetch (already in the base image) rather than adding curl/wget.
+# TARGETARCH (declared above) is the asset-name suffix: amd64 / arm64.
+ARG CLOUDFLARED_VERSION=2026.7.3
+RUN node -e "\
+const [, version, arch, outputPath] = process.argv; \
+const url = \`https://github.com/cloudflare/cloudflared/releases/download/\${version}/cloudflared-linux-\${arch}\`; \
+fetch(url).then(async (response) => { \
+  if (!response.ok) throw new Error(\`\${response.status} \${response.statusText} for \${url}\`); \
+  require('fs').writeFileSync(outputPath, Buffer.from(await response.arrayBuffer())); \
+}).catch((error) => { console.error(error.message); process.exit(1); }); \
+" "$CLOUDFLARED_VERSION" "${TARGETARCH:-amd64}" /usr/local/bin/cloudflared \
+    && chmod 0755 /usr/local/bin/cloudflared \
+    && cloudflared --version
+
+# Create non-root user for security
+RUN groupadd -r charlotte && useradd -r -g charlotte -G audio,video charlotte \
+    && mkdir -p /home/charlotte/Downloads \
+    && chown -R charlotte:charlotte /home/charlotte
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies — cache Puppeteer's Chromium inside /app so
+# the non-root charlotte user can access it after chown
+ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
+# On arm64 there is no Chrome for Testing to download (see header), so skip
+# it and rely on the apt `chromium` installed above. amd64 is unchanged.
+RUN if [ "$TARGETARCH" = "arm64" ]; then export PUPPETEER_SKIP_DOWNLOAD=true; fi \
+    && npm ci
+
+# Copy source and build
+COPY tsconfig*.json ./
+COPY src/ ./src/
+
+RUN npm run build
+
+# Fix ownership so non-root user can access node_modules and dist
+RUN chown -R charlotte:charlotte /app
+
+# Container entrypoint: the mode ladder (mounted config / tunnel off / your own
+# public origin / cloudflared demo tunnel). See the header comment in the script.
+# Copied AFTER the recursive chown above, which takes minutes on this tree —
+# this way editing the script doesn't invalidate it. The file stays root-owned;
+# 0755 is all the charlotte user needs to read and execute it.
+COPY --chmod=0755 docker/entrypoint.sh ./docker/entrypoint.sh
+
+# Switch to non-root user
+USER charlotte
+
+# Sandbox posture (D22): CHARLOTTE_NO_SANDBOX is intentionally left UNSET.
+# load-config.ts only disables the sandbox when the value is explicitly
+# truthy; unset means the code default applies — sandbox ON. This image is
+# meant to be run with the surgical seccomp profile (docker/chrome-seccomp.json)
+# so Chromium's own namespace + seccomp-BPF sandbox can actually initialize
+# in-container. See DOCKER.md / SELF_HOSTING.md for the run/compose incantation.
+
+# Default HTTP port (src/config/schema.ts HttpConfigSchema.port default 3737).
+# The operator's mounted charlotte.config.json / CHARLOTTE_AUTH_TOKEN supply
+# the rest of the http block (host, authToken, publicOrigin, allowedHosts).
+EXPOSE 3737
+
+# Liveness check against the unauthenticated /healthz route. Uses Node's
+# built-in fetch (Node 22) instead of installing curl, to keep the image lean.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3737/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+# Charlotte Remote: streamable HTTP transport, sandbox-enabled Chromium.
+#
+# dumb-init stays PID 1 (signal forwarding + zombie reaping) and hands off to
+# the entrypoint, which supervises Charlotte and — in demo mode — cloudflared.
+# There is deliberately no CMD: an empty argv means "run the mode ladder", and
+# any argv the operator passes is exec'd verbatim instead, which is what keeps
+# `docker compose run --rm charlotte node dist/index.js doctor --http` working.
+ENTRYPOINT ["dumb-init", "--", "/app/docker/entrypoint.sh"]
