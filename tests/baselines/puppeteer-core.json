@@ -1,0 +1,70 @@
+{
+  "package": "puppeteer-core",
+  "about": "Expected results of tests/workers/scenarios.mjs for the PATCHED rebrowser-puppeteer-core. Unpatched upstream must pass every scenario (else the run is reported as broken). A scenario listed in allowFail may fail; any other failure is a new regression and fails the run. Add an entry only with a reason and an issue link; never to hide a regression.",
+  "evidence": "Measured 2026-10-17 on Chrome 155.0.8059.84 with the fixes for #59/#86/#100/#116/#129/#69: rebrowser-puppeteer-core 25.14.0 default 29/29, alwaysIsolated 24/29 (only the by-design entries below). The published 25.14.0 (v1.1.0) failed waitForFunction/waitForSelector across navigation, page-reassigns-self, page-scuttles-self and exposeFunction in default mode, and iframe-same-origin/iframe-srcdoc in alwaysIsolated. Unpatched puppeteer-core 25.14.0 passed 29/29.",
+  "scenarios": [
+    "evaluate-basic",
+    "evaluate-main-world-global",
+    "dom-read",
+    "setContent",
+    "click",
+    "type-fill",
+    "waitForSelector-delayed",
+    "waitForFunction-across-navigation",
+    "evaluate-after-navigation",
+    "long-evaluate-5s",
+    "concurrent-evaluates",
+    "iframe-same-origin",
+    "iframe-cross-site-oopif",
+    "worker-evaluate",
+    "exposeFunction-called-by-page",
+    "init-script",
+    "request-events",
+    "request-interception",
+    "popup-window-open",
+    "reload-then-evaluate",
+    "elementHandle-evaluate",
+    "isolatedRealm-evaluate",
+    "waitForSelector-across-navigation",
+    "iframe-srcdoc",
+    "page-reassigns-self",
+    "page-scuttles-self",
+    "iframe-churn-long-evaluate",
+    "exposeFunction-called-on-load",
+    "exposeFunction-after-reload"
+  ],
+  "modes": {
+    "default": {
+      "allowFail": []
+    },
+    "alwaysIsolated": {
+      "allowFail": [
+        {
+          "scenario": "exposeFunction-called-by-page",
+          "issue": "by design",
+          "reason": "alwaysIsolated runs everything in an isolated world and never acquires the page main world, where the exposed function lives; documented mode semantics. Default mode supports it since #69 was fixed"
+        },
+        {
+          "scenario": "exposeFunction-called-on-load",
+          "issue": "by design",
+          "reason": "alwaysIsolated runs everything in an isolated world and never acquires the page main world, where the exposed function lives; documented mode semantics. Default mode supports it since #69 was fixed"
+        },
+        {
+          "scenario": "exposeFunction-after-reload",
+          "issue": "by design",
+          "reason": "alwaysIsolated runs everything in an isolated world and never acquires the page main world, where the exposed function lives; documented mode semantics. Default mode supports it since #69 was fixed"
+        },
+        {
+          "scenario": "evaluate-main-world-global",
+          "issue": "by design",
+          "reason": "alwaysIsolated runs every evaluate() in an isolated world, so page JS globals (window.pageVar) are invisible; documented mode semantics"
+        },
+        {
+          "scenario": "worker-evaluate",
+          "issue": "by design",
+          "reason": "alwaysIsolated rejects web workers: '[rebrowser-patches] web workers are not supported in alwaysIsolated mode'"
+        }
+      ]
+    }
+  }
+}
