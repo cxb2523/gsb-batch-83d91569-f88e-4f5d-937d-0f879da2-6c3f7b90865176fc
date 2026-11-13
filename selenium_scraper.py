@@ -994,8 +994,17 @@ def _run_profile(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]
     countries = set()
     drift: Dict[str, List[str]] = {}
     blocked = False
+    ended_blocked = 0
     for i, outcome in enumerate(outcomes):
-        blocked = blocked or outcome.blocked
+        # `outcome.blocked` records that a refusal was SEEN at some point
+        # during the fetch — including one the HTTP->browser fallback then
+        # cleared. The run's verdict must be computed from how each
+        # account ENDED: an account the fallback recovered is a success,
+        # and a run whose refusals were all recovered is "completed", not
+        # "blocked".
+        if page_flow.counts_as_blocked(outcome.state):
+            blocked = True
+            ended_blocked += 1
         if outcome.state == STATE_USER_UNAVAILABLE:
             unavailable.append(handles[i])
             continue
@@ -1023,7 +1032,12 @@ def _run_profile(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]
 
     # `stop_reason` names what ENDED the run, and the distinctions here are
     # the ones a consumer acts on.
-    if blocked:
+    if failed and ended_blocked == len(outcomes):
+        # EVERY account ended behind a refusal: something stood between
+        # the run and the content. Distinct from "some accounts failed" —
+        # a run that recovered all but one account through the browser
+        # fallback is a partial failure, not a block, and `pages_failed`
+        # says which accounts those are.
         stop_reason = "blocked"
     elif failed:
         stop_reason = "page_failed"

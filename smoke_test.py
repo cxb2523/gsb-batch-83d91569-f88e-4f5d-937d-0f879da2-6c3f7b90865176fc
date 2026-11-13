@@ -798,6 +798,170 @@ def check_page_and_position_are_unique_across_a_multi_account_run():
     equal("the run is complete", meta["stop_reason"], "completed")
 
 
+def check_a_mixed_transport_run_accounts_for_every_handle():
+    """A run that falls back from HTTP to a browser mid-run must still say,
+    per account, what happened — and whether a browser ever ran.
+
+    The defect this pins: the run's verdict was computed from "a refusal
+    was SEEN at some point during the run", and the HTTP->browser fallback
+    makes that true for accounts that then SUCCEEDED. One account blocked
+    on HTTP and recovered by the fallback marked the whole run "blocked" —
+    so a mixed run (one account recovered, a later one failed) reported a
+    verdict indistinguishable from a fully refused one, and a fully
+    recovered run reported "blocked" instead of "completed".
+
+    Driven through the REAL `_fetch_with_policy` fallback with only the
+    two transports faked, so what the test exercises is the fallback
+    itself. No network: the HTTP session's `get_text` and the browser's
+    `goto`/`content` are stubs over the fixtures.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    import http_transport
+
+    # A page carrying a captcha loader classifies as a challenge, which
+    # the policy counts as blocked — the refusal `auto` falls back on.
+    challenge = ("<html><script "
+                 "src='https://www.google.com/recaptcha/api.js'></script>")
+    check("the fake refusal really classifies as blocked",
+          page_flow.counts_as_blocked(
+              product_parser.detect_page_state(challenge, 403)))
+
+    class FakeHttp(http_transport.HttpSession):
+        """The default transport: serves the handles it knows, refuses
+        the rest. A real HttpSession so the fallback's isinstance check
+        fires — but nothing here touches a socket."""
+        def __init__(self, pages=None, default=(403, challenge)):
+            self._pages = pages or {}
+            self._default = default
+            self.calls = 0
+
+        def get_text(self, url):
+            self.calls += 1
+            handle = url.rsplit("@", 1)[1].split("?")[0]
+            return self._pages.get(handle, self._default)
+
+        def close(self):
+            pass
+
+    class FakeBrowser:
+        """The fallback transport, serving a different set of handles —
+        so a run can recover one account and still lose another."""
+        proxy_url = None
+
+        def __init__(self, pages):
+            self._pages = pages
+            self._url = ""
+
+        def goto(self, url):
+            self._url = url
+            return 200
+
+        def content(self):
+            handle = self._url.rsplit("@", 1)[1].split("?")[0]
+            return self._pages.get(handle, challenge)
+
+        def count_selector(self, selector):
+            return 1
+
+        def evaluate(self, js, arg=None):
+            return None
+
+        @property
+        def url(self):
+            return self._url
+
+        def close(self):
+            pass
+
+    def run(url, http_session, browser_pages):
+        """One real `_run_profile` over the stubbed transports.
+
+        Returns (rows, meta, transport_requested, transport_used) — the
+        requested value captured BEFORE the run, exactly as `scrape()`
+        captures it, because the fallback rewrites args.transport when it
+        fires and the two must not be conflated.
+        """
+        args = _fault_args(engine, url=url, transport="auto",
+                           retries=1, retry_delay=0)
+        requested = args.transport
+        handles = engine._handles(args)
+        box = {"session": http_session,
+               "prime_url": "https://www.snapchat.com/@" + handles[0]}
+        original = (engine._open_session, engine._prime_session)
+        engine._open_session = lambda pw, a, pool: FakeBrowser(browser_pages)
+        engine._prime_session = lambda session, a, prime_url: 200
+        try:
+            rows, meta = engine._run_profile(box, None, args, None)
+        finally:
+            (engine._open_session, engine._prime_session) = original
+        return rows, meta, requested, engine._transport_used(args)
+
+    # -- the mixed run: HTTP is refused, the browser recovers @nasa and
+    #    loses @mrbeast ------------------------------------------------
+    http = FakeHttp()
+    rows, meta, requested, used = run("nasa,NASA,mrbeast", http,
+                                      {"nasa": page("nasa")})
+    equal("a duplicate username (any case) is fetched once",
+          meta["handles_requested"], 2)
+    equal("...and really only fetched once", http.calls, 1)
+    equal("the recovered account's row is kept", len(rows), 1)
+    equal("the account the browser could not serve is in pages_failed, "
+          "numbered in the deduplicated --url order",
+          meta["pages_failed"], [2])
+    equal("a mixed run is a partial failure, not a block",
+          meta["stop_reason"], "page_failed")
+    check("the run records that a refusal genuinely remained",
+          meta["blocked"] is True)
+    equal("the fallback really started a browser", used, "browser")
+    equal("...while what was ASKED for stays auto", requested, "auto")
+
+    # -- every refusal recovered: complete, and the browser shows up ----
+    rows, meta, requested, used = run(
+        "nasa,mrbeast", FakeHttp(),
+        {"nasa": page("nasa"), "mrbeast": page("mrbeast")})
+    equal("both accounts recovered over the fallback", len(rows), 2)
+    check("no page failed", not meta["pages_failed"])
+    equal("every refusal recovered: completed", meta["stop_reason"],
+          "completed")
+    check("a recovered refusal is not a block", meta["blocked"] is False)
+    equal("the browser WAS started, and the sidecar must say so", used,
+          "browser")
+    equal("requested still says auto", requested, "auto")
+
+    # -- all served over plain HTTP: no browser, completed --------------
+    rows, meta, requested, used = run(
+        "nasa,mrbeast",
+        FakeHttp({"nasa": (200, page("nasa")),
+                  "mrbeast": (200, page("mrbeast"))}), {})
+    equal("two accounts of rows", len(rows), 2)
+    check("no page failed", not meta["pages_failed"])
+    equal("all served: completed", meta["stop_reason"], "completed")
+    check("no refusal was seen", meta["blocked"] is False)
+    equal("no browser was ever started", used, "http")
+
+    # -- no such accounts: unavailable, never pages_failed ---------------
+    not_found = (404, page("not_found"))
+    rows, meta, requested, used = run(
+        "nasa,mrbeast",
+        FakeHttp({"nasa": not_found, "mrbeast": not_found}), {})
+    check("a missing account is not a failed page",
+          not meta["pages_failed"])
+    equal("both handles unavailable", meta["handles_unavailable"],
+          ["nasa", "mrbeast"])
+    equal("every handle answered: user_unavailable",
+          meta["stop_reason"], "user_unavailable")
+    equal("no fallback on a real answer", used, "http")
+
+    # -- the whole run refused, fallback and all: blocked -----------------
+    rows, meta, requested, used = run("nasa,mrbeast", FakeHttp(), {})
+    equal("every account failed", meta["pages_failed"], [1, 2])
+    equal("a wholly refused run is blocked", meta["stop_reason"], "blocked")
+    check("blocked is set", meta["blocked"] is True)
+    equal("the browser was tried", used, "browser")
+
+
 def check_uuid_key_widget_is_detected_solved_and_injected_as_itself():
     """UUID-key widget: detected, tasked and injected as its own kind, not
     as reCAPTCHA. Solver logging is muted so the run stays quiet."""
