@@ -1,0 +1,244 @@
+# GitHub registers a workflow when a push to the default branch touches its
+# file. The first push of this repo registered only tests.yml, so this one
+# exists to register the rest (2026-09-23).
+# Real runs against tiktok.com. tests.yml (deliberately) never touches the
+# site, a credential or a paid product; everything that does is here.
+#
+# WHAT IS GATED AND WHAT IS NOT
+# -----------------------------
+# A canary that CAN pass without a credential should never be gated on one,
+# and a canary that did not reach the site must never end green.
+#
+# The `videos` job is the first case. This repo's central README claim is
+# that TikTok's EMBED and VIDEO routes answer a bare datacentre address with
+# no key, no proxy and no account — measured 2026-09-22 from Hetzner
+# Helsinki, served to plain curl and to a browser alike. A GitHub runner is
+# a bare datacentre address in a different network. So this job runs a real
+# scrape every Monday and is EXPECTED to be green; if TikTok ever puts
+# that route behind a challenge, it goes red on the next weekly run (exit 3 or 5, or
+# too few rows, all fail it) and the claim is retested without anyone
+# having to remember to.
+#
+# The `scraper-api` job tests the paid path. It needs the TWOCAPTCHA_KEY
+# secret, and without it the job FAILS with an ::error:: naming that
+# secret: a skipped paid check is not a tested one. With the key it must
+# exit 0 and produce the requested video.
+name: canary
+
+on:
+  schedule:
+    - cron: "31 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  videos:
+    name: a real enriched video scrape, with no credentials at all
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+
+      # ONE account, ENRICHED, rather than several unenriched: the
+      # enrichment is where every column this repo is about comes from, so
+      # a canary that skipped it would test the cheap half and leave the
+      # expensive half unwatched.
+      #
+      # @nasa specifically, because its window contains a PHOTO POST — the
+      # shape whose duration, width and height are all 0 and which has no
+      # playAddr at all. A canary that only ever saw ordinary videos would
+      # not notice that branch breaking.
+      - name: Scrape one account's window, enriched
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py --url nasa --delay 0.3 \
+            --format both --out canary_videos
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert what the run actually produced
+        run: |
+          python - <<'PY'
+          import json, sys
+
+          rc = int("${{ steps.run.outputs.exit_code }}")
+          meta = json.load(open("canary_videos.meta.json"))
+          rows = json.load(open("canary_videos.json"))
+          fail = []
+
+          # Exit 5 is a DEFECT here, not an access condition: this canary
+          # uses no credential, so "the content was never obtained" is
+          # impossible rather than routine.
+          if rc != 0:
+              fail.append(f"exit {rc}")
+          if meta["status"] != "complete":
+              fail.append(f"status {meta['status']!r}, expected 'complete'")
+
+          # The window. Measured 10-12 across seven accounts; a number well
+          # outside that is the route changing, which is what this canary
+          # exists to notice.
+          if not 8 <= len(rows) <= 14:
+              fail.append(f"{len(rows)} rows — the embed window measured "
+                          f"10-12 across seven accounts")
+
+          # Every row must have been enriched. If the video pages started
+          # failing, the run would still exit 0 with embed-only rows — a
+          # quiet halving of the schema, and exactly the kind of silent
+          # success this family keeps finding.
+          if meta.get("data_sources") != {"embed+video_page": len(rows)}:
+              fail.append(f"data_sources = {meta.get('data_sources')!r}; "
+                          f"every row must be enriched")
+          if meta.get("enrich_failures"):
+              fail.append(f"enrich_failures = {meta['enrich_failures']!r}")
+          if meta.get("stats_sources") != {"statsV2": len(rows)}:
+              fail.append(f"stats_sources = {meta.get('stats_sources')!r}")
+
+          # And the sidecar must keep saying that complete is not
+          # exhaustive.
+          if not meta.get("window_is_a_sample"):
+              fail.append("the sidecar stopped saying the window is a sample")
+
+          # Columns that only the enriched path can fill. Checked as a
+          # SHARE rather than per row, because they are legitimately sparse:
+          # not every video has hashtags or captions.
+          need_all = ("sku", "description", "created_at", "play_count",
+                      "digg_count", "comment_count", "share_count",
+                      "author_username", "content_type", "music_title")
+          for column in need_all:
+              missing = [r["sku"] for r in rows if r.get(column) is None]
+              if missing:
+                  fail.append(f"{column} is null on {len(missing)} row(s)")
+
+          # The photo-post branch. @nasa's window has carried one since
+          # this repo was built; if it scrolls out, this becomes a notice
+          # rather than a failure — a canary that fails on the account
+          # posting new videos is a canary nobody trusts.
+          photos = [r for r in rows if r.get("content_type") == "photo"]
+          if photos:
+              for row in photos:
+                  if not row.get("image_count") or not row.get("image_urls"):
+                      fail.append(f"photo post {row['sku']} has no images")
+                  if row.get("play_addr"):
+                      fail.append(f"photo post {row['sku']} has a playAddr")
+          else:
+              print("::notice::no photo post in the window this morning — "
+                    "that branch went unexercised, which is the account "
+                    "posting rather than a fault")
+
+          # At least one caption track somewhere in the window. 6 of 11
+          # measured; a window with none is possible but would be unusual.
+          if not any(r.get("subtitle_url") for r in rows):
+              print("::notice::no caption track in the window this morning")
+
+          if fail:
+              print("::error::canary FAILED")
+              for line in fail:
+                  print(f"  - {line}")
+              sys.exit(1)
+          print(f"canary OK: {len(rows)} videos, all enriched, all from "
+                f"statsV2, {len(photos)} photo post(s), status "
+                f"{meta['status']}")
+          PY
+
+      # A handle with no account is answered (HTTP 400 on the embed route
+      # since 2026-10-15, with the app's own "no such account" node), not
+      # failed: the run must exit 4, not 5 after retries.
+      - name: A missing account exits 4
+        run: |
+          set +e
+          python playwright_scraper.py --url zz9nonexistenthandlexq7 \
+            --transport http --out canary_missing
+          rc=$?
+          if [ "$rc" != 4 ]; then
+            echo "::error::a missing account exited $rc, expected 4"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-videos
+          path: |
+            canary_videos.json
+            canary_videos.csv
+            canary_videos.meta.json
+          retention-days: 7
+
+  scraper-api:
+    name: the paid path (fails without TWOCAPTCHA_KEY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # `secrets` is not available in a job-level `if`, so presence is
+      # tested through job env and read in each step's `if`.
+      HAS_KEY: ${{ secrets.TWOCAPTCHA_KEY != '' }}
+    steps:
+      - name: Require the secret
+        if: env.HAS_KEY != 'true'
+        run: |
+          echo "::error::TWOCAPTCHA_KEY is not set in this repository's"\
+               "secrets, so the Scraper API path was NOT tested. Add the"\
+               "secret to run it; this job stays red until then."
+          exit 1
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch one video through the Scraper API
+        id: api
+        env:
+          # Through the ENVIRONMENT, never a --flag: a secret in argv is
+          # readable by anything that can run `ps`.
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python scraper_api_client.py --url 7665075736742530317 \
+            --format json --out canary_api
+          echo "api_exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Assert what the paid run produced
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          rc = int("${{ steps.api.outputs.api_exit }}")
+          fail = []
+          # Any non-zero exit is a failure here, including 3 (blocked) and
+          # 5 (never obtained): the point of the paid path is to obtain it.
+          if rc != 0:
+              fail.append(f"exit {rc}")
+          rows = (json.load(open("canary_api.json"))
+                  if os.path.exists("canary_api.json") else [])
+          if len(rows) != 1:
+              fail.append(f"{len(rows)} rows, expected the one video")
+          for row in rows:
+              if row.get("sku") != "7665075736742530317":
+                  fail.append(f"sku {row.get('sku')!r}")
+              for column in ("created_at", "play_count", "author_username"):
+                  if row.get(column) is None:
+                      fail.append(f"{column} is null")
+          if fail:
+              print("::error::scraper-api canary FAILED")
+              for line in fail:
+                  print(f"  - {line}")
+              sys.exit(1)
+          print("scraper-api canary OK: 1 video, exit 0")
+          PY

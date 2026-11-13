@@ -1,0 +1,353 @@
+# TikTok Video Scraper — Engagement, Captions and Media URLs in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/tiktok-video-scraper?sort=semver)](https://github.com/2scraper/tiktok-video-scraper/releases)
+[![tests](https://github.com/2scraper/tiktok-video-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/tiktok-video-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/tiktok-video-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/tiktok-video-scraper/actions/workflows/canary.yml)
+[![python](https://img.shields.io/badge/python-3.9%20%7C%203.12-blue)](pyproject.toml)
+[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#quick-start)
+[![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-brightgreen)](#you-do-not-need-a-key-a-proxy-or-an-account)
+
+**TikTok Video scraper** — an open-source (MIT) Python tool that reads tiktok.com account embed pages and video pages and writes captions, engagement counts, the creation date, the sound, hashtags and mentions, caption tracks and direct media URLs to JSON or CSV. Measured 2026-09-22 from a bare datacentre address with no credentials of any kind, both routes answered HTTP 200 to plain curl and a browser alike, so it needs no key, proxy or account. Use it to build a dataset of an account's recent videos, or compare two runs with `diff_runs.py`.
+
+Extract TikTok videos and their captions — engagement counts, the creation
+date, the sound, hashtags and mentions, downloadable caption tracks, direct
+media URLs, and TikTok photo posts.
+
+Playwright, Selenium or Puppeteer, or no browser at all. Captcha solving,
+proxies and fingerprints are wired in and, on these routes, unnecessary —
+see below, with the measurement.
+
+---
+
+## You do not need a key, a proxy, or an account
+
+Both routes this repo reads are server-rendered and served to anyone.
+Measured **2026-09-22** from a bare datacentre address (Hetzner, Helsinki,
+AS24940), with no credentials of any kind:
+
+| route | result |
+|---|---|
+| `GET /embed/@nasa` | HTTP 200, 293,768 bytes, 11 videos with captions and media URLs |
+| `GET /@nasa/video/7665075736742530317` | HTTP 200, 392,979 bytes, one video, complete |
+
+Both answer plain `curl` and a browser alike. The default transport is
+plain HTTPS; the browser is what `--transport auto` falls back to the
+moment the site actually challenges.
+
+**What the paid products buy here**: volume from many addresses, a
+specific exit country, and no browser infrastructure of your own. Not
+access.
+
+### A residential proxy is worse than no proxy here
+
+This is the opposite of what this family's other repos would lead you to
+expect, so it is stated with the numbers. Measured 2026-09-22,
+`GET /@nasa` (the profile page, the route tiktok-profile-scraper reads)
+with a plain HTTP client:
+
+| exit | served |
+|---|---|
+| this bare datacentre address (Hetzner, Helsinki) | **3 of 3** |
+| a residential pool, nine different exits | **2 of 9** |
+
+The seven that were not served answered HTTP 200 with 1,462 bytes whose
+visible text is `Please wait...` — TikTok's **WAF** interstitial
+(`SlardarWAF`, a `_wafchallengeid` element, a `waf-aiso/*.js` script). It
+is a JavaScript challenge, not a captcha: there is no widget and nothing
+for a solver to solve.
+
+**A browser clears it.** Driving Chromium through the very exits that had
+just refused a plain HTTP client: **3 of 3 served, 0 still challenged.**
+
+So on this site `--transport auto` is load-bearing rather than insurance.
+The run recognises the interstitial as its own state (`waf_challenge`),
+counts it as blocked, and starts a browser — which is the measured
+remedy. If you are running without a proxy from a clean address, you will
+probably never see it.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/2scraper/tiktok-video-scraper
+cd tiktok-video-scraper
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt -r requirements-playwright.txt
+./venv/bin/python playwright_scraper.py --url nasa
+```
+
+**One clone, one virtualenv.** The four tiktok-* repos share top-level
+module names (`product_parser`, `output_writer`, `playwright_scraper`, …),
+so `pip install .` of two of them into one environment makes the second
+silently replace the first. The commands above never do that — keep it
+that way, and give each repo its own venv.
+
+An account's recent videos, each read from its own page:
+
+```bash
+./venv/bin/python playwright_scraper.py --url nasa,zachking --format both
+```
+
+Named videos, in parallel — every video has its own address:
+
+```bash
+./venv/bin/python playwright_scraper.py --mode video --concurrency 3 \
+    --url "7665075736742530317,7686600539525762318,7681723633164717325"
+```
+
+`--url` takes a handle, an `@handle`, a profile URL, a video URL, or a bare
+19-digit video id. Mixing accounts and videos in one run is **refused**:
+they produce rows with different coverage, and a mixed file would need its
+`data_source` read row by row to be interpretable.
+
+---
+
+## Read this before you trust a window
+
+**An account's "recent videos" is ten to twelve, and that is all this
+route serves.** Measured across seven accounts on 2026-09-22: 10, 10, 10,
+10, 11, 11, 12. @khaby.lame's window is 10 videos of the 1,353 that
+account has posted.
+
+The paginated feed that would give you the back catalogue is
+`/api/post/item_list/`, and it is refused. Asked with a correctly signed
+request generated by TikTok's own front end — msToken, X-Gnarly,
+X-Dynosaur, device_id all present — over headless Chromium, headful
+Chromium, a Windows user agent, after accepting the EU cookie consent, and
+through a residential exit in Peru, it answered:
+
+```
+HTTP 200   content-type: application/json   content-length: 0
+```
+
+every time. Zero video links reached the DOM in any variant. A client that
+checks `response.ok` calls that a success and reports an account with no
+videos; this repo gives it its own run state (`empty_success`), counts it
+as blocked and exits 3.
+
+And the embed route does not paginate: `?page=2` and `?page=3` return the
+identical videos **and the payload's own `page` field stays 1** — the
+server stating outright which page it served. `--pages` above 1 is refused
+rather than silently re-collecting them.
+
+So every run's sidecar carries `window_is_a_sample`, `window_sizes` and
+`why_not_exhaustive`, and the closing log says it in words. A run of this
+scraper is **complete for the route** and is a **sample of the account**,
+and those are different sentences.
+
+---
+
+## Two sources, and why `data_source` is a column
+
+| | `/embed/@handle` | `/@handle/video/{id}` |
+|---|---|---|
+| videos per request | 10–12 | 1 |
+| caption | yes | yes |
+| play count | yes, **rounded** | yes, rounded |
+| likes, comments, shares, saves | **no** | yes, exact |
+| created date | **no** | yes |
+| sound | **no** | yes |
+| hashtags, mentions | **no** | yes |
+| caption track (WebVTT) | **no** | yes |
+| media URLs | yes | yes, plus `downloadAddr` |
+| duration, dimensions, bitrate | partial | yes |
+
+`--mode videos` reads the embed page and then fetches each video's own
+page, which is where everything above comes from. Measured, one account,
+11 videos, median of three runs:
+
+```
+--no-enrich    0.98 s     caption + rounded play count + media URLs
+default        5.92 s     the full row
+```
+
+`--no-enrich` is 6× faster and the rows are thin; the run warns you and
+`data_source` says `embed` on every one. `diff_runs.py` reports a
+difference that comes with a `data_source` difference as `source_changed`
+rather than as the site having changed.
+
+---
+
+## The trap that makes text extraction wrong
+
+**Never read a caption's hashtags or mentions out of the caption.**
+Measured on 85 entities from real videos, 2026-09-22 — and either half
+alone is enough:
+
+**1. The offsets index in UTF-16 code units.** 27 of 85 entities came out
+mis-sliced under ordinary Python string indexing. One of them:
+
+```
+caption entity        @ProjectRock
+Python desc[s:e]      tRock 10.0 🗡      <- wrong
+UTF-16 slice          @ProjectRock
+```
+
+**2. The text after an `@` is a display name, not a handle.** 14 of 85. A
+caption reading `@sadie` is a mention of the account **`sad_i_e`** — and
+`@sadie` is *also a real, different account*. Both resolve, with different
+ids. So a regex over the caption does not fail loudly; it attributes the
+mention to somebody else's live account.
+
+This repo reads `hashtags` and `mentions` from TikTok's own
+`textExtra.hashtagName` / `textExtra.userUniqueId` and from `challenges`.
+The offsets are not used at all, and the offline suite asserts that the
+parser contains no code that slices the caption.
+
+---
+
+## Things that look like bugs
+
+**A photo post is not a broken video row.** TikTok photo mode publishes a
+carousel of stills under the same `/video/{id}` URL, with `duration`,
+`width` and `height` all 0 and no `playAddr`. 2 of 29 posts measured
+across three accounts. Those rows carry `content_type: "photo"`,
+`image_count`, `image_urls` and `image_title` — which is a **separate
+string from the caption**: on one measured post the caption was "Roman's
+first images will be so large…" and the photo title was "What's next for
+NASA's Roman Space Telescope?".
+
+**Every media URL expires.** `play_addr`, `download_addr`, the covers, the
+caption track and a photo's stills are all signed, and the signature is
+re-minted per request. `media_expires_at` is read out of the URL so a
+consumer storing one knows how long it has, and `diff_runs.py` tracks none
+of the URLs — they would otherwise report every video as changed on every
+run.
+
+**`play_count` is rounded and the others are not.** TikTok rounds the play
+count in *both* its stats objects, while likes, comments, shares and saves
+are exact. A video showing 1,400,000 plays and 91,500 likes has an exact
+like count and an approximate play count.
+
+**Captions are machine-made.** 6 of 11 videos on one account carry a
+downloadable WebVTT track. Both `subtitle_source` values seen are
+machine-generated — `ASR` (speech recognition) and `MT` (machine
+translation) — which matters before quoting one as a creator's words.
+
+**An account's follower count is not here.** A video page does carry
+`authorStatsV2`, and on that route it is **rounded**: @therock's page says
+79,700,000 followers where his own profile page publishes the exact
+figure. So this repo carries the author's identity and not their counts —
+those live in `tiktok-profile-scraper`, which reads the one route where
+they are exact.
+
+---
+
+## Where this repo stops
+
+TikTok's gating is **per-route, not per-site**:
+
+| route | what happens |
+|---|---|
+| `/embed/@handle`, `/@handle/video/{id}` — this repo | served to everything tried |
+| `/@handle` (profile stats) | served — see `tiktok-profile-scraper` |
+| `/api/post/item_list/` (the paginated feed) | HTTP 200, `content-length: 0` |
+| `/tag/*`, `/search?q=` | **0 videos server-rendered**; the XHR that fills them is refused |
+| `shop.tiktok.com/**` | a slide-puzzle captcha — see `tiktok-shop-scraper` |
+
+Hashtag feeds and keyword search are refused **with that reason** rather
+than fetched and parsed to nothing.
+
+---
+
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | ok |
+| 1 | crash |
+| 2 | bad usage |
+| 3 | blocked |
+| 4 | zero videos — including "TikTok returned no video for every target asked" |
+| 5 | the content was never obtained |
+| 6 | partial |
+
+**A run that finds nothing writes nothing.** `--allow-empty` is the
+opt-out. Every run that writes output writes `<out>.meta.json` beside it,
+recording the status, the stop reason, which targets failed by number, the
+window sizes, and `why_not_exhaustive`. A run that FAILED writes neither
+file, so the last good output and its own sidecar stay together.
+
+**Exit 6 when asked-for enrichment did not happen.** With enrichment on
+(the default), a video whose own page could not be read keeps its embed
+row — caption and a rounded play count, nothing else — and the run is
+`partial` with `stop_reason: enrich_incomplete`, listing the ids under
+`enrich_failures`. `--no-enrich` asks for embed rows and stays complete.
+
+---
+
+## Configuration
+
+```bash
+cp .env.example .env
+python3 env_config.py      # prints what was picked up, WITHOUT printing secrets
+```
+
+Precedence, highest first: an explicit flag → an exported environment
+variable → `.env` → the default. A value still carrying a `{placeholder}`
+is treated as unset. Variables: `TWOCAPTCHA_KEY`, `TIKTOK_CDP_ENDPOINT`,
+`TIKTOK_PROXY`, `TIKTOK_URL`.
+
+---
+
+## The weekly canary
+
+`.github/workflows/canary.yml` runs a real scrape every Monday **from a
+bare GitHub runner with no secrets**, and is expected green. That is the
+README's central claim under test every week: if TikTok puts the embed or video
+route behind a challenge, the badge goes red on the next weekly run. The same job
+checks that a handle with no account exits 4.
+
+A second job runs the paid Scraper API path on the same schedule and on a
+manual dispatch. It needs the `TWOCAPTCHA_KEY`
+repository secret and fails, naming that secret, when it is absent: a
+skipped check is not a passing one.
+
+---
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Weibo scraper](https://github.com/2scraper/weibo-scraper) — Hot feed, account timelines and post comments…
+- [YouTube scraper](https://github.com/2scraper/youtube-scraper) — Comment threads, replies, video metadata and search
+- [Meta Ad Library scraper](https://github.com/2scraper/facebook-ads-scraper) — Every ad of a keyword or advertiser search in Meta's Ad…
+- [Facebook scraper](https://github.com/2scraper/facebook-pages-scraper) — Public Facebook Pages — contacts, followers, owner…
+- [Instagram scraper](https://github.com/2scraper/instagram-scraper) — Public profiles, posts and Reels, read logged out
+- [Snapchat scraper](https://github.com/2scraper/snapchat-scraper) — Public Snapchat profiles, Spotlight engagement and story…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Contributing
+
+```bash
+python3 smoke_test.py       # the offline suite — no network, no browser needed
+python3 -m pytest
+```
+
+The suite also holds a fixture every repo in this family holds: the
+material the 2Captcha Scraping Browser's auto-solve extension
+injects into every page it loads. Measured 2026-09-22 on a real
+`--cdp-endpoint` fetch of a page TikTok served — 16 `chrome-extension://`
+tags, 4 `hunter.js`, and `cf-turnstile` once. That last one is the trap:
+carried as a marker, it reports a blocked run on a perfectly good page
+over a paid connection. This repo does not carry it, and the check splices
+the injection into every served fixture to keep that true rather than
+accidental.
+
+---
+
+## Licence
+
+MIT. See `LICENSE`.
+
+Captcha solving, the Scraping Browser API, proxies and fingerprints are
+four separately-billed [2Captcha](https://2captcha.com) products behind one
+key. This repo needs none of them for its own routes, and says so above
+with the measurement.

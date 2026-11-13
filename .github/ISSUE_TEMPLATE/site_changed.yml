@@ -1,0 +1,58 @@
+name: Site changed
+description: TikTok changed something and this scraper no longer reads it.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most common way a scraper stops working, and worth its own report
+        because the fix is different from a code bug: something on
+        `www.tiktok.com/embed/@handle and /@handle/video/{id}` moved.
+
+        This repo reads one structured source, never the rendered page:
+        `__FRONTITY_CONNECT_STATE__` on the embed page, `__UNIVERSAL_DATA_FOR_REHYDRATION__["webapp.video-detail"]` on a video page.
+
+        **Never paste an API key, a proxy password or a `ws://…` endpoint.**
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped working
+      options:
+        - 0 videos for an account that has them
+        - Hashtags or mentions wrong or missing
+        - A photo post reported as a video (or the reverse)
+        - Enrichment failing (data_source stays 'embed')
+        - A column is null or wrong (say which)
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: What you asked for
+      description: The exact target, the exit you used (datacentre, residential, or Scraping Browser), and its country.
+      placeholder: "https://www.tiktok.com/@nasa/video/7665075736742530317 (exit: datacentre, FI)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        A capture beats a description.
+
+        `python3 -c "import re,json;h=open('dump.html').read();print('frontity' , '__FRONTITY_CONNECT_STATE__' in h, 'rehydration', '__UNIVERSAL_DATA_FOR_REHYDRATION__' in h)"`
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, from a different exit, and
+        when it last worked.
