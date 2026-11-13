@@ -1,0 +1,52 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Automated test suite (`npm test`) using Node.js built-in test runner and supertest.
+- Shared libraries under `lib/` for security validation, git status parsing, and dormant repo logic.
+- GitHub Actions workflow to run tests on push and pull requests to `main`.
+- `CHANGELOG.md`, pull request template, and release policy in `CONTRIBUTING.md`.
+
+### Changed
+
+- README and CONTRIBUTING: Express badge is 4.22.3, matching `package-lock.json`. Node.js 22 includes npm 10. With the Hub off, no data leaves the machine. The optional Hub snapshot fields match `collectHubSnapshot` in `server.js`. A source clone stores `config.json` in the repository folder. The executable asks for a folder (default `~/GitDock`), and `~/.gitdock/workspace.json` stores that path and `createdAt`. The project tree lists `lib/`, `test/`, `scripts/`, `CHANGELOG.md`, `start.bat`, and `package-lock.json`. Linux zip and clone start commands stay separate. Account setup keeps a fine-grained PAT or an authenticated `gh` CLI. People with write access branch on `gitdock-dev/gitdock`. Everyone else uses a fork.
+- GitHub Actions tests run on `ubuntu-latest` and `windows-latest`. Node.js stays 22 and the install step stays `npm ci`.
+- Minimum supported Node.js is now 22 (`engines.node` is `>=22` in the root and Hub `package.json`). Node.js 18 and 20 no longer receive official support from the Node.js project, so GitDock does not claim to support them.
+- `package-lock.json` is tracked for the root app and for `hub/`. The root lock resolves express 4.22.3 with body-parser 1.20.9, qs 6.16.2, and proxy-addr 2.0.8. esbuild stays at 0.24.2 (devDependency for the SEA bundle only).
+- GitHub Actions install steps use `npm ci` and still run on Node.js 22.
+- Landing page (`site/index.html`): external CSS/JS, SEO (dashboard screenshot, manifest, sitemap.xml), security panel, aligned copy and Octicons.
+- Landing preview on mobile (`site/index.html`, `site/css/index.css`): proportional dashboard scale (full screenshot visible), no horizontal scroll; fine-tuned tentacle positions/sizes on small screens only (desktop layout unchanged).
+- Download page (`site/download.html`): static manifest, shared nav styles via `common.css`, centered OS picker, clearer prerequisites, tighter install steps.
+- README header uses `site/gitdock-logo-removebg-preview.png` (transparent logo for GitHub light and dark themes).
+- `server.js` imports validation helpers from `lib/` (behavior preserved; easier to test).
+- Account name validation now rejects names that require stripping unsafe characters (e.g. `bad name!`, `work;rm`).
+
+### Security
+
+- Interpolated `gh` and `git rev-list` commands in `server.js` now run through `execFileSync` with an argument list (`githubApiForAccount`, `gh repo list`, `gh repo view`, repository transfer, unpushed commits, and GraphQL `--input`). Those values were already sanitized, so the practical risk was low. The change removes the shell-injection class for those call sites. Fixed git commands that do not interpolate variables still use `runCommand`. `GH_TOKEN` and the rest of the environment are still inherited, and `shell` is not enabled (Windows `git.exe` / `gh.exe`).
+- Stricter `sanitizeAccountName` so shell-like input cannot be silently normalized into a valid account id.
+
+## [1.2.0] - 2026-05-21
+
+### Added
+
+- Five-step account setup with GitHub-aligned SSH and fine-grained PAT guidance.
+- Optional token storage in the OS credential store (not in `config.json`).
+- Official GitHub `known_hosts` fingerprints and SSH verify feedback in setup status.
+- Dormant repo filter and terminology (replaces stale/inactive).
+- Modal close on outside click and Escape; segmented repo action bar; cloned repo green border.
+
+### Changed
+
+- Activity Log removed; feedback via toasts and SSE.
+- README, privacy page, and site copy aligned with real token and dormant behavior.
+
+[Unreleased]: https://github.com/gitdock-dev/gitdock/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/gitdock-dev/gitdock/releases/tag/v1.2.0

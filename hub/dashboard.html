@@ -1,0 +1,2177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitDock Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* GitDock Hub - command-center shell (aligned with marketing site) */
+    :root {
+      --bg0: #0a0e14;
+      --bg1: #111820;
+      --bg2: #1a2230;
+      --bg3: #242f3f;
+      --bg: #0a0e14;
+      --card: #111820;
+      --bg-hover: #1a2230;
+      --border: #2a3544;
+      --border-subtle: #1c2533;
+      --border-active: #3d4f63;
+      --t1: #e6edf3;
+      --t2: #b0c0d2;
+      --t3: #8498ae;
+      --blue: #3b82f6;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --purple: #a78bfa;
+      --orange: #e0883e;
+      --cyan: #39c5cf;
+      --r: 6px;
+      --r-lg: 8px;
+      --tr: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+      --font: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --mono: 'IBM Plex Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+      --shadow-sm: none;
+      --shadow-md: none;
+      --shadow-lg: 0 12px 40px rgba(0,0,0,0.45);
+      --shadow-glow: none;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { height: 100%; }
+    body {
+      font-family: var(--font);
+      background: var(--bg0);
+      color: var(--t1);
+      line-height: 1.55;
+      height: 100%;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+    /* App shell */
+    #appView {
+      display: none;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100vh;
+      position: relative;
+      background: var(--bg0);
+    }
+    #appView.app-visible { display: flex; }
+    #appView::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.28;
+      background-image:
+        linear-gradient(var(--border-subtle) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: radial-gradient(ellipse 85% 55% at 50% 0%, black 0%, transparent 72%);
+    }
+
+    .top-bar {
+      flex-shrink: 0;
+      min-height: 56px;
+      padding: 10px 20px;
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      position: relative;
+      z-index: 100;
+    }
+    .top-bar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .hub-logo {
+      width: 36px; height: 36px;
+      border-radius: var(--r);
+      overflow: hidden;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+    }
+    .hub-logo img { width: 100%; height: 100%; object-fit: cover; }
+    .brand-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .top-bar h1 {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+    }
+    .brand-path {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t2);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .top-bar-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-right: 4px;
+      min-width: 0;
+    }
+    .top-bar-email {
+      font-size: 12px;
+      color: var(--t1);
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .top-bar-updated {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t2);
+      white-space: nowrap;
+    }
+    .top-bar nav {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .top-bar a, .top-bar button {
+      padding: 7px 12px;
+      border-radius: var(--r);
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--t2);
+      font-size: 13px;
+      font-family: var(--font);
+      cursor: pointer;
+      text-decoration: none;
+      transition: var(--tr);
+      font-weight: 500;
+    }
+    .top-bar a:hover, .top-bar button:hover {
+      color: var(--t1);
+      border-color: var(--border);
+      background: var(--bg2);
+    }
+    .top-bar a.nav-active {
+      background: rgba(59,130,246,0.12);
+      border-color: rgba(59,130,246,0.35);
+      color: #93c5fd;
+      font-weight: 600;
+    }
+    .top-bar button.btn-logout {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .top-bar button.btn-logout:hover {
+      border-color: rgba(248,81,73,0.4);
+      color: var(--red);
+      background: rgba(248,81,73,0.06);
+    }
+
+    .main {
+      flex: 1;
+      overflow: auto;
+      padding: 28px 24px 40px;
+      position: relative;
+      z-index: 1;
+      max-width: 1120px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .main-panel {
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      background: rgba(10, 14, 20, 0.72);
+      overflow: hidden;
+    }
+    .main-panel-accent {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--t2);
+    }
+    .main-panel-accent::before {
+      content: '● ● ●';
+      letter-spacing: 3px;
+      font-size: 7px;
+      opacity: 0.55;
+      flex-shrink: 0;
+    }
+    .main-panel-body { padding: 22px 20px 24px; }
+
+    /* Login - dev-tool panel (aligned with marketing site) */
+    .login-wrap {
+      --login-bg0: #0a0e14;
+      --login-bg1: #111820;
+      --login-bg2: #1a2230;
+      --login-border: #2a3544;
+      --login-border-subtle: #1c2533;
+      --login-t1: #e6edf3;
+      --login-t2: #8b9cb3;
+      --login-t3: #5c6b7f;
+      --login-accent: #3b82f6;
+      --login-accent-hover: #2563eb;
+      --login-radius: 6px;
+      --login-radius-lg: 8px;
+      --login-font: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --login-mono: 'IBM Plex Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 32px 24px;
+      position: relative;
+      overflow: hidden;
+      font-family: var(--login-font);
+      background: var(--login-bg0);
+      color: var(--login-t1);
+    }
+    .login-wrap::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.35;
+      background-image:
+        linear-gradient(var(--login-border-subtle) 1px, transparent 1px),
+        linear-gradient(90deg, var(--login-border-subtle) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
+    }
+    .login-wrap::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(ellipse 55% 45% at 50% 35%, rgba(59, 130, 246, 0.08) 0%, transparent 65%);
+    }
+    .login-box {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 380px;
+      background: var(--login-bg0);
+      border: 1px solid var(--login-border);
+      border-radius: var(--login-radius-lg);
+      overflow: hidden;
+    }
+    .login-panel-accent {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 18px;
+      background: var(--login-bg2);
+      border-bottom: 1px solid var(--login-border);
+      font-family: var(--login-mono);
+      font-size: 12px;
+      color: var(--login-t3);
+    }
+    .login-panel-accent::before {
+      content: '● ● ●';
+      letter-spacing: 3px;
+      font-size: 7px;
+      color: var(--login-t3);
+      opacity: 0.6;
+      flex-shrink: 0;
+    }
+    #loginBox .login-panel-accent::after {
+      content: 'hub.gitdock.dev / sign in';
+    }
+    #registerBox .login-panel-accent::after {
+      content: 'hub.gitdock.dev / create account';
+    }
+    .login-panel-inner {
+      padding: 36px 36px 40px;
+    }
+    .login-box .login-logo {
+      margin: 0 auto 24px;
+      display: block;
+      text-align: center;
+    }
+    .login-box .login-logo img {
+      height: 112px;
+      width: auto;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    .login-box h2 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: -0.025em;
+      text-align: center;
+      line-height: 1.2;
+    }
+    .login-box h2 .grad {
+      color: var(--login-accent);
+      -webkit-text-fill-color: var(--login-accent);
+      background: none;
+    }
+    .login-box .login-sub {
+      color: var(--login-t2);
+      font-size: 15px;
+      text-align: center;
+      margin-bottom: 28px;
+      line-height: 1.55;
+    }
+    .login-box input {
+      width: 100%;
+      padding: 12px 16px;
+      margin-bottom: 14px;
+      background: var(--login-bg1);
+      border: 1px solid var(--login-border);
+      border-radius: var(--login-radius);
+      color: var(--login-t1);
+      font-size: 15px;
+      font-family: var(--login-font);
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .login-box input:focus {
+      border-color: var(--login-t3);
+      background: var(--login-bg2);
+      box-shadow: none;
+    }
+    .login-box input::placeholder { color: var(--login-t3); }
+    .login-box button[type="submit"] {
+      width: 100%;
+      padding: 12px 24px;
+      background: var(--login-accent);
+      border: none;
+      border-radius: var(--login-radius);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      font-family: var(--login-mono);
+      cursor: pointer;
+      transition: background 0.15s;
+      margin-top: 6px;
+    }
+    .login-box button[type="submit"]:hover {
+      background: var(--login-accent-hover);
+      box-shadow: none;
+    }
+    .login-box .error {
+      color: var(--red);
+      font-size: 14px;
+      margin-top: 14px;
+      text-align: center;
+    }
+    .login-box .login-link {
+      text-align: center;
+      margin-top: 18px;
+      font-size: 14px;
+      color: var(--login-t2);
+    }
+    .login-box .login-link a {
+      color: var(--login-t1);
+      font-weight: 500;
+      text-decoration: none;
+    }
+    .login-box .login-link a:hover {
+      color: var(--login-accent);
+      text-decoration: underline;
+    }
+    .login-pw-hint {
+      font-size: 12px;
+      color: var(--login-t3);
+      margin: -6px 0 14px;
+      line-height: 1.45;
+    }
+    .login-legal {
+      font-size: 12px;
+      color: var(--login-t3);
+      text-align: center;
+      line-height: 1.5;
+      margin: 2px 0 16px;
+    }
+    .login-legal a {
+      color: var(--login-t2);
+      font-weight: 500;
+      text-decoration: none;
+    }
+    .login-legal a:hover {
+      color: var(--login-accent);
+      text-decoration: underline;
+    }
+    .login-footer {
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--login-border);
+      text-align: center;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .login-footer a {
+      color: var(--login-t3);
+      text-decoration: none;
+    }
+    .login-footer a:hover {
+      color: var(--login-t2);
+      text-decoration: underline;
+    }
+    .login-footer-sep {
+      color: var(--login-border);
+      margin: 0 6px;
+    }
+
+    /* Password field wrapper */
+    .pw-wrap { position: relative; width: 100%; }
+    .pw-wrap input { padding-right: 44px; }
+    .pw-toggle {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(calc(-50% - 7px));
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      cursor: pointer;
+      color: var(--login-t3);
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.15s;
+    }
+    .pw-toggle:hover { color: var(--login-t1); }
+    .pw-toggle svg { width: 18px; height: 18px; }
+
+    .view { display: none; }
+    .view.active { display: block; }
+
+    .page-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      letter-spacing: -0.025em;
+      color: var(--t1);
+    }
+    .page-lead {
+      color: var(--t2);
+      font-size: 14px;
+      margin-bottom: 18px;
+      line-height: 1.5;
+      max-width: 56ch;
+    }
+    .page-lead code {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #c6d4e4;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+    .keys-list-hdr {
+      margin-top: 28px;
+      margin-bottom: 12px;
+    }
+
+    .overview-stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 16px 14px;
+      position: relative;
+    }
+    .stat-card .stat-value {
+      display: block;
+      font-family: var(--mono);
+      font-size: 28px;
+      font-weight: 600;
+      letter-spacing: -0.03em;
+      color: var(--t1);
+      line-height: 1.1;
+    }
+    .stat-card .stat-label {
+      display: block;
+      margin-top: 8px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t2);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 500;
+    }
+    .stat-card .stat-meta {
+      display: block;
+      font-size: 12px;
+      color: var(--t2);
+      margin-top: 6px;
+    }
+    .stat-card--attention .stat-value { color: var(--orange); }
+    .stat-card--clean .stat-value { color: var(--green); }
+    @media (max-width: 720px) { .overview-stats { grid-template-columns: repeat(2, 1fr); } }
+
+    .section { margin-bottom: 28px; }
+    .sec-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      gap: 12px;
+    }
+    .section-title {
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      color: var(--t1);
+      font-weight: 500;
+    }
+    .section-title::before {
+      content: '// ';
+      color: var(--t3);
+    }
+    .sec-cnt {
+      font-family: var(--mono);
+      background: var(--bg2);
+      color: var(--t1);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    /* Sync issues */
+    .issues-list { list-style: none; }
+    .issue-item {
+      padding: 14px 16px;
+      margin-bottom: 8px;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      font-size: 14px;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      transition: var(--tr);
+    }
+    .issue-item:hover { border-color: var(--border-active); background: var(--bg2); }
+    .issue-item.unpushed { border-left: 3px solid var(--yellow); }
+    .issue-item.behind { border-left: 3px solid var(--orange); }
+    .issue-item.dirty { border-left: 3px solid var(--red); }
+    .issue-item.stale_machine { border-left: 3px solid var(--t3); }
+    .issue-item.branch_mismatch, .issue-item.dirty_multiple { border-left: 3px solid var(--red); }
+    .issue-type {
+      font-family: var(--mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--t3);
+      flex-shrink: 0;
+      padding-top: 2px;
+    }
+    .issue-msg { flex: 1; color: var(--t1); line-height: 1.45; }
+
+    /* Machine grid */
+    .machine-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+    .machine-grid.pulse { animation: pulse-bg 0.6s ease-out; }
+    @keyframes pulse-bg { 0% { opacity: 1; } 50% { opacity: 0.85; } 100% { opacity: 1; } }
+    .machine-card {
+      padding: 0;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      cursor: pointer;
+      transition: var(--tr);
+      overflow: hidden;
+    }
+    .machine-card:hover {
+      border-color: rgba(59,130,246,0.45);
+      background: var(--bg2);
+    }
+    .machine-card-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 14px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t3);
+    }
+    .machine-card-bar .node-live {
+      color: var(--green);
+      font-weight: 500;
+    }
+    .machine-card-body { padding: 14px 14px 16px; }
+    .machine-card h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      letter-spacing: -0.015em;
+      color: var(--t1);
+    }
+    .machine-card .meta { font-size: 13px; color: var(--t2); margin-bottom: 12px; }
+    .machine-card .stats {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--t3);
+      display: flex;
+      gap: 14px;
+    }
+    .machine-card .stats span.issues { color: var(--orange); font-weight: 600; }
+    .machine-card .stats span.issues.zero { color: var(--green); }
+
+    /* Machine detail */
+    .machine-detail-header { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .machine-detail-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+    .machine-detail-header h2 { font-size: 22px; font-weight: 600; margin: 0; letter-spacing: -0.025em; }
+    .machine-detail-actions { display: flex; gap: 8px; }
+    .machine-detail-rename-wrap { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .machine-detail-rename-wrap input {
+      flex: 1; min-width: 180px; padding: 8px 12px;
+      border: 1px solid var(--border); border-radius: var(--r);
+      font-size: 14px; background: var(--bg1); color: var(--t1); font-family: var(--font);
+    }
+    .machine-detail-header .back {
+      font-size: 13px; color: #93c5fd; cursor: pointer; margin-bottom: 12px;
+      display: inline-flex; align-items: center; gap: 4px;
+      transition: var(--tr); text-decoration: none;
+    }
+    .machine-detail-header .back:hover { color: #bfdbfe; text-decoration: underline; }
+    .machine-detail-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .machine-detail-search { position: relative; flex: 1; min-width: 200px; max-width: 320px; }
+    .machine-detail-search input {
+      width: 100%;
+      padding: 9px 12px 9px 34px;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      color: var(--t1);
+      font-size: 14px;
+      font-family: var(--font);
+      outline: none;
+      transition: var(--tr);
+    }
+    .machine-detail-search input:focus { border-color: var(--border-active); background: var(--bg2); }
+    .machine-detail-search input::placeholder { color: var(--t3); }
+    .machine-detail-search .search-icon {
+      position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+      color: var(--t3); pointer-events: none;
+    }
+    .machine-detail-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .machine-detail-filters .fbtn {
+      padding: 7px 12px; border-radius: var(--r); border: 1px solid var(--border);
+      background: var(--bg1); color: var(--t1); font-size: 13px; font-family: var(--font);
+      cursor: pointer; transition: var(--tr);
+    }
+    .machine-detail-filters .fbtn:hover { border-color: var(--border-active); color: var(--t1); background: var(--bg2); }
+    .machine-detail-filters .fbtn.on {
+      background: rgba(59,130,246,0.14);
+      border-color: rgba(59,130,246,0.4);
+      color: #bfdbfe;
+      font-weight: 600;
+    }
+    .machine-detail-repo-count {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--t2);
+    }
+    .repos-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; row-gap: 10px; }
+    .repo-card-machine { font-size: 12px; color: var(--t2); margin-top: 4px; }
+    .repo-card-machine .machine-badge {
+      display: inline-block; padding: 2px 6px; border-radius: 4px;
+      background: var(--bg2); border: 1px solid var(--border); color: var(--t2); margin-right: 4px;
+      font-family: var(--mono); font-size: 11px;
+    }
+    .repo-card-multimachine { font-size: 12px; color: var(--orange); margin-top: 2px; }
+    .repo-list { list-style: none; padding: 0; margin: 0; }
+    .repo-view-toggle { display: flex; align-items: center; gap: 4px; }
+    .repo-view-toggle .vbtn {
+      padding: 7px 12px; border-radius: var(--r); border: 1px solid var(--border);
+      background: var(--bg1); color: var(--t1); font-size: 13px; font-family: var(--font);
+      cursor: pointer; transition: var(--tr); font-weight: 500;
+    }
+    .repo-view-toggle .vbtn:hover { border-color: var(--border-active); color: var(--t1); background: var(--bg2); }
+    .repo-view-toggle .vbtn.on {
+      background: rgba(59,130,246,0.14);
+      border-color: rgba(59,130,246,0.4);
+      color: #bfdbfe;
+      font-weight: 600;
+    }
+    .repo-list--cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 12px; }
+    .repo-list--cards .repo-card {
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      transition: var(--tr);
+      cursor: pointer;
+    }
+    .repo-list--cards .repo-card:hover { border-color: var(--border-active); background: var(--bg2); }
+    .repo-list--cards .repo-card.rc--attention { border-left: 3px solid var(--orange); }
+    .repo-list--cards .repo-card.rc--clean { border-left: 3px solid rgba(63,185,80,0.45); }
+    .rc-front { padding: 14px 16px; user-select: none; }
+    .rc-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .rc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .rc-dot--clean { background: var(--green); }
+    .rc-dot--dirty { background: var(--red); }
+    .rc-dot--ahead { background: var(--yellow); }
+    .rc-dot--behind { background: var(--orange); }
+    .rc-name { font-weight: 600; font-size: 15px; color: var(--t1); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.015em; }
+    .rc-branch {
+      font-size: 11px; font-family: var(--mono); color: var(--t2);
+      background: var(--bg2); border: 1px solid var(--border);
+      padding: 2px 8px; border-radius: 4px; flex-shrink: 0;
+    }
+    .rc-more {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t3);
+      flex-shrink: 0;
+      padding: 2px 0;
+      transition: color 0.15s;
+    }
+    .repo-card:hover .rc-more { color: var(--t2); }
+    .repo-card.rc-expanded .rc-more { color: #93c5fd; }
+    .rc-subrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--t2); margin-bottom: 10px; }
+    .rc-time { cursor: help; }
+    .rc-machine-badge {
+      font-size: 11px; font-family: var(--mono); padding: 1px 7px; border-radius: 4px;
+      background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.25); color: #93c5fd;
+    }
+    .rc-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-height: 28px;
+    }
+    .rc-foot-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+    .rc-counters { display: flex; gap: 4px; }
+    .rc-stat {
+      display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+      padding: 3px 8px; border-radius: var(--r);
+      background: var(--bg2); border: 1px solid var(--border);
+    }
+    .rc-stat-lbl { font-weight: 700; font-size: 11px; font-family: var(--mono); }
+    .rc-stat-val { font-weight: 600; color: var(--t1); font-family: var(--mono); }
+    .rc-stat--staged .rc-stat-lbl { color: var(--green); }
+    .rc-stat--modified .rc-stat-lbl { color: var(--yellow); }
+    .rc-stat--untracked .rc-stat-lbl { color: var(--cyan); }
+    .rc-stat--conflict .rc-stat-lbl { color: var(--red); }
+    .rc-sync { display: flex; gap: 10px; font-size: 12px; }
+    .rc-sync-item { display: inline-flex; align-items: center; gap: 3px; color: var(--t3); font-family: var(--mono); }
+    .rc-sync-item .arrow { font-size: 12px; }
+    .rc-sync-item.rc-sync--ahead .arrow, .rc-sync-item.rc-sync--ahead .num { color: var(--yellow); font-weight: 600; }
+    .rc-sync-item.rc-sync--behind .arrow, .rc-sync-item.rc-sync--behind .num { color: var(--orange); font-weight: 600; }
+    .rc-badge {
+      font-size: 10px; padding: 3px 10px; border-radius: var(--r);
+      font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+      flex-shrink: 0; font-family: var(--mono);
+    }
+    .rc-badge--clean { background: rgba(63,185,80,0.12); color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+    .rc-badge--dirty { background: rgba(248,81,73,0.12); color: var(--red); border: 1px solid rgba(248,81,73,0.25); }
+    .rc-badge--ahead { background: rgba(210,153,34,0.12); color: var(--yellow); border: 1px solid rgba(210,153,34,0.25); }
+    .rc-badge--behind { background: rgba(224,136,62,0.12); color: var(--orange); border: 1px solid rgba(224,136,62,0.25); }
+    .rc-detail { max-height: 0; overflow: hidden; transition: max-height 0.3s cubic-bezier(0.4,0,0.2,1), opacity 0.25s ease; opacity: 0; }
+    .repo-card.rc-expanded .rc-detail { max-height: 250px; opacity: 1; }
+    .rc-detail-inner { padding: 0 16px 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .rc-detail-section { margin-bottom: 10px; }
+    .rc-detail-section:last-child { margin-bottom: 0; }
+    .rc-detail-lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--t3); margin-bottom: 3px; font-family: var(--mono); }
+    .rc-detail-msg { font-size: 13px; color: var(--t1); line-height: 1.5; }
+    .rc-detail-msg[data-tip] { cursor: help; }
+    #hub-tooltip {
+      position: fixed; z-index: 99999; pointer-events: none;
+      max-width: 400px; padding: 10px 14px;
+      background: var(--bg2); color: var(--t1); border: 1px solid var(--border-active); border-radius: var(--r);
+      font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+      box-shadow: var(--shadow-lg);
+      opacity: 0; transition: opacity 0.15s ease;
+    }
+    #hub-tooltip.visible { opacity: 1; }
+    .rc-detail-meta { font-size: 12px; color: var(--t3); margin-top: 2px; }
+    .rc-detail-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--border); margin-top: 6px; }
+    .rc-detail-bar-seg { height: 100%; }
+    .rc-detail-bar-seg.seg-ahead { background: var(--yellow); }
+    .rc-detail-bar-seg.seg-behind { background: var(--orange); }
+    .rc-detail-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+    .rc-detail-pill { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--bg2); border: 1px solid var(--border); color: var(--t2); font-family: var(--mono); }
+    .rc-multimachine { font-size: 11px; color: var(--orange); }
+    .summary-dirty--clean { color: var(--t3); }
+    /* List view: dense scan rows using the same signals as cards */
+    .repo-list--list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .repo-list--list .repo-row {
+      display: flex;
+      align-items: center;
+      gap: 12px 16px;
+      flex-wrap: wrap;
+      padding: 10px 14px;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      transition: var(--tr);
+    }
+    .repo-list--list .repo-row:hover { border-color: var(--border-active); background: var(--bg2); }
+    .repo-list--list .repo-row.rr--attention { border-left: 3px solid var(--orange); }
+    .repo-list--list .repo-row.rr--clean { border-left: 3px solid rgba(63,185,80,0.45); }
+    .rr-main {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1 1 180px;
+    }
+    .rr-name {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--t1);
+      letter-spacing: -0.015em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .rr-signals {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      flex: 0 1 auto;
+    }
+    .rr-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--t3);
+      font-family: var(--mono);
+    }
+    .rr-meta .rr-account {
+      padding: 1px 7px;
+      border-radius: 4px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      color: var(--t2);
+    }
+    .rr-meta .rr-time { cursor: help; color: var(--t3); }
+    .rr-meta .rr-sep { color: var(--border-active); }
+    @media (max-width: 720px) {
+      .rr-meta { margin-left: 18px; width: 100%; }
+    }
+    .repo-list-empty { color: var(--t2); font-size: 14px; padding: 28px; text-align: center; }
+
+    .btn {
+      padding: 8px 14px; border-radius: var(--r);
+      border: 1px solid var(--border); background: var(--bg1);
+      color: var(--t2); font-size: 13px; font-family: var(--font);
+      cursor: pointer; transition: var(--tr);
+      display: inline-flex; align-items: center; gap: 6px;
+      font-weight: 500;
+    }
+    .btn:hover { border-color: var(--border-active); color: var(--t1); background: var(--bg2); }
+    .btn-primary { background: var(--blue); border-color: transparent; color: #fff; font-weight: 600; font-family: var(--mono); font-size: 12px; }
+    .btn-primary:hover { background: var(--accent-hover); box-shadow: none; }
+    .btn-danger { border-color: var(--border); color: var(--t2); }
+    .btn-danger:hover { border-color: rgba(248,81,73,0.4); color: var(--red); background: rgba(248,81,73,0.06); }
+    .btn-danger-solid {
+      background: rgba(248,81,73,0.14);
+      border-color: rgba(248,81,73,0.45);
+      color: var(--red);
+      font-weight: 600;
+    }
+    .btn-danger-solid:hover {
+      background: rgba(248,81,73,0.22);
+      border-color: rgba(248,81,73,0.6);
+      color: #fecaca;
+    }
+    .btn-danger-solid:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: var(--r); }
+
+    .danger-card {
+      margin-top: 32px;
+      padding: 0;
+      background: var(--bg1);
+      border-radius: var(--r-lg);
+      border: 1px solid rgba(248,81,73,0.28);
+      overflow: hidden;
+    }
+    .danger-card-bar {
+      padding: 8px 14px;
+      background: rgba(248,81,73,0.08);
+      border-bottom: 1px solid rgba(248,81,73,0.22);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--red);
+    }
+    .danger-card-body { padding: 16px 16px 18px; }
+    .danger-card .section-title { margin-bottom: 8px; color: var(--red); }
+    .danger-card .danger-lead {
+      color: var(--t2);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .danger-card .danger-lead a { color: #93c5fd; }
+    .danger-card .danger-lead a:hover { color: #bfdbfe; }
+    .danger-card label {
+      display: block;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t3);
+      margin-bottom: 6px;
+    }
+    .danger-card input[type="email"],
+    .danger-card input[type="text"] {
+      width: 100%;
+      max-width: 360px;
+      padding: 9px 12px;
+      border-radius: var(--r);
+      border: 1px solid var(--border);
+      background: var(--bg0);
+      color: var(--t1);
+      font-family: var(--font);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .danger-card input:focus {
+      outline: none;
+      border-color: rgba(248,81,73,0.5);
+      background: var(--bg2);
+    }
+    .danger-error {
+      color: var(--red);
+      font-size: 13px;
+      margin-bottom: 10px;
+      display: none;
+    }
+    .danger-error.visible { display: block; }
+
+    .plan-card {
+      margin-bottom: 24px;
+      padding: 0;
+      background: var(--bg1);
+      border-radius: var(--r-lg);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .plan-card-bar {
+      padding: 8px 14px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t2);
+    }
+    .plan-card-body { padding: 16px 16px 18px; }
+    .plan-card .section-title { margin-bottom: 8px; }
+    .plan-card #planStatus { color: var(--t2); font-size: 14px; margin-bottom: 12px; line-height: 1.45; }
+
+    .keys-list { list-style: none; }
+    .key-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      margin-bottom: 8px;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      font-size: 14px;
+      transition: var(--tr);
+      gap: 12px;
+    }
+    .key-row:hover { border-color: var(--border-active); }
+    .key-row .label { font-weight: 600; color: var(--t1); }
+    .key-row .meta { font-size: 12px; color: var(--t2); margin-top: 3px; font-family: var(--mono); }
+    .key-row button {
+      padding: 6px 12px; border-radius: var(--r); border: 1px solid var(--border);
+      background: transparent; color: var(--t2); font-size: 12px; font-family: var(--font);
+      cursor: pointer; transition: var(--tr); flex-shrink: 0;
+    }
+    .key-row button:hover { color: var(--red); border-color: rgba(248,81,73,0.4); background: rgba(248,81,73,0.06); }
+    .new-key-box {
+      margin-top: 0;
+      padding: 0;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+    .new-key-box-bar {
+      padding: 8px 14px;
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--t2);
+    }
+    .new-key-box-body { padding: 16px; }
+    .new-key-box .section-title { margin-bottom: 12px; }
+    .new-key-box input {
+      padding: 10px 12px; border-radius: var(--r); border: 1px solid var(--border);
+      background: var(--bg0); color: var(--t1); font-size: 14px;
+      width: min(260px, 100%); margin-right: 10px; margin-bottom: 8px;
+      font-family: var(--font);
+    }
+    .new-key-box input:focus { outline: none; border-color: var(--border-active); }
+    .new-key-result {
+      margin-top: 14px; padding: 14px;
+      background: var(--bg0); border: 1px solid var(--border);
+      border-left: 3px solid var(--yellow);
+      border-radius: var(--r); font-size: 13px; word-break: break-all;
+      color: var(--t1);
+    }
+    .new-key-result .nk-warn {
+      font-size: 13px;
+      color: var(--t1);
+      margin-bottom: 10px;
+      line-height: 1.45;
+    }
+    .new-key-result .nk-warn strong { color: var(--yellow); }
+    .new-key-result .nk-key {
+      display: block;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #c6d4e4;
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      word-break: break-all;
+    }
+    .new-key-result .copy-btn {
+      margin-top: 0; padding: 8px 14px; font-size: 12px; cursor: pointer;
+      border-radius: var(--r); border: 1px solid var(--border); background: var(--bg1);
+      color: var(--t1); font-family: var(--font); transition: var(--tr); font-weight: 500;
+    }
+    .new-key-result .copy-btn:hover { color: #bfdbfe; border-color: rgba(59,130,246,0.4); }
+    .empty-msg { color: var(--t1); font-size: 14px; }
+    .empty-state-onboarding {
+      text-align: left;
+      padding: 28px 24px;
+      max-width: 480px;
+      margin: 8px auto 0;
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      background: var(--bg1);
+    }
+    .empty-state-onboarding .empty-state-logo { margin-bottom: 16px; }
+    .empty-state-onboarding .empty-state-logo img { width: 48px; height: 48px; opacity: 0.95; }
+    .empty-state-onboarding .empty-state-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; color: var(--t1); letter-spacing: -0.02em; }
+    .empty-state-onboarding .empty-state-desc { font-size: 14px; color: var(--t2); margin-bottom: 16px; line-height: 1.5; }
+    .empty-state-onboarding .empty-state-steps { text-align: left; font-size: 14px; color: var(--t2); line-height: 1.75; margin: 0 0 20px; padding-left: 20px; }
+    .empty-state-onboarding .empty-state-steps strong { color: var(--t1); }
+    .empty-state-onboarding .btn { margin-bottom: 12px; }
+    .empty-state-onboarding .empty-state-hint { font-size: 12px; color: var(--t3); font-family: var(--mono); }
+
+    @media (max-width: 720px) {
+      .top-bar { flex-direction: column; align-items: stretch; }
+      .top-bar nav { justify-content: flex-start; }
+      .top-bar-meta { width: 100%; }
+      .main { padding: 18px 14px 32px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="hub-tooltip"></div>
+  <div id="loginView" class="login-wrap">
+    <div class="login-box" id="loginBox">
+      <div class="login-panel-accent" aria-hidden="true"></div>
+      <div class="login-panel-inner">
+      <span class="login-logo"><img src="/gitdock-logo-removebg.png" alt="GitDock"></span>
+      <h2><span class="grad">GitDock Hub</span></h2>
+      <p class="login-sub" id="loginSub">Sign in to view your machines and sync status.</p>
+      <form id="loginForm">
+        <input type="email" id="loginEmail" placeholder="Email" autocomplete="email" required>
+        <div class="pw-wrap">
+          <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password" required>
+          <button type="button" class="pw-toggle" tabindex="-1" aria-label="Toggle password visibility">
+            <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="login-link"><a href="#" id="showRegister">Create account</a></p>
+      <div id="loginError" class="error" style="display:none"></div>
+      <nav class="login-footer" aria-label="Legal">
+        <a href="https://www.gitdock.dev/privacy.html" target="_blank" rel="noopener">Privacy Policy</a><span class="login-footer-sep" aria-hidden="true">·</span><a href="https://www.gitdock.dev/terms.html" target="_blank" rel="noopener">Terms of Service</a>
+      </nav>
+      </div>
+    </div>
+    <div class="login-box" id="registerBox" style="display:none">
+      <div class="login-panel-accent" aria-hidden="true"></div>
+      <div class="login-panel-inner">
+      <span class="login-logo"><img src="/gitdock-logo-removebg.png" alt="GitDock"></span>
+      <h2><span class="grad">Create account</span></h2>
+      <p class="login-sub">Create an account to sync machine metadata across devices. Free for 1 machine; self-host for unlimited.</p>
+      <form id="registerForm">
+        <input type="email" id="registerEmail" placeholder="Email" autocomplete="email" required>
+        <div class="pw-wrap">
+          <input type="password" id="registerPassword" placeholder="Password" autocomplete="new-password" required aria-describedby="registerPwHint">
+          <button type="button" class="pw-toggle" tabindex="-1" aria-label="Toggle password visibility">
+            <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
+        <p class="login-pw-hint" id="registerPwHint">Min. 8 characters, 1 uppercase, 1 number.</p>
+        <div class="pw-wrap">
+          <input type="password" id="registerConfirm" placeholder="Confirm password" autocomplete="new-password" required>
+          <button type="button" class="pw-toggle" tabindex="-1" aria-label="Toggle password visibility">
+            <svg class="eye-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="eye-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
+        <p class="login-legal">By creating an account, you agree to our <a href="https://www.gitdock.dev/terms.html" target="_blank" rel="noopener">Terms of Service</a> and <a href="https://www.gitdock.dev/privacy.html" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+        <button type="submit">Create account</button>
+      </form>
+      <p class="login-link"><a href="#" id="showLogin">Already have an account? Sign in</a></p>
+      <div id="registerError" class="error" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="appView">
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <div class="hub-logo" title="GitDock"><img src="/gitdock-logo.png" alt="GitDock"></div>
+        <div class="brand-text">
+          <h1>GitDock Hub</h1>
+          <span class="brand-path" id="brandPath">hub.gitdock.dev / overview</span>
+        </div>
+      </div>
+      <nav>
+        <div class="top-bar-meta">
+          <span class="top-bar-email" id="userEmail"></span>
+          <span class="top-bar-updated" id="lastUpdated"></span>
+        </div>
+        <a href="#" data-view="overview" id="navOverview">Overview</a>
+        <a href="#" data-view="repos" id="navRepos">Repos</a>
+        <a href="#" data-view="settings" id="navSettings">Settings</a>
+        <button type="button" id="logoutBtn" class="btn-logout">Log out</button>
+      </nav>
+    </header>
+    <main class="main">
+      <div class="main-panel">
+        <div class="main-panel-accent" id="mainPanelPath" aria-hidden="true">overview</div>
+        <div class="main-panel-body">
+      <div id="overviewView" class="view active">
+        <div class="overview-stats" id="overviewStatsBar">
+          <div class="stat-card">
+            <span class="stat-value" id="statMachines">0</span>
+            <span class="stat-label">Machines</span>
+            <span class="stat-meta" id="statMachinesMeta">n/a</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value" id="statRepos">0</span>
+            <span class="stat-label">Repositories</span>
+          </div>
+          <div class="stat-card stat-card--clean">
+            <span class="stat-value" id="statClean">0</span>
+            <span class="stat-label">Clean</span>
+          </div>
+          <div class="stat-card stat-card--attention">
+            <span class="stat-value" id="statAttention">0</span>
+            <span class="stat-label">Needs Attention</span>
+          </div>
+        </div>
+        <div class="section">
+          <div class="sec-hdr">
+            <span class="section-title">Sync issues</span>
+            <span class="sec-cnt" id="issuesCount">0</span>
+          </div>
+          <ul id="issuesList" class="issues-list"></ul>
+          <p id="noIssues" class="empty-msg" style="display:none;">No sync issues detected.</p>
+        </div>
+        <div class="section">
+          <div class="sec-hdr">
+            <span class="section-title">Machines</span>
+            <span class="sec-cnt" id="machinesCount">0</span>
+          </div>
+          <div id="machineGrid" class="machine-grid"></div>
+          <p id="noMachines" class="empty-msg" style="display:none;">No machines have reported yet. Configure the Hub in your local GitDock and start the agent.</p>
+          <div id="emptyStateOnboarding" class="empty-state-onboarding" style="display:none;">
+            <div class="empty-state-logo"><img src="/gitdock-logo.png" alt="GitDock"></div>
+            <h3 class="empty-state-title">Connect your machines</h3>
+            <p class="empty-state-desc">Once connected, you’ll see all your repos and sync status here.</p>
+            <ol class="empty-state-steps">
+              <li>Open GitDock on your machine.</li>
+              <li>Go to <strong>Hub settings</strong>.</li>
+              <li>Enter your Hub URL and API key.</li>
+            </ol>
+            <button type="button" id="emptyStateCreateKeyBtn" class="btn btn-primary">Create API key</button>
+            <p class="empty-state-hint">Create a key in Settings, then add it in GitDock’s config.</p>
+          </div>
+        </div>
+      </div>
+      <div id="reposView" class="view">
+        <div class="repos-toolbar">
+          <div class="machine-detail-search">
+            <span class="search-icon"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M10.68 11.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04ZM11.5 7a4.5 4.5 0 1 0-9 0 4.5 4.5 0 0 0 9 0Z"/></svg></span>
+            <input type="text" id="allReposSearch" placeholder="Search repos..." autocomplete="off">
+          </div>
+          <div class="machine-detail-filters">
+            <button type="button" class="fbtn on" data-allfilter="all">All</button>
+            <button type="button" class="fbtn" data-allfilter="clean">Clean</button>
+            <button type="button" class="fbtn" data-allfilter="dirty">Dirty</button>
+            <button type="button" class="fbtn" data-allfilter="ahead">Ahead</button>
+            <button type="button" class="fbtn" data-allfilter="behind">Behind</button>
+          </div>
+          <div class="repo-view-toggle repo-view-toggle--all">
+            <button type="button" class="vbtn on" data-allview-mode="cards" title="Card layout">Cards</button>
+            <button type="button" class="vbtn" data-allview-mode="list" title="List layout">List</button>
+          </div>
+          <span class="machine-detail-repo-count" id="allReposCount">0 repos</span>
+        </div>
+        <ul id="allReposList" class="repo-list repo-list--cards"></ul>
+        <p id="allReposEmpty" class="repo-list-empty" style="display:none;">No repositories match the filter.</p>
+      </div>
+      <div id="machineDetailView" class="view">
+        <div class="machine-detail-header">
+          <a class="back" href="#" data-view="overview">&larr; Back to overview</a>
+          <div class="machine-detail-title-row">
+            <h2 id="machineDetailName">Loading…</h2>
+            <div class="machine-detail-actions">
+              <button type="button" id="machineDetailRenameBtn" class="btn btn-sm">Rename</button>
+              <button type="button" id="machineDetailDeleteBtn" class="btn btn-sm btn-danger">Remove machine</button>
+            </div>
+          </div>
+          <div id="machineDetailRenameWrap" class="machine-detail-rename-wrap" style="display:none;">
+            <input type="text" id="machineDetailRenameInput" placeholder="Machine name" maxlength="128">
+            <button type="button" id="machineDetailRenameSave" class="btn btn-sm btn-primary">Save</button>
+            <button type="button" id="machineDetailRenameCancel" class="btn btn-sm">Cancel</button>
+          </div>
+          <p id="machineDetailMeta" class="meta" style="color: var(--t2); font-size: 13px;"></p>
+        </div>
+        <div class="machine-detail-toolbar">
+          <div class="machine-detail-search">
+            <span class="search-icon"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M10.68 11.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04ZM11.5 7a4.5 4.5 0 1 0-9 0 4.5 4.5 0 0 0 9 0Z"/></svg></span>
+            <input type="text" id="machineDetailSearch" placeholder="Search repos..." autocomplete="off">
+          </div>
+          <div class="machine-detail-filters">
+            <button type="button" class="fbtn on" data-filter="all">All</button>
+            <button type="button" class="fbtn" data-filter="clean">Clean</button>
+            <button type="button" class="fbtn" data-filter="dirty">Dirty</button>
+            <button type="button" class="fbtn" data-filter="ahead">Ahead</button>
+            <button type="button" class="fbtn" data-filter="behind">Behind</button>
+          </div>
+          <div class="repo-view-toggle">
+            <button type="button" class="vbtn on" data-view-mode="cards" title="Card layout">Cards</button>
+            <button type="button" class="vbtn" data-view-mode="list" title="List layout">List</button>
+          </div>
+          <span class="machine-detail-repo-count" id="machineDetailRepoCount">0 repos</span>
+        </div>
+        <ul id="machineDetailRepos" class="repo-list repo-list--cards"></ul>
+        <p id="machineDetailReposEmpty" class="repo-list-empty" style="display:none;">No repositories match the filter.</p>
+      </div>
+      <div id="settingsView" class="view">
+        <div id="planCard" class="plan-card">
+          <div class="plan-card-bar">account / plan</div>
+          <div class="plan-card-body">
+            <div class="section-title">Plan</div>
+            <p id="planStatus">Loading…</p>
+            <a id="upgradeToProBtn" href="#" target="_blank" rel="noopener" class="btn btn-primary" style="display: none;">Upgrade to Pro ($7/month)</a>
+          </div>
+        </div>
+        <div class="page-title">API keys</div>
+        <p class="page-lead">Paste into local GitDock under <code>hub.apiKey</code>. One key works on all machines. Shown only once at creation; if lost, revoke and create a new one.</p>
+        <div class="new-key-box">
+          <div class="new-key-box-bar">generate new key</div>
+          <div class="new-key-box-body">
+            <div class="section-title">Label</div>
+            <input type="text" id="newKeyLabel" placeholder="Label (e.g. My devices)" maxlength="128">
+            <button type="button" id="createKeyBtn" class="btn btn-primary">Create key</button>
+            <div id="newKeyResult" class="new-key-result" style="display:none" role="status"></div>
+          </div>
+        </div>
+        <div class="sec-hdr keys-list-hdr">
+          <span class="section-title">Your keys</span>
+          <span class="sec-cnt" id="keysCount">0</span>
+        </div>
+        <ul id="keysList" class="keys-list"></ul>
+        <p id="keysEmpty" class="empty-msg" style="display:none;">No API keys yet. Create one above to connect a machine.</p>
+
+        <div id="dangerCard" class="danger-card">
+          <div class="danger-card-bar">danger zone</div>
+          <div class="danger-card-body">
+            <div class="section-title">Delete account</div>
+            <p class="danger-lead">
+              Permanently deletes your Hub account, API keys, machines, and snapshots. This cannot be undone.
+              Local GitDock on your machines is not affected.
+            </p>
+            <p id="dangerProNote" class="danger-lead" style="display:none;">
+              You are on Pro. Deleting the Hub account does not automatically cancel a Lemon Squeezy subscription.
+              Cancel billing in Lemon Squeezy or email <a href="mailto:support@gitdock.dev">support@gitdock.dev</a>.
+            </p>
+            <label for="deleteAccountEmail">Type your account email to confirm</label>
+            <input type="email" id="deleteAccountEmail" autocomplete="off" spellcheck="false" placeholder="you@example.com">
+            <p id="deleteAccountError" class="danger-error" role="alert"></p>
+            <button type="button" id="deleteAccountBtn" class="btn btn-danger-solid" disabled>Delete my account</button>
+          </div>
+        </div>
+      </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    (function() {
+      var tipEl = document.getElementById('hub-tooltip');
+      document.addEventListener('mouseover', function(e) {
+        var t = e.target.closest('[data-tip]');
+        if (t) {
+          tipEl.textContent = t.getAttribute('data-tip');
+          tipEl.classList.add('visible');
+        } else {
+          tipEl.classList.remove('visible');
+        }
+      });
+      document.addEventListener('mousemove', function(e) {
+        if (tipEl.classList.contains('visible')) {
+          tipEl.style.left = Math.min(e.clientX + 12, window.innerWidth - tipEl.offsetWidth - 16) + 'px';
+          tipEl.style.top = (e.clientY - tipEl.offsetHeight - 12) + 'px';
+        }
+      });
+      document.addEventListener('mouseout', function(e) {
+        if (e.target.closest && e.target.closest('[data-tip]') && !e.relatedTarget?.closest?.('[data-tip]')) {
+          tipEl.classList.remove('visible');
+        }
+      });
+
+      const API = '';
+      var csrfToken = null;
+      function apiGet(path) {
+        return fetch(API + path, { credentials: 'include' }).then(function(r) {
+          if (r.status === 401) throw new Error('Unauthorized');
+          return r.json();
+        });
+      }
+      function apiPost(path, body) {
+        var headers = { 'Content-Type': 'application/json' };
+        if (csrfToken) headers['X-CSRF-TOKEN'] = csrfToken;
+        return fetch(API + path, {
+          method: 'POST',
+          credentials: 'include',
+          headers: headers,
+          body: JSON.stringify(body || {})
+        }).then(function(r) {
+          if (r.status === 401) throw new Error('Unauthorized');
+          return r.json();
+        });
+      }
+      function apiPatch(path, body) {
+        var headers = { 'Content-Type': 'application/json' };
+        if (csrfToken) headers['X-CSRF-TOKEN'] = csrfToken;
+        return fetch(API + path, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: headers,
+          body: JSON.stringify(body || {})
+        }).then(function(r) {
+          if (r.status === 401) throw new Error('Unauthorized');
+          return r.json();
+        });
+      }
+      function apiDelete(path, body) {
+        var headers = {};
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        if (csrfToken) headers['X-CSRF-TOKEN'] = csrfToken;
+        var opts = { method: 'DELETE', credentials: 'include', headers: headers };
+        if (body !== undefined) opts.body = JSON.stringify(body);
+        return fetch(API + path, opts).then(function(r) {
+          if (r.status === 401) throw new Error('Unauthorized');
+          return r.json().then(function(data) {
+            data._httpStatus = r.status;
+            return data;
+          });
+        });
+      }
+
+      var currentView = 'overview';
+      var lastUpdatedAt = null;
+      var sseEventSource = null;
+
+      function showView(name) {
+        currentView = name;
+        document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
+        document.querySelectorAll('.top-bar a[data-view]').forEach(function(a) { a.classList.remove('nav-active'); });
+        var el = document.getElementById(name + 'View');
+        if (el) el.classList.add('active');
+        if (name === 'overview') document.getElementById('navOverview').classList.add('nav-active');
+        if (name === 'repos') document.getElementById('navRepos').classList.add('nav-active');
+        if (name === 'settings') document.getElementById('navSettings').classList.add('nav-active');
+        var pathLabel = name === 'machineDetail' ? 'machine' : name;
+        var brandPath = document.getElementById('brandPath');
+        var panelPath = document.getElementById('mainPanelPath');
+        if (brandPath) brandPath.textContent = 'hub.gitdock.dev / ' + pathLabel;
+        if (panelPath) panelPath.textContent = pathLabel;
+        if (name === 'overview') loadOverview();
+        if (name === 'repos') {
+          var reposCountEl = document.getElementById('allReposCount');
+          if (reposCountEl && !allReposData.length) reposCountEl.textContent = 'Loading…';
+          loadAllRepos();
+        }
+        if (name === 'settings') loadKeys();
+      }
+
+      function refreshCurrentView() {
+        lastUpdatedAt = Date.now();
+        if (currentView === 'overview') {
+          loadOverview();
+          var grid = document.getElementById('machineGrid');
+          if (grid) { grid.classList.add('pulse'); setTimeout(function() { grid.classList.remove('pulse'); }, 600); }
+        } else if (currentView === 'machineDetail' && currentMachineDetailId) {
+          openMachineDetail(currentMachineDetailId);
+        } else if (currentView === 'repos') {
+          loadAllRepos();
+        }
+      }
+
+      function updateLastUpdatedText() {
+        var el = document.getElementById('lastUpdated');
+        if (!el) return;
+        if (lastUpdatedAt == null) { el.textContent = ''; return; }
+        var sec = Math.floor((Date.now() - lastUpdatedAt) / 1000);
+        if (sec < 5) el.textContent = 'Updated just now';
+        else if (sec < 60) el.textContent = 'Updated ' + sec + 's ago';
+        else if (sec < 3600) el.textContent = 'Updated ' + Math.floor(sec / 60) + 'm ago';
+        else el.textContent = 'Updated ' + Math.floor(sec / 3600) + 'h ago';
+      }
+
+      var lastUpdatedInterval = null;
+      function checkAuth() {
+        return apiGet('/api/auth/check').then(function(data) {
+          if (data.ok) {
+            return apiGet('/api/auth/me').then(function(me) {
+              csrfToken = me.csrfToken || null;
+              var emailEl = document.getElementById('userEmail');
+              if (emailEl) emailEl.textContent = me.email || '';
+              document.getElementById('loginView').style.display = 'none';
+              document.getElementById('loginView').setAttribute('aria-hidden', 'true');
+              var appEl = document.getElementById('appView');
+              appEl.style.display = 'flex';
+              appEl.classList.add('app-visible');
+              appEl.removeAttribute('aria-hidden');
+              showView('overview');
+              lastUpdatedAt = Date.now();
+              if (lastUpdatedInterval) clearInterval(lastUpdatedInterval);
+              lastUpdatedInterval = setInterval(updateLastUpdatedText, 1000);
+              updateLastUpdatedText();
+              if (sseEventSource) try { sseEventSource.close(); } catch (e) {}
+              sseEventSource = new EventSource(API + '/api/events');
+              sseEventSource.addEventListener('snapshot_updated', function() { refreshCurrentView(); });
+            });
+          } else {
+            csrfToken = null;
+            if (sseEventSource) try { sseEventSource.close(); } catch (e) {}
+            sseEventSource = null;
+            if (lastUpdatedInterval) clearInterval(lastUpdatedInterval);
+            lastUpdatedInterval = null;
+            document.getElementById('loginView').style.display = 'flex';
+            document.getElementById('loginView').removeAttribute('aria-hidden');
+            var appHide = document.getElementById('appView');
+            appHide.style.display = 'none';
+            appHide.classList.remove('app-visible');
+            appHide.setAttribute('aria-hidden', 'true');
+          }
+        }).catch(function() {
+          csrfToken = null;
+          document.getElementById('loginView').style.display = 'flex';
+          document.getElementById('loginView').removeAttribute('aria-hidden');
+          var appHide2 = document.getElementById('appView');
+          appHide2.style.display = 'none';
+          appHide2.classList.remove('app-visible');
+          appHide2.setAttribute('aria-hidden', 'true');
+        });
+      }
+
+      document.querySelectorAll('.pw-toggle').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var wrap = btn.closest('.pw-wrap');
+          var inp = wrap.querySelector('input');
+          var isHidden = inp.type === 'password';
+          inp.type = isHidden ? 'text' : 'password';
+          btn.querySelector('.eye-show').style.display = isHidden ? 'none' : '';
+          btn.querySelector('.eye-hide').style.display = isHidden ? '' : 'none';
+        });
+      });
+
+      document.getElementById('loginForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        var email = document.getElementById('loginEmail').value.trim();
+        var pw = document.getElementById('loginPassword').value;
+        var errEl = document.getElementById('loginError');
+        errEl.style.display = 'none';
+        apiPost('/api/auth/login', { email: email, password: pw }).then(function(data) {
+          if (data.success) checkAuth();
+          else { errEl.textContent = data.error || 'Login failed'; errEl.style.display = 'block'; }
+        }).catch(function(err) {
+          errEl.textContent = err.message || 'Request failed';
+          errEl.style.display = 'block';
+        });
+      });
+
+      document.getElementById('showRegister').addEventListener('click', function(e) {
+        e.preventDefault();
+        document.getElementById('loginBox').style.display = 'none';
+        document.getElementById('registerBox').style.display = 'block';
+        document.getElementById('registerError').style.display = 'none';
+      });
+      document.getElementById('showLogin').addEventListener('click', function(e) {
+        e.preventDefault();
+        document.getElementById('registerBox').style.display = 'none';
+        document.getElementById('loginBox').style.display = 'block';
+        document.getElementById('loginError').style.display = 'none';
+      });
+
+      document.getElementById('registerForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        var email = document.getElementById('registerEmail').value.trim();
+        var pw = document.getElementById('registerPassword').value;
+        var confirmPw = document.getElementById('registerConfirm').value;
+        var errEl = document.getElementById('registerError');
+        errEl.style.display = 'none';
+        if (pw !== confirmPw) {
+          errEl.textContent = 'Passwords do not match';
+          errEl.style.display = 'block';
+          return;
+        }
+        apiPost('/api/auth/register', { email: email, password: pw }).then(function(data) {
+          if (data.success) checkAuth();
+          else { errEl.textContent = data.error || 'Registration failed'; errEl.style.display = 'block'; }
+        }).catch(function(err) {
+          errEl.textContent = err.message || 'Request failed';
+          errEl.style.display = 'block';
+        });
+      });
+
+      document.getElementById('logoutBtn').addEventListener('click', function() {
+        apiPost('/api/auth/logout').then(function() { checkAuth(); });
+      });
+
+      document.querySelectorAll('[data-view]').forEach(function(a) {
+        a.addEventListener('click', function(e) {
+          e.preventDefault();
+          var v = this.getAttribute('data-view');
+          if (v) showView(v);
+        });
+      });
+      document.getElementById('emptyStateCreateKeyBtn').addEventListener('click', function() { showView('settings'); });
+
+      var STALE_MS = 60 * 60 * 1000;
+      function loadOverview() {
+        Promise.all([apiGet('/api/sync'), apiGet('/api/machines')]).then(function(results) {
+          var issues = results[0].issues || [];
+          var machines = results[1].machines || [];
+          var totalRepos = machines.reduce(function(s, m) { return s + (m.repo_count || 0); }, 0);
+          var totalAttention = machines.reduce(function(s, m) { return s + (m.issue_count || 0); }, 0);
+          var totalClean = totalRepos - totalAttention;
+          var now = Date.now();
+          var onlineCount = machines.filter(function(m) {
+            var t = parseHubDate(m.last_seen);
+            return t && (now - t.getTime()) <= STALE_MS;
+          }).length;
+          var staleCount = machines.length - onlineCount;
+          document.getElementById('statMachines').textContent = machines.length;
+          document.getElementById('statMachinesMeta').textContent = machines.length ? (onlineCount + ' online' + (staleCount ? ', ' + staleCount + ' stale' : '')) : 'n/a';
+          document.getElementById('statRepos').textContent = totalRepos;
+          document.getElementById('statClean').textContent = totalClean;
+          document.getElementById('statAttention').textContent = totalAttention;
+          var issuesEl = document.getElementById('issuesList');
+          var noIssues = document.getElementById('noIssues');
+          var issuesCountEl = document.getElementById('issuesCount');
+          if (issuesCountEl) issuesCountEl.textContent = issues.length;
+          issuesEl.innerHTML = '';
+          if (issues.length === 0) {
+            noIssues.style.display = 'block';
+          } else {
+            noIssues.style.display = 'none';
+            issues.forEach(function(i) {
+              var li = document.createElement('li');
+              li.className = 'issue-item ' + (i.type || '');
+              li.innerHTML = '<span class="issue-type">' + (i.type || '').replace(/_/g, ' ') + '</span><span class="issue-msg">' + (i.message || '') + '</span>';
+              issuesEl.appendChild(li);
+            });
+          }
+          var grid = document.getElementById('machineGrid');
+          var noMachines = document.getElementById('noMachines');
+          var emptyOnboarding = document.getElementById('emptyStateOnboarding');
+          var machinesCountEl = document.getElementById('machinesCount');
+          if (machinesCountEl) machinesCountEl.textContent = machines.length;
+          grid.innerHTML = '';
+          if (machines.length === 0) {
+            noMachines.style.display = 'none';
+            if (emptyOnboarding) emptyOnboarding.style.display = 'block';
+            grid.style.display = 'none';
+          } else {
+            if (emptyOnboarding) emptyOnboarding.style.display = 'none';
+            grid.style.display = '';
+            noMachines.style.display = 'none';
+            machines.forEach(function(m) {
+              var card = document.createElement('div');
+              card.className = 'machine-card';
+              card.dataset.id = m.id;
+              var lastSeen = formatHubTime(m.last_seen);
+              var seenAt = parseHubDate(m.last_seen);
+              var isOnline = seenAt && (Date.now() - seenAt.getTime() < 60 * 60 * 1000);
+              card.innerHTML =
+                '<div class="machine-card-bar"><span>node / ' + escapeHtml(m.platform || 'unknown') + '</span><span class="' + (isOnline ? 'node-live' : '') + '">' + (isOnline ? 'online' : 'stale') + '</span></div>' +
+                '<div class="machine-card-body">' +
+                '<h3>' + escapeHtml(m.name || m.id) + '</h3>' +
+                '<div class="meta">Last seen: ' + escapeHtml(lastSeen) + '</div>' +
+                '<div class="stats"><span>' + (m.repo_count || 0) + ' repos</span><span class="issues ' + (m.issue_count > 0 ? '' : 'zero') + '">' + (m.issue_count || 0) + ' issues</span></div>' +
+                '</div>';
+              card.addEventListener('click', function() { openMachineDetail(m.id, m); });
+              grid.appendChild(card);
+            });
+          }
+        }).catch(function() { checkAuth(); });
+      }
+
+      var machineDetailRepos = [];
+      var machineDetailFilter = 'all';
+      var machineDetailViewMode = 'cards';
+      var currentMachineDetailId = null;
+      var allReposData = [];
+      var allReposFilter = 'all';
+      var allReposViewMode = 'cards';
+
+      function buildRepoData(r) {
+        var status = r.localStatus || 'clean';
+        var ahead = r.ahead || 0;
+        var behind = r.behind || 0;
+        var lc = r.lastCommit || {};
+        var msgFull = (lc.message || '').trim();
+        var msg = msgFull.length > 60 ? msgFull.slice(0, 57) + '...' : msgFull;
+        var timeAgo = lc.timeAgo || '';
+        var author = lc.author || '';
+        var absoluteDate = lc.date || '';
+        var summary = r.summary || {};
+        var staged = summary.stagedCount || 0;
+        var unstaged = summary.unstagedCount || 0;
+        var untracked = summary.untrackedCount || 0;
+        var conflict = summary.conflictCount || 0;
+        var dirtyParts = [];
+        if (staged) dirtyParts.push(staged + ' staged');
+        if (unstaged) dirtyParts.push(unstaged + ' unstaged');
+        if (untracked) dirtyParts.push(untracked + ' untracked');
+        if (conflict) dirtyParts.push(conflict + ' conflict(s)');
+        var dirtyDetailsAlways = staged || unstaged || untracked || conflict ? dirtyParts.join(', ') : '0 staged, 0 unstaged, 0 untracked';
+        var dirtyLine = dirtyParts.length ? '<div class="summary-dirty">' + escapeHtml(dirtyParts.join(', ')) + '</div>' : '<div class="summary-dirty summary-dirty--clean">' + escapeHtml(dirtyDetailsAlways) + '</div>';
+        var dirtyText = dirtyParts.join(', ') || dirtyDetailsAlways;
+        var aheadBehind = '';
+        if (ahead > 0 || behind > 0) {
+          aheadBehind = '<span class="ahead-behind">';
+          if (ahead > 0) aheadBehind += '<span class="ahead-n">' + ahead + ' ahead</span> ';
+          if (behind > 0) aheadBehind += '<span class="behind-n">' + behind + ' behind</span>';
+          aheadBehind += '</span>';
+        }
+        var totalAb = ahead + behind;
+        var aheadPct = totalAb > 0 ? Math.round((ahead / totalAb) * 100) : 0;
+        var behindPct = totalAb > 0 ? Math.round((behind / totalAb) * 100) : 0;
+        var aheadBehindBar = (ahead > 0 || behind > 0) ? '<div class="ahead-behind-bar" title="' + ahead + ' ahead, ' + behind + ' behind"><div class="ahead-behind-bar-seg ahead-seg" style="width:' + aheadPct + '%"></div><div class="ahead-behind-bar-seg behind-seg" style="width:' + behindPct + '%"></div></div>' : '';
+        var needsAttention = status !== 'clean' || ahead > 0 || behind > 0;
+        return { status, ahead, behind, msg, msgFull, timeAgo, author, absoluteDate, dirtyLine, dirtyText, dirtyDetailsAlways, aheadBehind, aheadBehindBar, needsAttention, staged, unstaged, untracked, conflict };
+      }
+
+      function buildStatHtml(label, abbr, value, cls) {
+        return '<span class="rc-stat rc-stat--' + cls + '" title="' + label + '">' +
+          '<span class="rc-stat-lbl">' + abbr + '</span>' +
+          '<span class="rc-stat-val">' + value + '</span></span>';
+      }
+
+      function buildActiveCountersHtml(d) {
+        var parts = [];
+        if (d.staged) parts.push(buildStatHtml('Staged', 'S', d.staged, 'staged'));
+        if (d.unstaged) parts.push(buildStatHtml('Modified', 'M', d.unstaged, 'modified'));
+        if (d.untracked) parts.push(buildStatHtml('Untracked', '?', d.untracked, 'untracked'));
+        if (d.conflict) parts.push(buildStatHtml('Conflicts', '!', d.conflict, 'conflict'));
+        return parts.length ? '<div class="rc-counters">' + parts.join('') + '</div>' : '';
+      }
+
+      function buildSyncHtml(d) {
+        if (!(d.ahead > 0 || d.behind > 0)) return '';
+        var syncHtml = '<div class="rc-sync">';
+        if (d.ahead > 0) syncHtml += '<span class="rc-sync-item rc-sync--ahead"><span class="arrow">\u2191</span><span class="num">' + d.ahead + '</span> ahead</span>';
+        if (d.behind > 0) syncHtml += '<span class="rc-sync-item rc-sync--behind"><span class="arrow">\u2193</span><span class="num">' + d.behind + '</span> behind</span>';
+        syncHtml += '</div>';
+        return syncHtml;
+      }
+
+      function buildRepoCardHtml(r, d, opts) {
+        opts = opts || {};
+        var showMachine = !!opts.showMachine;
+        var dateTitle = d.absoluteDate ? ' title="' + escapeHtml(d.absoluteDate) + '"' : '';
+        var subBits = [];
+        if (d.timeAgo) subBits.push('<span class="rc-time"' + dateTitle + '>' + escapeHtml(d.timeAgo) + '</span>');
+        if (showMachine && (r.machineName || r.machineId)) {
+          subBits.push('<span class="rc-machine-badge">' + escapeHtml(r.machineName || r.machineId) + '</span>');
+        }
+        if (r.multiMachineCount > 1) {
+          subBits.push('<span class="rc-multimachine">' + r.multiMachineCount + ' machines</span>');
+        }
+        var leftFoot = buildActiveCountersHtml(d) + buildSyncHtml(d);
+        return '<div class="rc-front">' +
+          '<div class="rc-header">' +
+            '<span class="rc-dot rc-dot--' + d.status + '"></span>' +
+            '<span class="rc-name">' + escapeHtml(r.name) + '</span>' +
+            '<span class="rc-branch">' + escapeHtml(r.branch || 'n/a') + '</span>' +
+            '<span class="rc-more">details</span>' +
+          '</div>' +
+          (subBits.length ? '<div class="rc-subrow">' + subBits.join('') + '</div>' : '') +
+          '<div class="rc-foot">' +
+            '<div class="rc-foot-left">' + leftFoot + '</div>' +
+            '<span class="rc-badge rc-badge--' + d.status + '">' + d.status + '</span>' +
+          '</div>' +
+        '</div>' +
+        buildCardDetailHtml(r, d, showMachine);
+      }
+
+      function buildRepoRowHtml(r, d, opts) {
+        opts = opts || {};
+        var showMachine = !!opts.showMachine;
+        var dateTitle = d.absoluteDate ? ' title="' + escapeHtml(d.absoluteDate) + '"' : '';
+        var signals = buildActiveCountersHtml(d) + buildSyncHtml(d);
+        var meta = [];
+        if (showMachine && (r.machineName || r.machineId)) {
+          meta.push('<span class="rc-machine-badge">' + escapeHtml(r.machineName || r.machineId) + '</span>');
+        }
+        if (r.multiMachineCount > 1) {
+          meta.push('<span class="rc-multimachine">' + r.multiMachineCount + ' machines</span>');
+        }
+        if (r.account) meta.push('<span class="rr-account">' + escapeHtml(r.account) + '</span>');
+        if (d.timeAgo) meta.push('<span class="rr-time"' + dateTitle + '>' + escapeHtml(d.timeAgo) + '</span>');
+        return '<div class="rr-main">' +
+            '<span class="rc-dot rc-dot--' + d.status + '"></span>' +
+            '<span class="rr-name">' + escapeHtml(r.name) + '</span>' +
+            '<span class="rc-branch">' + escapeHtml(r.branch || 'n/a') + '</span>' +
+          '</div>' +
+          '<div class="rr-signals">' +
+            signals +
+            '<span class="rc-badge rc-badge--' + d.status + '">' + d.status + '</span>' +
+          '</div>' +
+          (meta.length ? '<div class="rr-meta">' + meta.join('<span class="rr-sep">·</span>') + '</div>' : '');
+      }
+
+      function buildCardDetailHtml(r, d, showMachine) {
+        var html = '<div class="rc-detail"><div class="rc-detail-inner">';
+        if (d.msg || d.author) {
+          html += '<div class="rc-detail-section"><div class="rc-detail-lbl">Last commit</div>' +
+            (d.msg ? '<div class="rc-detail-msg"' + (d.msgFull !== d.msg ? ' data-tip="' + escapeHtml(d.msgFull) + '"' : '') + '>' + escapeHtml(d.msg) + '</div>' : '') +
+            (d.author ? '<div class="rc-detail-meta">by ' + escapeHtml(d.author) + (d.absoluteDate ? ' \u00b7 ' + escapeHtml(formatHubTime(d.absoluteDate)) : '') + '</div>' : '') +
+            '</div>';
+        }
+        if (d.dirtyText && d.status === 'dirty') {
+          html += '<div class="rc-detail-section"><div class="rc-detail-lbl">Working tree</div><div class="rc-detail-msg">' + escapeHtml(d.dirtyText) + '</div></div>';
+        }
+        if (d.ahead > 0 || d.behind > 0) {
+          var total = d.ahead + d.behind;
+          var aPct = Math.round((d.ahead / total) * 100);
+          html += '<div class="rc-detail-section"><div class="rc-detail-lbl">Sync</div>' +
+            '<div class="rc-detail-bar"><div class="rc-detail-bar-seg seg-ahead" style="width:' + aPct + '%"></div>' +
+            '<div class="rc-detail-bar-seg seg-behind" style="width:' + (100 - aPct) + '%"></div></div></div>';
+        }
+        var pills = '<span class="rc-detail-pill">' + escapeHtml(r.account || '') + '</span>';
+        if (showMachine) pills += '<span class="rc-detail-pill">' + escapeHtml(r.machineName || r.machineId || '') + '</span>';
+        html += '<div class="rc-detail-section"><div class="rc-detail-pills">' + pills + '</div></div>';
+        html += '</div></div>';
+        return html;
+      }
+
+      function renderMachineDetailRepos() {
+        var search = (document.getElementById('machineDetailSearch').value || '').trim().toLowerCase();
+        var list = document.getElementById('machineDetailRepos');
+        var emptyEl = document.getElementById('machineDetailReposEmpty');
+        var countEl = document.getElementById('machineDetailRepoCount');
+        var filtered = machineDetailRepos.filter(function(r) {
+          var name = (r.name || '').toLowerCase();
+          var account = (r.account || '').toLowerCase();
+          var matchSearch = !search || name.indexOf(search) !== -1 || account.indexOf(search) !== -1;
+          var matchFilter = true;
+          if (machineDetailFilter === 'clean') matchFilter = r.localStatus === 'clean';
+          else if (machineDetailFilter === 'dirty') matchFilter = r.localStatus === 'dirty';
+          else if (machineDetailFilter === 'ahead') matchFilter = (r.ahead || 0) > 0;
+          else if (machineDetailFilter === 'behind') matchFilter = (r.behind || 0) > 0;
+          return matchSearch && matchFilter;
+        });
+        list.innerHTML = '';
+        list.className = 'repo-list repo-list--' + machineDetailViewMode;
+        if (countEl) countEl.textContent = filtered.length + ' of ' + machineDetailRepos.length + ' repos';
+        if (filtered.length === 0) {
+          emptyEl.style.display = 'block';
+          emptyEl.textContent = machineDetailRepos.length === 0 ? 'No repositories reported for this machine.' : 'No repositories match the filter.';
+          return;
+        }
+        emptyEl.style.display = 'none';
+        filtered.forEach(function(r) {
+          var d = buildRepoData(r);
+          var needsAttention = d.needsAttention;
+          if (machineDetailViewMode === 'cards') {
+            var card = document.createElement('li');
+            card.className = 'repo-card ' + (needsAttention ? 'rc--attention' : 'rc--clean');
+            card.innerHTML = buildRepoCardHtml(r, d, { showMachine: false });
+            card.addEventListener('click', function() { card.classList.toggle('rc-expanded'); });
+            list.appendChild(card);
+          } else {
+            var row = document.createElement('li');
+            row.className = 'repo-row ' + (needsAttention ? 'rr--attention' : 'rr--clean');
+            row.innerHTML = buildRepoRowHtml(r, d, { showMachine: false });
+            list.appendChild(row);
+          }
+        });
+      }
+
+      function repoKey(r) {
+        return (r.path || r.name || '') + '|' + (r.account || '');
+      }
+
+      function loadAllRepos() {
+        apiGet('/api/repos').then(function(data) {
+          var raw = data.repos || [];
+          var keyToMachines = {};
+          raw.forEach(function(r) {
+            var k = repoKey(r);
+            if (!keyToMachines[k]) keyToMachines[k] = [];
+            if (keyToMachines[k].indexOf(r.machineId) === -1) keyToMachines[k].push(r.machineId);
+          });
+          allReposData = raw.map(function(r) {
+            var k = repoKey(r);
+            var machines = keyToMachines[k] || [];
+            return Object.assign({}, r, { multiMachineCount: machines.length });
+          });
+          renderAllRepos();
+        }).catch(function() { checkAuth(); });
+      }
+
+      function renderAllRepos() {
+        var search = (document.getElementById('allReposSearch').value || '').trim().toLowerCase();
+        var list = document.getElementById('allReposList');
+        var emptyEl = document.getElementById('allReposEmpty');
+        var countEl = document.getElementById('allReposCount');
+        var filtered = allReposData.filter(function(r) {
+          var name = (r.name || '').toLowerCase();
+          var account = (r.account || '').toLowerCase();
+          var machineName = (r.machineName || '').toLowerCase();
+          var matchSearch = !search || name.indexOf(search) !== -1 || account.indexOf(search) !== -1 || machineName.indexOf(search) !== -1;
+          var matchFilter = true;
+          if (allReposFilter === 'clean') matchFilter = r.localStatus === 'clean';
+          else if (allReposFilter === 'dirty') matchFilter = r.localStatus === 'dirty';
+          else if (allReposFilter === 'ahead') matchFilter = (r.ahead || 0) > 0;
+          else if (allReposFilter === 'behind') matchFilter = (r.behind || 0) > 0;
+          return matchSearch && matchFilter;
+        });
+        list.innerHTML = '';
+        list.className = 'repo-list repo-list--' + allReposViewMode;
+        if (countEl) countEl.textContent = filtered.length + ' of ' + allReposData.length + ' repos';
+        if (filtered.length === 0) {
+          emptyEl.style.display = 'block';
+          emptyEl.textContent = allReposData.length === 0 ? 'No repositories reported from any machine.' : 'No repositories match the filter.';
+          return;
+        }
+        emptyEl.style.display = 'none';
+        filtered.forEach(function(r) {
+          var d = buildRepoData(r);
+          var needsAttention = d.needsAttention;
+          if (allReposViewMode === 'cards') {
+            var card = document.createElement('li');
+            card.className = 'repo-card ' + (needsAttention ? 'rc--attention' : 'rc--clean');
+            card.innerHTML = buildRepoCardHtml(r, d, { showMachine: true });
+            card.addEventListener('click', function() { card.classList.toggle('rc-expanded'); });
+            list.appendChild(card);
+          } else {
+            var row = document.createElement('li');
+            row.className = 'repo-row ' + (needsAttention ? 'rr--attention' : 'rr--clean');
+            row.innerHTML = buildRepoRowHtml(r, d, { showMachine: true });
+            list.appendChild(row);
+          }
+        });
+      }
+
+      function openMachineDetail(id, hint) {
+        currentMachineDetailId = id;
+        document.getElementById('machineDetailRenameWrap').style.display = 'none';
+        document.getElementById('machineDetailSearch').value = '';
+        document.querySelectorAll('.machine-detail-filters .fbtn').forEach(function(b) { b.classList.toggle('on', b.getAttribute('data-filter') === 'all'); });
+        machineDetailFilter = 'all';
+        var nameEl = document.getElementById('machineDetailName');
+        var metaEl = document.getElementById('machineDetailMeta');
+        var countEl = document.getElementById('machineDetailRepoCount');
+        if (hint && hint.name) nameEl.textContent = hint.name;
+        else if (!machineDetailRepos.length) nameEl.textContent = 'Loading…';
+        if (hint && hint.platform) {
+          metaEl.textContent = hint.platform + (hint.last_seen ? ' \u2022 Last seen: ' + formatHubTime(hint.last_seen) : '');
+        } else if (!machineDetailRepos.length) {
+          metaEl.textContent = 'Loading…';
+        }
+        if (countEl && !machineDetailRepos.length) countEl.textContent = 'Loading…';
+        showView('machineDetail');
+        apiGet('/api/machines/' + encodeURIComponent(id)).then(function(data) {
+          var m = data.machine;
+          var snap = data.snapshot;
+          nameEl.textContent = m.name || m.id;
+          metaEl.textContent = (m.platform || '') + ' \u2022 Last seen: ' + formatHubTime(data.received_at || m.last_seen);
+          machineDetailRepos = (snap && snap.repos) ? snap.repos : [];
+          renderMachineDetailRepos();
+        });
+      }
+
+      document.getElementById('machineDetailSearch').addEventListener('input', function() { renderMachineDetailRepos(); });
+      document.querySelectorAll('.machine-detail-filters .fbtn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          document.querySelectorAll('.machine-detail-filters .fbtn').forEach(function(b) { b.classList.toggle('on', b === btn); });
+          machineDetailFilter = this.getAttribute('data-filter') || 'all';
+          renderMachineDetailRepos();
+        });
+      });
+      document.querySelectorAll('.repo-view-toggle .vbtn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var mode = this.getAttribute('data-view-mode') || 'cards';
+          document.querySelectorAll('.repo-view-toggle .vbtn').forEach(function(b) { b.classList.toggle('on', b === btn); });
+          machineDetailViewMode = mode;
+          renderMachineDetailRepos();
+        });
+      });
+
+      document.getElementById('machineDetailRenameBtn').addEventListener('click', function() {
+        var nameEl = document.getElementById('machineDetailName');
+        var wrap = document.getElementById('machineDetailRenameWrap');
+        var input = document.getElementById('machineDetailRenameInput');
+        input.value = nameEl.textContent.trim() || '';
+        wrap.style.display = 'flex';
+        input.focus();
+      });
+      document.getElementById('machineDetailRenameCancel').addEventListener('click', function() {
+        document.getElementById('machineDetailRenameWrap').style.display = 'none';
+      });
+      document.getElementById('machineDetailRenameSave').addEventListener('click', function() {
+        var name = document.getElementById('machineDetailRenameInput').value.trim();
+        if (!name) return;
+        if (!currentMachineDetailId) return;
+        apiPatch('/api/machines/' + encodeURIComponent(currentMachineDetailId), { name: name }).then(function(res) {
+          if (res.success && res.name) {
+            document.getElementById('machineDetailName').textContent = res.name;
+            document.getElementById('machineDetailRenameWrap').style.display = 'none';
+            loadOverview();
+          }
+        }).catch(function() {});
+      });
+      document.getElementById('machineDetailDeleteBtn').addEventListener('click', function() {
+        if (!currentMachineDetailId) return;
+        if (!confirm('Are you sure? This removes the machine from Hub.')) return;
+        apiDelete('/api/machines/' + encodeURIComponent(currentMachineDetailId)).then(function() {
+          currentMachineDetailId = null;
+          showView('overview');
+          loadOverview();
+        }).catch(function() {});
+      });
+
+      document.getElementById('allReposSearch').addEventListener('input', function() { renderAllRepos(); });
+      document.querySelectorAll('[data-allfilter]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          document.querySelectorAll('[data-allfilter]').forEach(function(b) { b.classList.toggle('on', b === btn); });
+          allReposFilter = this.getAttribute('data-allfilter') || 'all';
+          renderAllRepos();
+        });
+      });
+      document.querySelectorAll('.repo-view-toggle--all .vbtn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var mode = this.getAttribute('data-allview-mode') || 'cards';
+          document.querySelectorAll('.repo-view-toggle--all .vbtn').forEach(function(b) { b.classList.toggle('on', b === btn); });
+          allReposViewMode = mode;
+          renderAllRepos();
+        });
+      });
+
+      function loadKeys() {
+        apiGet('/api/auth/me').then(function(me) {
+          var plan = (me && me.plan) ? me.plan : 'free';
+          var statusEl = document.getElementById('planStatus');
+          var btnEl = document.getElementById('upgradeToProBtn');
+          var proNote = document.getElementById('dangerProNote');
+          if (plan === 'pro') {
+            statusEl.textContent = 'You are on Pro. Unlimited machines.';
+            btnEl.style.display = 'none';
+            if (proNote) proNote.style.display = 'block';
+          } else {
+            statusEl.textContent = 'Free plan: 1 machine. Upgrade to Pro for unlimited machines.';
+            if (me.checkoutUrl) {
+              btnEl.href = me.checkoutUrl;
+              btnEl.style.display = 'inline-block';
+            } else {
+              btnEl.style.display = 'none';
+            }
+            if (proNote) proNote.style.display = 'none';
+          }
+          if (me && me.email) {
+            var emailEl = document.getElementById('userEmail');
+            if (emailEl) emailEl.textContent = me.email;
+            updateDeleteAccountBtn();
+          }
+        }).catch(function() {});
+        apiGet('/api/keys').then(function(data) {
+          var keys = data.keys || [];
+          var list = document.getElementById('keysList');
+          var emptyEl = document.getElementById('keysEmpty');
+          list.innerHTML = '';
+          if (emptyEl) emptyEl.style.display = keys.length ? 'none' : 'block';
+          var keysCount = document.getElementById('keysCount');
+          if (keysCount) keysCount.textContent = String(keys.length);
+          keys.forEach(function(k) {
+            var li = document.createElement('li');
+            li.className = 'key-row';
+            li.innerHTML = '<div><span class="label">' + escapeHtml(k.label) + '</span><div class="meta">Created ' + escapeHtml(formatHubTime(k.created_at)) + (k.last_seen ? ' \u2022 Last seen ' + escapeHtml(formatHubTime(k.last_seen)) : '') + '</div></div>' +
+              '<button type="button" class="btn btn-sm btn-danger" data-id="' + escapeHtml(k.id) + '">Revoke</button>';
+            li.querySelector('button').addEventListener('click', function() {
+              if (confirm('Revoke this key? Machines using it will stop sending snapshots until you create a new key and update them.')) {
+                apiDelete('/api/keys/' + encodeURIComponent(k.id)).then(function() { loadKeys(); });
+              }
+            });
+            list.appendChild(li);
+          });
+        }).catch(function() { checkAuth(); });
+      }
+
+      function updateDeleteAccountBtn() {
+        var input = document.getElementById('deleteAccountEmail');
+        var btn = document.getElementById('deleteAccountBtn');
+        var emailEl = document.getElementById('userEmail');
+        if (!input || !btn || !emailEl) return;
+        var typed = (input.value || '').trim().toLowerCase();
+        var account = (emailEl.textContent || '').trim().toLowerCase();
+        btn.disabled = !account || typed !== account;
+      }
+
+      document.getElementById('deleteAccountEmail').addEventListener('input', function() {
+        var err = document.getElementById('deleteAccountError');
+        if (err) { err.textContent = ''; err.classList.remove('visible'); }
+        updateDeleteAccountBtn();
+      });
+
+      document.getElementById('deleteAccountBtn').addEventListener('click', function() {
+        var input = document.getElementById('deleteAccountEmail');
+        var err = document.getElementById('deleteAccountError');
+        var btn = document.getElementById('deleteAccountBtn');
+        var email = (input && input.value || '').trim();
+        if (!email || btn.disabled) return;
+        if (!confirm('Delete your Hub account permanently? This cannot be undone.')) return;
+        btn.disabled = true;
+        apiDelete('/api/auth/account', { confirmEmail: email }).then(function(data) {
+          if (data && data.success) {
+            csrfToken = null;
+            input.value = '';
+            checkAuth();
+            return;
+          }
+          if (err) {
+            err.textContent = (data && data.error) || 'Could not delete account';
+            err.classList.add('visible');
+          }
+          updateDeleteAccountBtn();
+        }).catch(function() {
+          if (err) {
+            err.textContent = 'Could not delete account';
+            err.classList.add('visible');
+          }
+          updateDeleteAccountBtn();
+        });
+      });
+
+      document.getElementById('createKeyBtn').addEventListener('click', function() {
+        var label = document.getElementById('newKeyLabel').value.trim() || 'Default';
+        apiPost('/api/keys', { label: label }).then(function(data) {
+          var result = document.getElementById('newKeyResult');
+          result.style.display = 'block';
+          result.innerHTML =
+            '<p class="nk-warn"><strong>Copy this key now.</strong> It will not be shown again. Use the same key on every machine.</p>' +
+            '<code class="nk-key">' + escapeHtml(data.key) + '</code>' +
+            '<button type="button" class="copy-btn">Copy key</button>';
+          result.querySelector('.copy-btn').addEventListener('click', function() {
+            var btn = this;
+            navigator.clipboard.writeText(data.key).then(function() {
+              btn.textContent = 'Copied';
+            }).catch(function() {
+              btn.textContent = 'Select and copy manually';
+            });
+          });
+          document.getElementById('newKeyLabel').value = '';
+          loadKeys();
+        });
+      });
+
+      function escapeHtml(s) {
+        if (s == null) return '';
+        var div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+      }
+
+      function parseHubDate(raw) {
+        if (raw == null || raw === '') return null;
+        var s = String(raw).trim();
+        if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+          s = s.replace(' ', 'T');
+          if (!/[zZ]$/.test(s)) s += 'Z';
+        }
+        var d = new Date(s);
+        return isNaN(d.getTime()) ? null : d;
+      }
+
+      function formatHubTime(raw) {
+        var d = parseHubDate(raw);
+        if (!d) return raw == null || raw === '' ? 'n/a' : String(raw);
+        return d.toLocaleString(undefined, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      }
+
+      checkAuth();
+    })();
+  </script>
+</body>
+</html>

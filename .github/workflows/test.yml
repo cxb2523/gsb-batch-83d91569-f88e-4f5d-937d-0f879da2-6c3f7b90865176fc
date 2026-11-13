@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-os:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test
+
+  test:
+    needs: test-os
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require ubuntu and windows
+        shell: bash
+        run: |
+          if [ "${{ needs.test-os.result }}" != "success" ]; then
+            exit 1
+          fi

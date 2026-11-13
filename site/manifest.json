@@ -1,0 +1,17 @@
+{
+  "name": "GitDock",
+  "short_name": "GitDock",
+  "description": "Organize Git Projects, One Dashboard",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "icons": [
+    {
+      "src": "./gitdock-logo.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

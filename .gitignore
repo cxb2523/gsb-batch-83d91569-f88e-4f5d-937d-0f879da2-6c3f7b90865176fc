@@ -1,0 +1,70 @@
+# Dependencies
+node_modules/
+
+# Local app config (created at runtime)
+config.json
+
+# Per-account git config (auto-generated at runtime)
+.gitconfig-*
+
+# Build output
+dist/
+
+# Cloned repos live in the user's workspace directory (outside this project)
+# Safety: ignore local workspace folders if created inside this repo by mistake
+persona/
+
+# Environment variables
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+
+# SSH keys (safety net)
+*.pem
+*.key
+*.pub
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.ppk
+
+# Credentials & secrets
+*.credential
+*.credentials
+*secret*
+*token*
+!scripts/**
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+ehthumbs.db
+[Dd]esktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# Generated PDFs
+*.pdf
+
+# Internal product backlog (local only — not for community)
+docs/ROADMAP.md
