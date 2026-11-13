@@ -1,21 +1,18 @@
 // Network data layer: fetch from ubus/luci-rpc and normalize into UI shapes.
 // Field shapes follow OpenWRT 23.05 / 24.10; adjust if your build differs.
 import { call, listObjects } from './ubus';
+import {
+  scanClients,
+  type ClientScan, type Client, type Band
+} from './clientScan';
 
-export type DeviceKind =
-  | 'd-phone' | 'd-laptop' | 'd-desktop' | 'd-tv' | 'd-game'
-  | 'd-speaker' | 'd-tablet' | 'd-printer' | 'd-router' | 'd-cloud' | 'd-generic';
-export type Band = '5' | '24' | '6' | 'wired' | '?';
+export type { DeviceKind, Band, Client, ClientLink, ClientScan, SourceId, SourceStatus } from './clientScan';
 
 export interface BoardInfo { model: string; hostname: string; firmware: string; }
 export interface SysInfo { uptimeSec: number; load1: number; memUsedPct: number; }
 export interface WanStatus {
   up: boolean; proto: string; device: string;
   ipv4: string | null; gateway: string | null; dns: string[]; uptimeSec: number;
-}
-export interface Client {
-  id: string; name: string; mac: string; ip: string;
-  kind: DeviceKind; band: Band; signal: number;
 }
 
 const num = (x: unknown): number => (typeof x === 'number' ? x : 0);
@@ -89,175 +86,24 @@ export async function getWan(): Promise<WanStatus> {
   };
 }
 
-const NAME_RULES: [RegExp, DeviceKind][] = [
-  [/iphone|galaxy|pixel|phone|oneplus|xiaomi|redmi/i, 'd-phone'],
-  [/ipad|tablet|\btab\b/i, 'd-tablet'],
-  [/macbook|laptop|thinkpad|notebook/i, 'd-laptop'],
-  [/imac|desktop|workstation|\bpc\b/i, 'd-desktop'],
-  [/\btv\b|roku|firetv|chromecast|appletv|bravia|shield/i, 'd-tv'],
-  [/playstation|\bps[45]\b|xbox|nintendo|switch/i, 'd-game'],
-  [/echo|alexa|homepod|sonos|speaker/i, 'd-speaker'],
-  [/printer|epson|canon|brother/i, 'd-printer']
-];
-function guessKind(name: string): DeviceKind {
-  for (const [re, k] of NAME_RULES) if (re.test(name)) return k;
-  return 'd-generic';
-}
-
-// Resolve a radio's band from the `network.wireless status` object. OpenWRT
-// reports it as `config.band` = "2g"/"5g"/"6g" on 21.02+, older builds use
-// `config.hwmode` (11a/11g/…), and as a last resort we infer from the channel.
-function radioBand(radio: any): Band {
-  const cfg = radio?.config ?? {};
-  const b = String(cfg.band ?? '').toLowerCase();
-  if (b.includes('6')) return '6';
-  if (b.includes('5')) return '5';
-  if (b.includes('2')) return '24';
-  const hw = String(cfg.hwmode ?? '').toLowerCase();
-  if (hw.includes('a')) return '5'; // 11a/11ac/11ax-5
-  if (hw.includes('g') || hw.includes('b')) return '24';
-  const ch = num(cfg.channel);
-  if (ch >= 36) return '5';
-  if (ch > 0) return '24';
-  return '?';
-}
-function dbmToBars(dbm: number): number {
-  if (dbm >= -55) return 4;
-  if (dbm >= -66) return 3;
-  if (dbm >= -77) return 2;
-  return dbm ? 1 : 0;
-}
-
-/** Why the last wireless lookup could not classify devices ('' when it worked). Shown as a hint in the UI. */
+/** Why the last wireless lookup could not classify devices ('' when it worked). Shown as a hint in the UI. Kept for the Network Map's existing "first problem" hint; the Devices screen reads the per-source status instead. */
 export let wifiDiag = '';
 
-function bandFromFreq(mhz: number): Band {
-  if (mhz >= 5925) return '6';
-  if (mhz >= 4900) return '5';
-  if (mhz >= 2400) return '24';
-  return '?';
+/**
+ * Collect the device table. Each of the three sources (host hints, DHCP
+ * leases, wireless associations) reports success or a readable failure, and a
+ * failed source never discards what the other sources found.
+ */
+export async function scanDeviceSources(): Promise<ClientScan> {
+  const scan = await scanClients({ call, listObjects });
+  wifiDiag = scan.wifiDiag;
+  return scan;
 }
 
-// Returns a map of client MAC -> {band, signal}, plus whether the wireless
-// subsystem actually answered. `ok=false` means we could not read any radio,
-// so callers must NOT assume unlisted devices are wired.
-//
-// Sources, in order, per AP interface:
-//   1. hostapd.<ifname> get_clients — present on every OpenWRT Wi-Fi router
-//      (wpad), needs no rpcd module; carries freq (→ band) and signal.
-//   2. iwinfo assoclist — needs rpcd-mod-iwinfo (untangled-full only).
-// Interface names come from `network.wireless status`; if that fails we fall
-// back to listing the hostapd.* ubus objects directly.
-async function getWirelessAssoc(): Promise<{
-  map: Record<string, { band: Band; signal: number }>;
-  ok: boolean;
-}> {
-  const map: Record<string, { band: Band; signal: number }> = {};
-  const ifaces: { ifname: string; band: Band }[] = [];
-  const problems: string[] = [];
-
-  try {
-    const status = await call<any>('network.wireless', 'status');
-    for (const radio of Object.values<any>(status ?? {})) {
-      const band = radioBand(radio);
-      for (const iface of radio?.interfaces ?? []) {
-        // ifname sits directly on the interface or under its config, by build.
-        const ifname = iface?.ifname || iface?.config?.ifname || iface?.iface;
-        if (ifname) ifaces.push({ ifname: String(ifname), band });
-      }
-    }
-    if (!ifaces.length) problems.push('network.wireless reported no radio interfaces');
-  } catch (e) {
-    problems.push(`network.wireless status: ${(e as Error).message}`);
-  }
-  if (!ifaces.length) {
-    try {
-      for (const name of Object.keys(await listObjects('hostapd.*'))) {
-        ifaces.push({ ifname: name.slice('hostapd.'.length), band: '?' });
-      }
-    } catch (e) {
-      problems.push(`ubus list hostapd.*: ${(e as Error).message}`);
-    }
-  }
-
-  let answered = 0;
-  await Promise.all(ifaces.map(async ({ ifname, band }) => {
-    try {
-      const r = await call<any>('hostapd.' + ifname, 'get_clients');
-      if (!r || typeof r.clients !== 'object') throw new Error('no clients field');
-      const b: Band = band !== '?' ? band : bandFromFreq(num(r?.freq));
-      for (const [mac, c] of Object.entries<any>(r?.clients ?? {})) {
-        if (c?.assoc === false) continue;
-        map[mac.toUpperCase()] = { band: b, signal: c?.signal != null ? dbmToBars(num(c.signal)) : 3 };
-      }
-      answered++;
-      return;
-    } catch (e) {
-      problems.push(`hostapd.${ifname}: ${(e as Error).message}`);
-    }
-    try {
-      const al = await call<any>('iwinfo', 'assoclist', { device: ifname });
-      for (const r of al?.results ?? []) {
-        if (r?.mac) map[String(r.mac).toUpperCase()] = { band, signal: dbmToBars(num(r.signal)) };
-      }
-      answered++;
-    } catch (e) {
-      problems.push(`iwinfo assoclist ${ifname}: ${(e as Error).message}`);
-    }
-  }));
-
-  const ok = answered > 0;
-  wifiDiag = ok ? '' : (problems[0] ?? 'no wireless interfaces found');
-  return { map, ok };
-}
-
-const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
-
+/** Device table only (fresh scan). Use `scanDeviceSources()` when the
+ *  per-source status matters. */
 export async function getClients(): Promise<Client[]> {
-  const [hints, leases, wifi] = await Promise.all([
-    call<any>('luci-rpc', 'getHostHints').catch(() => ({})),
-    call<any>('luci-rpc', 'getDHCPLeases').catch(() => ({ dhcp_leases: [] })),
-    getWirelessAssoc().catch(
-      () => ({ map: {} as Record<string, { band: Band; signal: number }>, ok: false })
-    )
-  ]);
-  const assoc = wifi.map;
-  const wifiOk = wifi.ok;
-
-  const byMac = new Map<string, Client>();
-  const put = (mac: string, patch: Partial<Client>) => {
-    if (!MAC_RE.test(mac)) return;
-    const m = mac.toUpperCase();
-    const cur =
-      byMac.get(m) ??
-      ({ id: m.replace(/:/g, ''), name: '', mac: m, ip: '', kind: 'd-generic', band: '?', signal: 0 } as Client);
-    byMac.set(m, {
-      ...cur,
-      ...patch,
-      name: patch.name || cur.name,
-      ip: patch.ip || cur.ip
-    });
-  };
-
-  for (const [mac, h] of Object.entries<any>(hints ?? {})) {
-    put(mac, { name: h?.name || h?.host || '', ip: h?.ipv4 || h?.ipaddrs?.[0] || '' });
-  }
-  for (const l of leases?.dhcp_leases ?? []) {
-    if (l?.macaddr) put(l.macaddr, { name: l.hostname && l.hostname !== '*' ? l.hostname : '', ip: l.ipaddr || '' });
-  }
-
-  const out: Client[] = [];
-  for (const c of byMac.values()) {
-    const a = assoc[c.mac];
-    const name = c.name || c.ip || c.mac;
-    // A device is wireless if it's in an assoclist. Otherwise it's wired —
-    // but only claim "wired" when the wireless subsystem actually answered;
-    // if it didn't, we genuinely don't know, so report Unknown.
-    const band: Band = a ? a.band : wifiOk ? 'wired' : '?';
-    const signal = a ? a.signal : band === 'wired' ? 4 : 0;
-    out.push({ ...c, name, kind: guessKind(name), band, signal });
-  }
-  return out.filter((c) => c.ip).sort((a, b) => a.name.localeCompare(b.name));
+  return (await scanDeviceSources()).clients;
 }
 
 export function formatUptime(sec: number): string {

@@ -3,7 +3,8 @@
 // stock router. WoL uses file.exec and needs the `etherwake` package; it fails
 // gracefully (a toast) when that isn't installed.
 import { call, uciGet, uciAdd, uciSet, uciDelete, uciApply, firewallApply } from './ubus';
-import { getClients, type Client, type Band, type DeviceKind } from './net';
+import { scanDeviceSources } from './net';
+import type { Client, ClientLink, Band, DeviceKind, SourceStatus } from './clientScan';
 
 const BLOCK_PREFIX = 'Block:';
 
@@ -15,11 +16,19 @@ export interface DeviceRow {
   band: Band;
   signal: number;
   kind: DeviceKind;
+  /** How the connection was determined (see ClientLink). */
+  link: ClientLink;
   reservedIp: string | null;   // fixed IP, if a dhcp host entry exists
   reserveId: string | null;    // dhcp section id
   draftIp: string;             // editable value bound in the UI
   blocked: boolean;
   blockId: string | null;      // firewall rule id
+}
+
+/** Device rows plus how each of the three collection sources fared. */
+export interface DeviceTable {
+  rows: DeviceRow[];
+  sources: SourceStatus[];
 }
 
 const text = (v: unknown): string => (v == null ? '' : String(Array.isArray(v) ? v[0] : v));
@@ -54,19 +63,26 @@ async function loadBlocks(): Promise<{ id: string; mac: string; enabled: boolean
 }
 
 /** Merge live clients with reservations and block rules (so offline but
- *  reserved/blocked devices still appear and can be managed/woken). */
-export async function loadDevices(): Promise<DeviceRow[]> {
-  const [clients, reservations, blocks] = await Promise.all([
-    getClients().catch(() => [] as Client[]),
+ *  reserved/blocked devices still appear and can be managed/woken). Also
+ *  carries the per-source collection status so the screen can explain itself.
+ *
+ *  `scanDeviceSources()` reports a failure per source instead of throwing, so
+ *  one dead source only costs its own records; only reservation/block reads
+ *  can fail here, and each degrades to an empty list on its own. */
+export async function loadDeviceTable(): Promise<DeviceTable> {
+  const [scan, reservations, blocks] = await Promise.all([
+    scanDeviceSources(),
     loadReservations().catch(() => []),
     loadBlocks().catch(() => [])
   ]);
+  const clients: Client[] = scan.clients;
+  const sources: SourceStatus[] = scan.sources;
 
   const byMac = new Map<string, DeviceRow>();
   for (const c of clients) {
     byMac.set(c.mac, {
       mac: c.mac, name: c.name, ip: c.ip, online: true,
-      band: c.band, signal: c.signal, kind: c.kind,
+      band: c.band, signal: c.signal, kind: c.kind, link: c.link,
       reservedIp: null, reserveId: null, draftIp: c.ip, blocked: false, blockId: null
     });
   }
@@ -74,7 +90,7 @@ export async function loadDevices(): Promise<DeviceRow[]> {
     let row = byMac.get(mac);
     if (!row) {
       row = {
-        mac, name: mac, ip: '', online: false, band: '?', signal: 0, kind: 'd-generic',
+        mac, name: mac, ip: '', online: false, band: '?', signal: 0, kind: 'd-generic', link: 'unknown',
         reservedIp: null, reserveId: null, draftIp: '', blocked: false, blockId: null
       };
       byMac.set(mac, row);
@@ -97,13 +113,14 @@ export async function loadDevices(): Promise<DeviceRow[]> {
   // Surface devices you've acted on: blocked first, then those with a fixed IP,
   // then online, then by name — so an applied change jumps to the top of the list.
   const rank = (r: DeviceRow) => (r.blocked ? 0 : 1);
-  return [...byMac.values()].sort(
+  const rows = [...byMac.values()].sort(
     (a, b) =>
       rank(a) - rank(b) ||
       Number(!!b.reservedIp) - Number(!!a.reservedIp) ||
       Number(b.online) - Number(a.online) ||
       a.name.localeCompare(b.name)
   );
+  return { rows, sources };
 }
 
 /** Reserve (or update) a fixed IP for a device via a dhcp `host` entry. */
