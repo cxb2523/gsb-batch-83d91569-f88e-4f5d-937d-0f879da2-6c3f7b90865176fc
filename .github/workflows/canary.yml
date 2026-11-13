@@ -1,0 +1,115 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "7 5 * * 1"   # weekly, Mondays (every run bills a Scraping Browser session); avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    # The live path needs a 2Captcha Scraping Browser API session. In live
+    # runs (2026-09-13/14, see README "Known limitations") a direct
+    # connection AND a residential --proxy exit both got the same fast
+    # Cloudflare 403 from this site; only a --cdp-endpoint session got
+    # through. A GitHub-hosted runner has no reason to fare better than the
+    # direct connection already tested.
+    #
+    # Without the STOCKX_CDP_ENDPOINT secret this job FAILS, naming the
+    # secret. It used to skip and end green, which made the badge say the
+    # site was tested on days nothing reached it. A canary that skipped, was
+    # blocked, or returned no rows is red.
+    #
+    # secrets.* is not readable in a job-level `if`, so presence is tested
+    # through a job-level env var and read in each step's `if`.
+    env:
+      HAS_STOCKX_CDP: ${{ secrets.STOCKX_CDP_ENDPOINT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the STOCKX_CDP_ENDPOINT secret
+        if: env.HAS_STOCKX_CDP != 'true'
+        run: |
+          echo "::error::No STOCKX_CDP_ENDPOINT secret is set, so the canary cannot reach stockx.com. \
+          Direct and residential-proxy runs got a Cloudflare 403 from this site (see README); \
+          set STOCKX_CDP_ENDPOINT to a 2Captcha Scraping Browser API endpoint \
+          (ws://...@cb.2captcha.com:9222, reusing one pid- profile so runs do not mint a new one). \
+          This is a failure, not a skip: nothing tested the site today."
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+
+      # The secret goes through the ENVIRONMENT, never a command-line flag:
+      # argv is visible to every process on the runner and in logs.
+      # env_config.py reads STOCKX_CDP_ENDPOINT itself. No TWOCAPTCHA_KEY is
+      # passed: the engines buy no solves, and the Scraping Browser session
+      # solves in-session on its own account.
+      - name: Run against a known-good category (3 pages — one page never exercises pagination)
+        env:
+          STOCKX_CDP_ENDPOINT: ${{ secrets.STOCKX_CDP_ENDPOINT }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://stockx.com/category/sneakers" \
+            --pages 3 \
+            --format json \
+            --out canary_out.json \
+            --dump-html
+          code=$?
+          set -e
+          echo "exit=$code"
+          case "$code" in
+            0) ;;
+            3) echo "::error::exit 3 — stockx.com refused the session (blocked)";;
+            4) echo "::error::exit 4 — zero products from a category that has thousands";;
+            5) echo "::error::exit 5 — content never obtained (fetch failure, not-found or parser failure; see the log)";;
+            6) echo "::error::exit 6 — rows obtained but the run is incomplete";;
+            *) echo "::error::exit $code — crash or bad usage";;
+          esac
+          exit "$code"
+
+      - name: Assert the rows are real, not just present
+        run: |
+          python3 -c "
+          import json, os, sys
+          if not os.path.exists('canary_out.json.meta.json'):
+              print('::error::no canary_out.json.meta.json — the run wrote no output')
+              sys.exit(1)
+          meta = json.load(open('canary_out.json.meta.json'))
+          rows = json.load(open('canary_out.json'))
+          print(json.dumps(meta, indent=2))
+          problems = []
+          if meta['status'] != 'complete':
+              problems.append(f\"status={meta['status']!r}, expected complete\")
+          if meta['pages_completed'] < 3:
+              problems.append(f\"pages_completed={meta['pages_completed']}, expected 3\")
+          if len(rows) < 20:
+              problems.append(f'{len(rows)} rows, expected at least 20')
+          # Parser properties, not merchandising: every listing row has its
+          # identity, and nearly every one a lowest ask (a sneaker with no
+          # ask at all is rare; a parser that lost the market block is not).
+          for field in ('sku', 'title', 'product_url', 'currency'):
+              missing = sum(1 for r in rows if not r.get(field))
+              if missing:
+                  problems.append(f'{missing} row(s) without {field}')
+          priced = sum(1 for r in rows if r.get('price') is not None)
+          if rows and priced / len(rows) < 0.9:
+              problems.append(f'only {priced}/{len(rows)} rows carry a lowest ask')
+          for p in problems:
+              print(f'::error::{p}')
+          sys.exit(1 if problems else 0)
+          "
+
+      - name: Upload artifacts (output + debug HTML)
+        if: always() && env.HAS_STOCKX_CDP == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+            canary_out_p*_debug.html
+          retention-days: 14

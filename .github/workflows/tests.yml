@@ -1,0 +1,145 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    name: offline checks (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install core dependencies (no engine — smoke_test must still pass)
+        run: pip install -r requirements.txt
+      - name: Byte-compile everything
+        run: python -m compileall -q .
+      - name: Run the offline smoke suite
+        run: python3 smoke_test.py
+      - name: No committed credentials
+        # RUNS .github/ci_checks.py RATHER THAN AN INLINE GREP, and that is a
+        # fix rather than a tidy-up. Two implementations of one check drift
+        # apart: in three sibling repos the shipped
+        # script was invoked by nothing while the workflow carried a narrower
+        # grep, and the two disagreed in the direction that matters -- the
+        # inline one matched only `ws://`/`wss://`, so an `http://user:pass@`
+        # credential sailed past CI.
+        #
+        # This repo had only the inline version, and it excluded
+        # smoke_test.py WHOLESALE -- the file most likely to acquire a real
+        # credential by paste while debugging was the one file nobody
+        # scanned. The masking fixtures that made that exclusion look
+        # necessary are now built by concatenation, so no line holds a
+        # complete `scheme://user:pass@host` literal and the scan is live on
+        # that file too.
+        #
+        # One implementation, invoked from both CI and the offline suite, and
+        # a check in the suite asserting this step calls the script rather
+        # than reimplementing it. Verified in both directions on 2026-09-17:
+        # it passes on this repo (31 files) and it flags a planted CDP
+        # endpoint, a planted 32-hex key and a planted http proxy URL.
+        run: python3 .github/ci_checks.py --secret-check
+
+      - name: Every CLI answers --help, and sample_output matches the schema
+        # The same script, so the workflow and the offline suite cannot drift
+        # into disagreeing about what either check means. This step replaces
+        # two inline ones, and the script is STRICTER than what it replaces:
+        # the inline sample check compared column SETS
+        # (`set(rows[0]) == set(PRODUCT_FIELD_NAMES)`), which passes when two
+        # columns are swapped -- and column order is part of this family's
+        # output contract, in the CSV header above all.
+        run: python3 .github/ci_checks.py --all
+
+  docker:
+    name: docker image builds, runs, and launches Chromium
+    runs-on: ubuntu-latest
+    # Build the Docker image in CI: nothing else does, which is how three
+    # older repos in this family shipped a broken one — and an early build of THIS repo's own Dockerfile had the same
+    # class of bug (the COPY list was missing files smoke_test.py needs at
+    # build time, so `RUN python3 smoke_test.py` would have crashed
+    # mid-build). That fix was verified by hand once; nothing has
+    # re-checked it on every push since. Four steps, each catching a
+    # distinct way the image can lie
+    # about working: it builds at all; its own entrypoint runs (the image's
+    # CMD is --help — the exact invocation a missing module breaks); a
+    # real browser actually launches (not just "playwright install
+    # --with-deps" exiting 0); and it carries no .env, no test suite and
+    # no fixtures — a .env baked into a published image is a credential
+    # handed to everyone who can pull it.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t stockx-scraper:ci .
+      - name: Entrypoint runs (the CMD a missing module would break)
+        run: docker run --rm stockx-scraper:ci
+      - name: A real browser actually launches inside the image
+        run: |
+          docker run --rm --entrypoint python3 stockx-scraper:ci -c "
+          import asyncio
+          from playwright.async_api import async_playwright
+          async def main():
+              async with async_playwright() as pw:
+                  browser = await pw.chromium.launch(headless=True, args=['--no-sandbox'])
+                  page = await browser.new_page()
+                  await page.goto('about:blank')
+                  await browser.close()
+              print('Chromium launched OK')
+          asyncio.run(main())
+          "
+      - name: Image carries no .env, test suite, or fixtures
+        run: |
+          BAD=$(docker run --rm --entrypoint sh stockx-scraper:ci -c \
+            "ls -d .env tests 2>/dev/null; ls *_test.py 2>/dev/null" || true)
+          if [ -n "$BAD" ]; then
+            echo "$BAD"
+            echo "::error::image contains files it must not ship: see above"
+            exit 1
+          fi
+          echo "image is clean"
+
+  engine-smoke:
+    name: engine-smoke (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [playwright, selenium, puppeteer]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # One venv PER engine, installed from its OWN requirements file. A
+      # single shared environment resolves the three engines' mutually
+      # unsatisfiable pins (pyee, urllib3) by reaching for whatever it can —
+      # on this family's amazon-scraper that silently installed a pyppeteer
+      # 0.0.25 stub instead of the real >=1.0.2 the requirements file asks
+      # for, and CI stayed green against a version nobody actually ships.
+      - name: Create venv and install requirements-${{ matrix.engine }}.txt
+        run: |
+          python -m venv .venv-${{ matrix.engine }}
+          source .venv-${{ matrix.engine }}/bin/activate
+          pip install -r requirements-${{ matrix.engine }}.txt
+          pip install pytest
+          pip check
+      - name: Install browser (Playwright only — Selenium/pyppeteer fetch their own)
+        if: matrix.engine == 'playwright'
+        run: |
+          source .venv-playwright/bin/activate
+          playwright install --with-deps chromium
+      - name: Run the smoke suite and assert THIS engine did not skip
+        run: |
+          source .venv-${{ matrix.engine }}/bin/activate
+          python3 smoke_test.py
+          python3 -c "
+          import ${{ matrix.engine }}_scraper as m
+          assert getattr(m, {'playwright': 'async_playwright', 'selenium': 'webdriver', 'puppeteer': 'pyppeteer_launch'}['${{ matrix.engine }}']) is not None, \
+              '${{ matrix.engine }} did not import — this job installed it and must not report absent'
+          print('${{ matrix.engine }} engine import OK')
+          "

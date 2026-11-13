@@ -1,0 +1,47 @@
+# scraper output — large, machine-specific, stale by the time anyone reads it
+*.json
+*.csv
+!sample_output.json
+!sample_output.csv
+stockx_products.*
+*_debug.html
+*_debug.png
+live_results/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.fingerprint_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# node (puppeteer/selenium tooling, if any local scripts are added later)
+node_modules/
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# secrets
+*.log
+.env
+*.key
+secrets*
+
+# Any .env variant, however it was renamed. `.env` alone is not enough, and
+# this has cost the family twice: craigslist-scraper's own .gitignore records
+# a `.env.hold` made while testing that was committed WITH A LIVE KEY in it,
+# recoverable only because that repo was private at the time. On 2026-09-17
+# a sibling had an untracked `.env.bak` holding a 32-hex key in a PUBLIC
+# repository, one `git add -A` from publication. Craigslist was fixed then
+# and the fix never reached anyone else. When you fix one, check the
+# siblings.
+.env*
+!.env.example
