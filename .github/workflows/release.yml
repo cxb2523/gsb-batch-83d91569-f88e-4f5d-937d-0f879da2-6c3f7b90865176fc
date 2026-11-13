@@ -1,0 +1,69 @@
+# Publishes https://pypi.org/project/olostep/
+#
+# Release flow:
+#   1. Bump "version" in pyproject.toml (and olostep/config.py VERSION) in a PR.
+#   2. Merge the PR to main.
+#   3. This workflow runs on the push to main, sees the new version is not yet
+#      on PyPI, builds, publishes, and tags vX.Y.Z.
+#   Merges that do not change the version publish nothing.
+#
+# Setup (one time): repo secret PYPI_API_TOKEN (PyPI project token).
+
+name: Publish to PyPI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to push the release tag
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # Only publish when pyproject.toml has a version that is not on PyPI yet.
+      - name: Check whether this version needs publishing
+        id: check
+        run: |
+          VERSION=$(poetry version -s)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/olostep/$VERSION/json")
+          if [ "$CODE" = "200" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "olostep $VERSION is already on PyPI - nothing to publish"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "olostep $VERSION is new - will publish"
+          fi
+
+      - name: Build package
+        if: steps.check.outputs.publish == 'true'
+        run: poetry build
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.publish == 'true'
+        env:
+          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_API_TOKEN }}
+        run: poetry publish
+
+      - name: Tag the release
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          git tag "v${{ steps.check.outputs.version }}"
+          git push origin "v${{ steps.check.outputs.version }}"

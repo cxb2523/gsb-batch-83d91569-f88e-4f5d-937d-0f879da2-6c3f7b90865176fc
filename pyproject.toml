@@ -1,0 +1,104 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "olostep"
+version = "1.2.3"
+description = "Python SDK for the Olostep web data API: scrape, crawl, batch, map, search, AI answers, and scheduled monitors."
+authors = ["Olostep Team <team@olostep.com>"]
+readme = "README.md"
+license = "MIT"
+homepage = "https://www.olostep.com"
+repository = "https://github.com/olostep-api/olostep-py"
+documentation = "https://docs.olostep.com"
+keywords = ["web-scraping", "api", "sdk", "crawling", "search", "monitors", "ai-answers", "data-extraction", "ai", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Markup :: HTML",
+]
+packages = [{include = "olostep"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+httpx = {extras = ["http2"], version = "^0.28.1"}
+pydantic = "^2.11.3"
+pycountry = "^24.6.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.4"
+pytest-asyncio = "^0.25.0"
+hypothesis = "^6.100.0"
+ruff = "^0.12.7"
+python-dotenv = "^1.1.1"
+bpython = "^0.25"
+pytest-order = "^1.3.0"
+pytest-xdist = {extras = ["psutil"], version = "^3.8.0"}
+pyright = "^1.1.407"
+pytest-cov = "^7.0.0"
+pytest-rerunfailures = "^14.0"
+tqdm = "^4.67.1"
+
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ['E', 'W', 'F', 'I', 'B', 'C4', 'ARG', 'SIM']
+ignore = ['W291', 'W292', 'W293', 'E501']
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+reportMissingImports = true
+reportUnusedImport = true
+reportUnusedClass = true
+reportUnusedFunction = false
+reportUnusedVariable = true
+reportDuplicateImport = true
+reportOptionalSubscript = true
+reportOptionalMemberAccess = true
+reportOptionalCall = true
+reportOptionalIterable = true
+reportOptionalContextManager = true
+reportOptionalOperand = true
+reportGeneralTypeIssues = true
+reportIncompatibleMethodOverride = false
+reportIncompatibleVariableOverride = false
+reportOverlappingOverload = true
+reportPrivateImportUsage = true
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportUnknownMemberType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportUntypedBaseClass = false
+reportUntypedClassDecorator = false
+reportUntypedFunctionDecorator = false
+reportUntypedNamedTuple = false
+reportCallInDefaultInitializer = false
+reportUnnecessaryIsInstance = false
+reportUnnecessaryCast = true
+reportUnnecessaryComparison = true
+reportAssertAlwaysTrue = true
+reportSelfClsParameterName = true
+reportImplicitStringConcatenation = false
+reportUnsupportedDunderAll = false
+reportAttributeAccessIssue = false
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true
+strictParameterNoneValue = false
+
+exclude = ["tests", "**/__pycache__", "**/.*", "scripts"]
