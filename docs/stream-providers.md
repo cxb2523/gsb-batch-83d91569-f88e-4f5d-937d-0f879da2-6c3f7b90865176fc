@@ -2,7 +2,59 @@
 
 `apps/stream-providers` is a separate Bun server. It loads `discord-player-youtubei`, `discord-player-spotify`, `discord-player-applemusic` and `discord-player-soundcloud` through `@discord-player/plugin-host`. The bot uses the host's v8 source plugins for discovery; embedded or remote Remedia consumes the host's streams. Provider dependencies stay out of the bot application.
 
-The source host runs TypeScript directly. It has no build step or test suite and does not load the embedded native playback binding. Spotify and Apple Music supply catalog metadata; their extractors bridge to an available matching stream. Provider restrictions can still prevent a track from playing.
+The source host runs TypeScript directly. It has no build step and does not load the embedded native playback binding. Spotify and Apple Music supply catalog metadata; their extractors bridge to an available matching stream. Provider restrictions can still prevent a track from playing.
+
+## Collective search
+
+`POST /collect/search` runs the same query against every loaded extractor and reports one outcome per source, so a caller can tell which provider failed instead of receiving a single empty result. The endpoint requires the same bearer token as the rest of the host.
+
+```sh
+curl --fail http://localhost:5678/collect/search \
+  --header "authorization: Bearer $STREAM_PROVIDERS_TOKEN" \
+  --header 'content-type: application/json' \
+  --data '{"query":"daft punk one more time","limit":5}'
+```
+
+`query` must contain non-whitespace text. `limit` is optional, defaults to `5`, and accepts `1`–`25`. A missing or incorrect token returns `401`; an empty query, out-of-range limit, malformed JSON or unknown field returns `400`. Neither case runs any provider search.
+
+Sources execute concurrently, each with its own 8-second deadline and abort signal. One provider failing, returning nothing or timing out never blocks the others. The response looks like:
+
+```json
+{
+  "query": "daft punk one more time",
+  "limit": 5,
+  "status": "partial",
+  "sourcesTried": 4,
+  "sourcesFailed": 1,
+  "sources": [
+    { "name": "youtube", "status": "ok", "durationMs": 812, "trackCount": 5 },
+    { "name": "spotify", "status": "ok", "durationMs": 431, "trackCount": 5 },
+    { "name": "apple-music", "status": "empty", "durationMs": 967, "trackCount": 0 },
+    {
+      "name": "soundcloud",
+      "status": "timeout",
+      "durationMs": 8000,
+      "trackCount": 0,
+      "reason": "Search timed out after 8000 ms"
+    }
+  ],
+  "tracks": [
+    {
+      "id": "dQw4w9WgXcQ",
+      "title": "One More Time",
+      "author": "Daft Punk",
+      "duration": "05:20",
+      "durationMs": 320000,
+      "url": "https://www.youtube.com/watch?v=...",
+      "thumbnail": "https://...",
+      "live": false,
+      "source": "youtube"
+    }
+  ]
+}
+```
+
+Each `sources` entry has a `name`, a `status` of `ok`, `empty`, `error` or `timeout`, its own `durationMs` and `trackCount`, plus a short `reason` for failures. `tracks` merges successful sources in extractor order, removes duplicates by URL (falling back to title and author) and never exceeds `limit`; each track carries the `source` that produced it. The overall `status` is `ok` when no source failed, `partial` when at least one did, and `failed` when every source failed. Failed sources still appear in `sources`, so a `failed` response still names the reason for each one.
 
 ## Docker
 

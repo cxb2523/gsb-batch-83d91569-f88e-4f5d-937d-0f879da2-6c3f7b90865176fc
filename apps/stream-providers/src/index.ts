@@ -4,6 +4,7 @@ import { SoundcloudExtractor } from 'discord-player-soundcloud';
 import { SpotifyExtractor } from 'discord-player-spotify';
 import { YoutubeExtractor } from 'discord-player-youtubei';
 import { z } from 'zod';
+import { createProviderFetch } from './provider-server.ts';
 
 const config = z
   .strictObject({
@@ -39,20 +40,7 @@ const server = Bun.serve({
   hostname: config.hostname,
   port: config.port,
   idleTimeout: 60,
-
-  fetch(request, server) {
-    const pathname = new URL(request.url).pathname;
-
-    if (pathname === '/health') {
-      return Response.json({ status: 'ok' });
-    }
-
-    if (pathname.startsWith('/remedia/v1/media/')) {
-      server.timeout(request, 0);
-    }
-
-    return host.fetch(request);
-  },
+  fetch: createProviderFetch({ token, host }),
 });
 
 let stopping = false;

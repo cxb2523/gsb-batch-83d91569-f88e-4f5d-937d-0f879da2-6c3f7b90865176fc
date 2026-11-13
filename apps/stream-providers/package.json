@@ -11,7 +11,8 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src"
+    "lint": "eslint src tests",
+    "test": "vitest run"
   },
   "dependencies": {
     "@discord-player/plugin-host": "8.0.0-dev.6",
@@ -24,7 +25,8 @@
   },
   "devDependencies": {
     "@types/bun": "1.4.4",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "5.1.0"
   },
   "engines": {
     "bun": ">=1.4.4"

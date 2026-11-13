@@ -111,6 +111,6 @@ pnpm build
 pnpm --filter music-bot exec node scripts/native-smoke.mjs
 ```
 
-`pnpm format` applies the shared oxfmt configuration. `pnpm test` runs bot and dashboard tests.
+`pnpm format` applies the shared oxfmt configuration. `pnpm test` runs bot, dashboard and source-host tests.
 
 The last command requires FFmpeg 9 and checks local native decoding with a null output, filters, crossfade preparation and controls. It does not connect to Discord. Provider limitations and the remaining live validation checklist are recorded in [validation](docs/validation.md).
