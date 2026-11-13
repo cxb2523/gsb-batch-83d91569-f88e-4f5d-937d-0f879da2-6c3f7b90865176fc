@@ -52,6 +52,9 @@ uv run steam-scraper all
 > [!IMPORTANT]
 > After an interruption, continue with `uv run steam-scraper all --resume`. The individual `games` and `reviews` commands also support `--resume`. Without it, the corresponding checkpoints are cleared and processing starts over. Use `retry` for failed items.
 
+> [!NOTE]
+> When `games` finishes it prints a per-page outcome report in which every page is marked "completed", "failed", or "untried", with failed pages carrying their page number and reason. A page is only "completed" once every AppID on it has been written to the database and the checkpoint is updated; request failures, invalid AppIDs, and unparseable lists are "failed", while pages not reached due to a stop or earlier failure are "untried". The command exits non-zero when any page failed. On `--resume`, completed pages are skipped while failed and untried pages are re-scanned; committed data and AppID-level completion state are preserved.
+
 ## Commands
 
 Prefix each command with `uv run steam-scraper`. Use `--help` or `<command> --help` for all options.

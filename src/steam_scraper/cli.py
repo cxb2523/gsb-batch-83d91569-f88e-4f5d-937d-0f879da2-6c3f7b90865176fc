@@ -25,6 +25,7 @@ from steam_scraper.scrapers.game_scraper import GameScraper, SteamSearchError
 from steam_scraper.scrapers.review_scraper import ReviewScraper, read_app_ids
 from steam_scraper.utils.checkpoint import Checkpoint
 from steam_scraper.utils.failure_manager import FailureManager, FailureRecord
+from steam_scraper.utils.page_outcomes import has_failed_pages, render_page_outcomes
 from steam_scraper.utils.ui import UIManager, terminal_text
 
 _COMMAND = "uv run steam-scraper"
@@ -424,6 +425,9 @@ async def run_games_scraper_async(
         failure_manager: 失败管理器。
         ui: UI 管理器。
         stop_event: 停止事件标志。
+
+    Raises:
+        SteamSearchError: 存在采集失败的页面；逐页结局已打印，已落库数据保留。
     """
     checkpoint = Checkpoint(config=config)
     if not args.resume:
@@ -440,12 +444,23 @@ async def run_games_scraper_async(
     start_time = time.time()
     try:
         await scraper.run(max_pages=args.pages)
+    except SteamSearchError:
+        # 即使某一页失败，也先把逐页结局打印出来，再按非零状态退出；
+        # 已落库的数据和 AppID 级断点在 finally 中保留。
+        render_page_outcomes(scraper.get_page_outcomes(), ui)
+        raise
     finally:
         try:
             checkpoint.save()
         finally:
             await scraper.client.close()
             scraper.db.close()
+
+    # 正常返回也必须展示逐页结局；若仍存在失败页（防御性处理），以非零退出。
+    outcomes = scraper.get_page_outcomes()
+    render_page_outcomes(outcomes, ui)
+    if has_failed_pages(outcomes):
+        raise SteamSearchError("存在采集失败的页面，本次运行不完整")
 
     elapsed = time.time() - start_time
     duration = str(timedelta(seconds=int(elapsed)))
@@ -584,6 +599,7 @@ async def run_all_async(
         stop_event: 停止事件标志。
 
     Raises:
+        SteamSearchError: games 阶段存在采集失败的页面，终止后续阶段。
         SystemExit: 任一导出格式失败时返回非零退出状态。
     """
     checkpoint = Checkpoint(config=config)
@@ -601,7 +617,12 @@ async def run_all_async(
     review_scraper: ReviewScraper | None = None
     try:
         ui.print_panel("Step 1/3: 爬取游戏基础信息", style="blue")
-        await game_scraper.run(max_pages=args.pages)
+        try:
+            await game_scraper.run(max_pages=args.pages)
+        except SteamSearchError:
+            # games 阶段失败时同样输出逐页结局，保留已落库数据后终止后续阶段。
+            render_page_outcomes(game_scraper.get_page_outcomes(), ui)
+            raise
         # 阶段性保存，防止Step 2崩溃导致Step 1进度丢失
         checkpoint.save()
 

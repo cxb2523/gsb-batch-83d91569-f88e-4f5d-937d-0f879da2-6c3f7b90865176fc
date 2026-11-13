@@ -18,6 +18,13 @@ from steam_scraper.models import GameInfo
 from steam_scraper.utils.checkpoint import Checkpoint
 from steam_scraper.utils.failure_manager import FailureManager
 from steam_scraper.utils.http_client import AsyncHttpClient
+from steam_scraper.utils.page_outcomes import (
+    PAGE_COMPLETED,
+    PAGE_FAILED,
+    PAGE_UNTRIED,
+    PageOutcome,
+    PageStatus,
+)
 from steam_scraper.utils.ui import UIManager, terminal_text
 
 _RESULTS_PER_PAGE = 25
@@ -85,8 +92,24 @@ class GameScraper:
         self.db = DatabaseManager(self.config.output.db_path)
         self.ui = ui_manager or UIManager()
         self.stop_event = stop_event
+        # 最近一次 run() 的逐页结局，按页码记录；供命令结束时渲染并决定退出状态。
+        self.page_outcomes: dict[int, PageOutcome] = {}
 
         self.base_url = "https://store.steampowered.com/search/"
+
+    def get_page_outcomes(self) -> list[PageOutcome]:
+        """返回最近一次 ``run`` 的逐页结局（按页码升序）。
+
+        Returns:
+            逐页结局列表；未运行过或搜索计数阶段就失败时为空列表。
+        """
+        return [self.page_outcomes[page] for page in sorted(self.page_outcomes)]
+
+    def _record_page_outcome(
+        self, page: int, status: PageStatus, reason: str = ""
+    ) -> None:
+        """记录或覆盖某一页的结局。"""
+        self.page_outcomes[page] = PageOutcome(page=page, status=status, reason=reason)
 
     async def get_total_pages(self) -> int:
         """获取搜索结果的总页数；明确没有结果时返回零。
@@ -291,7 +314,9 @@ class GameScraper:
             list[int]: 所有处理过的 app_id。
 
         Raises:
-            SteamSearchError: 搜索计数或列表页失败，已完成的数据保留以供恢复。
+            SteamSearchError: 搜索计数失败，或存在请求失败/AppID 非法/列表无法
+                解析的页面；已完成的数据和 AppID 级断点均保留，失败页与未尝试
+                页可在 --resume 时重新扫描，逐页结局见 get_page_outcomes()。
             asyncio.CancelledError: 任务取消时，等待在途任务和已启动的写入结束后抛出。
         """
         id_queue: asyncio.Queue[int] = asyncio.Queue(
@@ -306,21 +331,35 @@ class GameScraper:
         skipped_appids: list[int] = []
         all_app_ids: list[int] = []
         pending_pages: dict[int, set[int]] = {}
+        # 已由提交者落库或确认失败的 AppID；无断点对象时据此判断整页是否完成。
+        settled_appids: set[int] = set()
         commit_errors: list[Exception] = []
         stop_event = self.stop_event or threading.Event()
+        self.page_outcomes = {}
+        page_failure: SteamSearchError | None = None
 
         def mark_ready_pages() -> None:
             """仅在整页结果已持久化后保存页面断点，避免恢复时丢失排队任务。"""
-            if self.checkpoint is None:
-                return
             for page, app_ids in list(pending_pages.items()):
-                if all(
-                    self.checkpoint.is_appid_completed(app_id)
-                    or self.checkpoint.is_appid_failed(app_id)
+                ready = all(
+                    app_id in settled_appids
+                    or (
+                        self.checkpoint is not None
+                        and (
+                            self.checkpoint.is_appid_completed(app_id)
+                            or self.checkpoint.is_appid_failed(app_id)
+                        )
+                    )
                     for app_id in app_ids
-                ):
+                )
+                if not ready:
+                    continue
+                if self.checkpoint is not None:
                     self.checkpoint.mark_page_completed(page)
-                    del pending_pages[page]
+                del pending_pages[page]
+                # 只有该页全部 AppID 都已落库（或确认失败）并更新断点后，
+                # 才允许记为已完成，半页结果不会被标记成完成。
+                self._record_page_outcome(page, PAGE_COMPLETED)
 
         # 1. 生产者任务：扫描页面
         async def producer() -> None:
@@ -328,18 +367,32 @@ class GameScraper:
 
             遍历搜索结果页面，提取 AppID 并放入任务队列。
             """
+            nonlocal page_failure
             for page in range(1, total_pages + 1):
                 if stop_event.is_set():
                     break
 
                 if self.checkpoint and self.checkpoint.is_page_completed(page):
                     progress.update(page_task, advance=1)
+                    # 断点确认已完成的页面在本次运行中跳过，结局仍记为已完成。
+                    self._record_page_outcome(page, PAGE_COMPLETED)
                     continue
 
-                app_ids = await self.scrape_page_games(page)
+                try:
+                    app_ids = await self.scrape_page_games(page)
+                except SteamSearchError as exc:
+                    # 请求失败、AppID 非法或列表无法解析：该页记为失败并停止
+                    # 后续扫描；已经入队的页面仍会完成落库，绝不返回半页成功。
+                    self._record_page_outcome(page, PAGE_FAILED, str(exc))
+                    self.ui.print_error(terminal_text(str(exc)))
+                    page_failure = exc
+                    progress.update(page_task, advance=1)
+                    break
                 progress.update(page_task, advance=1)
 
                 if not app_ids:
+                    # 明确的零结果页：没有任何 AppID 需要落库，整页即已完成。
+                    self._record_page_outcome(page, PAGE_COMPLETED)
                     continue
 
                 pending_pages[page] = set(app_ids)
@@ -468,13 +521,19 @@ class GameScraper:
             if games:
                 await asyncio.to_thread(self.db.save_games_batch, games, commit=True)
 
+            # 数据库写入成功后再登记结算状态，保证未提交成功的页面不会被完成。
+            settled_appids.update(success_ids)
+            settled_appids.update(fail_ids)
+
+            # 无断点对象时也需要依据 settled_appids 更新逐页结局。
+            mark_ready_pages()
+
             if self.checkpoint:
                 if success_ids:
                     self.checkpoint.mark_appids_completed(success_ids)
                 if fail_ids:
                     for fid in fail_ids:
                         self.checkpoint.mark_appid_failed(fid)
-                mark_ready_pages()
                 # 每次批量操作后保存 Checkpoint 文件
                 self.checkpoint.save()
             if self.failure_manager:
@@ -512,11 +571,15 @@ class GameScraper:
 
                 try:
                     await producer()
-                    await id_queue.join()
 
-                    # 所有 Worker 已交出结果，哨兵保证提交者处理完最后一批才退出。
-                    await result_queue.put(None)
-                    await asyncio.shield(committer_task)
+                    # 页面失败后仍有在途 Worker，绝不能等待队列排空（会死锁），
+                    # 直接交给 finally 的 finish_pipeline 取消并收回它们。
+                    if page_failure is None:
+                        await id_queue.join()
+
+                        # 所有 Worker 已交出结果，哨兵保证提交者处理完最后一批才退出。
+                        await result_queue.put(None)
+                        await asyncio.shield(committer_task)
                 finally:
                     # 页面失败后的清理也可能收到取消，不能把取消传给写入任务。
                     cleanup_task = asyncio.create_task(finish_pipeline())
@@ -528,6 +591,14 @@ class GameScraper:
         finally:
             await self.client.close()
 
+        # 中途停止（停止信号、前序页失败）或取消后未扫描到的页面一律记为
+        # 未尝试，不能伪装成成功；下次 --resume 会重新扫描这些页。
+        for page in range(1, total_pages + 1):
+            if page not in self.page_outcomes:
+                self._record_page_outcome(
+                    page, PAGE_UNTRIED, "采集中途停止，该页未扫描"
+                )
+
         if commit_errors:
             raise commit_errors[0]
         self.db.commit()
@@ -537,6 +608,9 @@ class GameScraper:
             self.ui.print_warning(
                 f"跳过 {len(skipped_appids)} 个 AppID (重复出现或已完成): {skipped_appids}"
             )
+
+        if page_failure is not None:
+            raise page_failure
 
         return all_app_ids
 

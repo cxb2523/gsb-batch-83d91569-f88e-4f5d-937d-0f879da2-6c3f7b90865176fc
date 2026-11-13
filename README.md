@@ -52,6 +52,9 @@ uv run steam-scraper all
 > [!IMPORTANT]
 > 中断后使用 `uv run steam-scraper all --resume` 继续；分步运行时，`games` 和 `reviews` 也支持 `--resume`。不带该参数会清除对应断点，从头处理。失败项目需用 `retry` 补抓。
 
+> [!NOTE]
+> `games` 结束时会输出逐页采集结局，每页标记为「已完成」「失败」或「未尝试」，失败页附带页码与原因。只有整页 AppID 全部写入数据库并更新断点后才记为已完成；请求失败、AppID 非法或列表无法解析记为失败，中途停止或后续未扫描的页记为未尝试。存在失败页时命令以非零状态退出；`--resume` 会跳过已完成页、重新扫描失败页和未尝试页，已落库数据与 AppID 级断点均保留。
+
 ## 常用命令
 
 所有命令均以 `uv run steam-scraper` 开头；运行 `--help` 或 `<命令> --help` 查看完整参数。
