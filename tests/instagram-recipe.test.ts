@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { readFileSync } from "node:fs";
-const src = readFileSync(new URL("../recipes/instagram.ts", import.meta.url).pathname,"utf8");
+import { fileURLToPath } from "node:url";
+const src = readFileSync(fileURLToPath(new URL("../recipes/instagram.ts", import.meta.url)),"utf8");
 describe("instagram recipe encodes the findings, not just the happy path", () => {
   test("looks for 'New post', and says why 'Create' is wrong", () => {
     expect(src).toContain("New post");

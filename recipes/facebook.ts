@@ -26,10 +26,18 @@
  *   6. The caption box is a contenteditable — it must be TYPED (setting .value/.innerText leaves
  *      React's state empty and posts captionless).
  *
+ * Every run writes ONE machine-readable record (see recipes/run-report.ts): platform, the
+ * original Page URL, the outcome (published / dry_run / failed), the stage it stopped or failed
+ * in, stage durations, the original error, and a page-text summary on failure. A thrown stage
+ * aborts the platform's flow but the ORIGINAL error is re-thrown (never swallowed) and the page
+ * is always closed in `finally`.
+ *
  * Usage:
- *   await postFacebookReel(browser, { pageUrl, file, caption });
+ *   const result = await postFacebookReel(browser, { pageUrl, file, caption });
+ *   result.outcome // "published" | "dry_run" | "failed"
  */
 import type { Browser } from "../src/browser.ts";
+import { RecipeRun, RUN_STAGES, summarizePage, type RunRecord } from "./run-report.ts";
 
 export interface FbReelOptions {
   /** The Page profile URL, e.g. https://www.facebook.com/profile.php?id=... */
@@ -40,9 +48,17 @@ export interface FbReelOptions {
   /** Set false to stop before the irreversible Post (dry run). */
   publish?: boolean;
   log?: (msg: string) => void;
+  /** Override the result file (defaults to VEIL_RECIPE_RESULTS, then .veil-results/). */
+  resultFile?: string;
+  /**
+   * TEST-ONLY wait hook: replaces the recipe's fixed waits (so a local fixture page does not
+   * pay the real-site's 5s polling). It must NOT change control flow or any decision.
+   */
+  wait?: (ms: number) => Promise<void>;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+type Wait = (ms: number) => Promise<void>;
+const realSleep: Wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function els(page: any): Promise<any[]> {
   const s: any = await page.snapshot();
@@ -52,7 +68,7 @@ const named = (l: any[], rx: RegExp) => l.find((e) => rx.test(String(e.name ?? "
 const button = (l: any[], rx: RegExp) =>
   l.find((e) => rx.test(String(e.name ?? "").trim()) && /button/i.test(String(e.role ?? "")));
 
-async function clickNamed(page: any, rx: RegExp, tries = 8): Promise<boolean> {
+async function clickNamed(page: any, rx: RegExp, sleep: Wait, tries = 8): Promise<boolean> {
   for (let i = 0; i < tries; i++) {
     const hit = named(await els(page), rx);
     if (hit) {
@@ -63,23 +79,44 @@ async function clickNamed(page: any, rx: RegExp, tries = 8): Promise<boolean> {
   return false;
 }
 
-export async function postFacebookReel(browser: Browser, opts: FbReelOptions): Promise<void> {
+/**
+ * Run the Facebook flow and return its record on success/dry-run.
+ *
+ * A stage that throws is recorded (outcome "failed", its stage, the ORIGINAL message, a page
+ * summary) and that SAME original error is then re-thrown — the record does not replace it, and
+ * the page is still closed in `finally`.
+ */
+export async function postFacebookReel(browser: Browser, opts: FbReelOptions): Promise<RunRecord> {
   const log = opts.log ?? ((m: string) => console.log("  " + m));
-  const page = await (browser as any).newPage();
+  const sleep: Wait = opts.wait ?? realSleep;
+  const run = new RecipeRun({
+    platform: "facebook",
+    pageUrl: opts.pageUrl,
+    publish: opts.publish !== false,
+    resultFile: opts.resultFile,
+    log,
+  });
+  let page: any = null;
   try {
+    run.enter(RUN_STAGES.prepare);
+    page = await (browser as any).newPage();
+
+    run.enter(RUN_STAGES.loadPage);
     await page.goto(opts.pageUrl, { timeout: 60000 });
     await sleep(6000);
 
     // Cookie/overlay pass — decline OPTIONAL cookies (privacy), never accept all.
     for (const rx of [/Decline optional/i, /Only allow essential/i, /^Not Now$/i]) {
-      if (await clickNamed(page, rx, 1)) { log(`dismissed overlay: ${rx}`); await sleep(1000); }
+      if (await clickNamed(page, rx, sleep, 1)) { log(`dismissed overlay: ${rx}`); await sleep(1000); }
     }
 
+    run.enter(RUN_STAGES.openEditor);
     // (2) Open the composer in TEXT mode — no chooser fires.
-    if (!(await clickNamed(page, /what'?s on your mind|share a thought|create (a )?post/i, 6)))
+    if (!(await clickNamed(page, /what'?s on your mind|share a thought|create (a )?post/i, sleep, 6)))
       throw new Error("facebook: could not open the composer");
     await sleep(3500);
 
+    run.enter(RUN_STAGES.captionVerify);
     // (6) Caption first; the modal opens with the textbox focused. Type in chunks, then VERIFY.
     const box = named(await els(page), /what'?s on your mind|type|say something/i);
     if (box) await page.click(box.ref).catch(() => {});
@@ -98,6 +135,7 @@ export async function postFacebookReel(browser: Browser, opts: FbReelOptions): P
     await page.press("Escape");
     await sleep(1000);
 
+    run.enter(RUN_STAGES.attach);
     // (1)+(2) Attach by setting the hidden input directly — no click, no OS dialog. Fall back to
     // the chooser-intercept picker if the input is created lazily.
     let attached = false;
@@ -111,6 +149,7 @@ export async function postFacebookReel(browser: Browser, opts: FbReelOptions): P
       log("attached via intercepted picker");
     }
 
+    run.enter(RUN_STAGES.attachmentPreview);
     // Wait for the preview to render.
     let preview = false;
     for (let i = 0; i < 30; i++) {
@@ -120,8 +159,13 @@ export async function postFacebookReel(browser: Browser, opts: FbReelOptions): P
     if (!preview) throw new Error("facebook: no video preview — treat as NOT attached");
     log("video preview present");
 
-    if (opts.publish === false) { log("dry run — stopping before Post"); return; }
+    if (opts.publish === false) {
+      log("dry run — stopping before Post");
+      run.dryRun(RUN_STAGES.publishConfirm);
+      return run.record()!;
+    }
 
+    run.enter(RUN_STAGES.publishConfirm);
     // (4) Reel flow: Next -> Next -> Post (terminal). Cap the walk.
     for (let step = 0; step < 5; step++) {
       const l = await els(page);
@@ -134,11 +178,12 @@ export async function postFacebookReel(browser: Browser, opts: FbReelOptions): P
 
     // (4) Dismiss the "Add WhatsApp button" promo, then click Post if it re-presents.
     for (let i = 0; i < 4; i++) {
-      if (await clickNamed(page, /^Not now$/i, 1)) { log("dismissed WhatsApp promo"); await sleep(2000); break; }
+      if (await clickNamed(page, /^Not now$/i, sleep, 1)) { log("dismissed WhatsApp promo"); await sleep(2000); break; }
       await sleep(1000);
     }
-    await clickNamed(page, /^(Publish|Post|Share)$/i, 3);
+    await clickNamed(page, /^(Publish|Post|Share)$/i, sleep, 3);
 
+    run.enter(RUN_STAGES.postPublishVerify);
     // (5) VERIFY on the Reels tab — a published reel is NOT in the Posts feed.
     await page.goto(opts.pageUrl + "&sk=reels_tab", { timeout: 60000 }).catch(() => {});
     await sleep(6000);
@@ -148,7 +193,16 @@ export async function postFacebookReel(browser: Browser, opts: FbReelOptions): P
     );
     if (!live) throw new Error("facebook: reel not visible in the Reels tab — UNCONFIRMED, check the Page");
     log("posted — reel confirmed in the Reels tab");
+    run.published();
+    return run.record()!;
+  } catch (e: any) {
+    // Record the failure with the ORIGINAL message, then re-throw that same original error —
+    // a stage throw aborts this platform's flow and must not be swallowed.
+    const error = String(e?.message ?? e);
+    const record = run.failed(error, await summarizePage(page));
+    log(`failed at stage ${record?.stage ?? "unknown"}: ${error}`);
+    throw e;
   } finally {
-    await page.close().catch(() => {});
+    await page?.close().catch(() => {});
   }
 }

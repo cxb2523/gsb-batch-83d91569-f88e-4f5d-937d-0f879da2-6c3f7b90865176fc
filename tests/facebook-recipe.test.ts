@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { readFileSync } from "node:fs";
-const src = readFileSync(new URL("../recipes/facebook.ts", import.meta.url).pathname, "utf8");
+import { fileURLToPath } from "node:url";
+const src = readFileSync(fileURLToPath(new URL("../recipes/facebook.ts", import.meta.url)), "utf8");
 
 describe("facebook recipe encodes the findings, not just the happy path", () => {
   test("the blocker was the native chooser; fix is CDP setFileInputFiles", () => {
