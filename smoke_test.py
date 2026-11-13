@@ -4888,9 +4888,14 @@ class _ListingSession(_FakeSession):
         return self
 
 
-def _run_listing(modname, url, pages, html_for_page, extra_argv=()):
+def _run_listing(modname, url, pages, html_for_page, extra_argv=(), die_on=()):
     """Run one entry point's real scrape() for --mode transfers with the
-    fetch replaced by real captures. Returns (rc, meta, row skus)."""
+    fetch replaced by real captures. Returns (rc, meta, row skus).
+
+    `die_on` makes the fake fetch RAISE for those page numbers — a worker
+    dying after it took the page, which only the concurrent path
+    (playwright_scraper --concurrency) can survive; do not pass it for the
+    serial engines."""
     from product_parser import next_page_link, page_number_from_url, served_page_number
     mod = importlib.import_module(modname)
     tmp = tempfile.mkdtemp(prefix="tm_listing_")
@@ -4924,6 +4929,8 @@ def _run_listing(modname, url, pages, html_for_page, extra_argv=()):
             session = _ListingSession()
 
             def fake_fetch(sess, a, pool, page_num, u):
+                if page_num in die_on:
+                    raise RuntimeError("worker died holding page %d" % page_num)
                 html = html_for_page(page_number_from_url(u))
                 if html is None:
                     # A page that timed out: not served at all.
@@ -5175,6 +5182,32 @@ def test_listing_end_and_repeated_pages(skips):
                     rc == 6 and meta.get("stop_reason") == "page_repeated"
                     and meta.get("status") == "partial"
                     and meta.get("pages_completed") == 1 and skus == [r.sku for r in p1])
+
+    # A worker that dies after taking a page must not lose the page: it is a
+    # FAILED page in the output. And pages still in the queue when every
+    # worker is gone must be reported as unattempted, never silently absent
+    # under a "complete" status.
+    try:
+        rc, meta, skus = _run_listing("playwright_scraper", TRANSFERS_PAGED_URL, 6,
+                                      four, ("--concurrency", "2"), die_on={3})
+        ok &= check("playwright --concurrency 2: a worker dying with page 3 -> "
+                    "page 3 in pages_failed, partial (got rc=%s %s pages_failed=%s)"
+                    % (rc, meta.get("stop_reason"), meta.get("pages_failed")),
+                    rc == 6 and meta.get("status") == "partial"
+                    and meta.get("stop_reason") == "page_load_timeout"
+                    and meta.get("pages_failed") == [3]
+                    and skus == want_paged)
+        rc, meta, skus = _run_listing("playwright_scraper", TRANSFERS_PAGED_URL, 6,
+                                      four, ("--concurrency", "2"), die_on={2, 3})
+        ok &= check("...and when every worker dies, the pages never taken are "
+                    "reported as pages_unattempted, not dropped (got failed=%s "
+                    "unattempted=%s)"
+                    % (meta.get("pages_failed"), meta.get("pages_unattempted")),
+                    meta.get("status") != "complete"
+                    and meta.get("pages_failed") == [2, 3]
+                    and meta.get("pages_unattempted") == [4, 5, 6])
+    except ImportError as e:
+        skips.append("playwright worker-death run (%s)" % e)
     return ok
 
 

@@ -138,6 +138,13 @@ class PageOutcome:
     # The exit answered CONNECT with 407 — nothing was requested from the
     # site (proxy_pool.connect_status).
     proxy_auth_refused: bool = False
+    # A concurrent worker found every row on this page already seen (by sku)
+    # and stopped the dispatch because of it. A DISPATCH signal, not the
+    # verdict: under concurrency a later page can finish first and make a
+    # legitimately fresh page look repeated, so which page is the repeat is
+    # settled afterwards in page order (page_flow.settle_repeats). This flag
+    # only records what the worker saw, so the page's fate stays traceable.
+    repeated: bool = False
 
     @property
     def ok(self) -> bool:
@@ -859,6 +866,18 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int,
     serves nothing new — the site answers a page past the end with an
     earlier page. Which page that was, and what it means, is decided
     afterwards in page order (page_flow.settle_repeats), not here.
+
+    Every queued page ends the run accounted for in exactly one of three
+    places, so none can vanish from the output silently:
+
+    * `results`     — one PageOutcome per page a worker reported on
+                      (including a page whose rows all repeated: it comes
+                      back marked `repeated`, and the merge drops its rows);
+    * `unattempted` — page numbers still in the queue when the dispatch
+                      stopped (the listing ended, or every worker died);
+    * recovered     — a page a worker took and then died with is in neither
+                      of the above, so it is appended to `results` as a
+                      FAILED page (load_failed) rather than being lost.
     """
     work = queue.Queue()
     for spec in specs:
@@ -894,9 +913,11 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int,
                             if outcome.ok:
                                 seen_keys.update(k for k in keys if k is not None)
                         if repeats:
+                            outcome.repeated = True
                             logger.info("[%s] page %d served only rows "
-                                        "already seen — not dispatching "
-                                        "further pages.", name, page_num)
+                                        "already seen — marking it a repeat "
+                                        "and not dispatching further pages.",
+                                        name, page_num)
                             exhausted.set()
                         elif outcome.ok and not outcome.rows:
                             logger.info("[%s] page %d returned no rows — "
@@ -927,6 +948,10 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int,
     accounted = {o.page_num for o in results} | set(unattempted)
     for page_num, url in specs:
         if page_num not in accounted:
+            logger.error("Page %d was taken by a worker that then died "
+                         "before reporting it — recording it as a failed "
+                         "page so the run cannot end complete without it.",
+                         page_num)
             results.append(PageOutcome(page_num=page_num, url=url,
                                        load_failed=True))
     return results, sorted(unattempted), exhausted.is_set()
@@ -957,6 +982,10 @@ def scrape(args) -> int:
     pages = page_flow.PageSequence()
     blocked = False
     stop_reason = "single_page_mode" if args.mode not in PAGINATED_MODES else "completed"
+    # Pages a concurrent dispatch never handed to a worker. Kept for the
+    # sidecar: a page the run did not fetch must be VISIBLE in the result,
+    # not silently absent under a "complete" status.
+    unattempted_pages: List[int] = []
 
     pool = proxy_pool_from_args(args)
     args.solver_exit = None
@@ -1030,20 +1059,28 @@ def scrape(args) -> int:
                         args, pool, specs, concurrency,
                         known_keys=[r.sku for r in first.rows])
                     outcomes.extend(rest)
+                    unattempted_pages = unattempted
                     page_flow.fill_from_past_end(outcomes)
                     pages = page_flow.settle_repeats(outcomes)
 
                     failed = [o for o in rest
                               if not o.ok and pages.counts(o.page_num)]
                     if failed:
+                        # The reason comes from the earliest page the run
+                        # lost, and the blocked flag answers for THAT page —
+                        # a timeout's reason next to a blocked flag raised
+                        # by a different page would contradict itself.
                         worst = min(failed, key=lambda o: o.page_num)
                         stop_reason = page_flow.failure_reason(worst)
-                        blocked = any(o.blocked_by for o in failed)
+                        blocked = worst.blocked_by is not None
                     elif pages.repeat:
                         stop_reason = pages.repeat["stop_reason"]
                     elif exhausted:
                         stop_reason = "no_new_products"
                     elif unattempted:
+                        # Pages still in the queue with no failure and no
+                        # listing-end verdict (every worker died before
+                        # taking them): not a complete run.
                         stop_reason = "pages_unattempted"
                     session = None
                 else:
@@ -1124,14 +1161,20 @@ def scrape(args) -> int:
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 
+    extra = {**pages.meta(), **page_flow.listing_filter_meta(args.mode, args.url)}
+    if unattempted_pages:
+        # Requested pages no worker ever took. Visible even when the run is
+        # complete (the listing ended before they were needed) — a page the
+        # run did not fetch must not disappear from the result silently.
+        extra["pages_unattempted"] = unattempted_pages
+
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,
                       pages_requested=args.pages, pages_completed=len(ok_pages),
                       pages_failed=failed_pages, mode=args.mode,
                       source=site_host(final_url) or "transfermarkt.com",
                       start_url=args.url, final_url=final_url,
-                      extra={**pages.meta(),
-                             **page_flow.listing_filter_meta(args.mode, args.url)})
+                      extra=extra)
 
 
 def parse_args():
