@@ -98,54 +98,119 @@ export function parseProfile(md) {
   return { locators: parseLocators(md), recipes: parseRecipes(md) };
 }
 
-// --- validation --------------------------------------------------------------------
-export function validate(recipe, locators) {
-  const errors = []; const warnings = [];
-  if (!recipe) return { ok: false, errors: ['recipe not found'], warnings };
-  for (const step of recipe.steps) {
-    if (!ACTIONS.has(step.action)) { errors.push(`unknown action: '${step.action}' (valid: ${[...ACTIONS].join(', ')})`); continue; }
-    // referenced param must be in the signature
-    if (step.arg?.kind === 'param' && !recipe.params.includes(step.arg.name)) {
-      errors.push(`param not declared in signature: {${step.arg.name}} (step ${step.action})`);
+// --- per-step diagnostics ----------------------------------------------------------
+// diagnose(recipe, locators, args) — the pre-compile check: every problem as
+// { step, action, level, message }, where step is the 1-based position of the step in the recipe
+// (0 = recipe-level, no single step to point at). level 'error' blocks compilation; 'warning'
+// marks a suspicious but non-fatal form. The collector reads this to fix the profile step by
+// step instead of guessing from one thrown message.
+// args: the actual arguments the recipe would be compiled with, or null when unknown (plain
+// validation of the profile) — value-dependent checks (missing argument, resolved navigate
+// URL) only run when args are given.
+function isAbsoluteHttpUrl(u) {
+  try { const p = new URL(String(u)); return p.protocol === 'http:' || p.protocol === 'https:'; }
+  catch { return false; }
+}
+
+export function diagnose(recipe, locators, args = null) {
+  const issues = [];
+  const error = (step, action, message) => issues.push({ step, action, level: 'error', message });
+  const warning = (step, action, message) => issues.push({ step, action, level: 'warning', message });
+  if (!recipe) {
+    error(0, null, 'recipe not found');
+    return { ok: false, issues };
+  }
+  const checkLocator = (n, action, name) => {
+    const loc = locators.get(name);
+    if (!loc) error(n, action, `locator not found: '${name}'`);
+    else if (!loc.sel) error(n, action, `locator '${name}' has no sel: — not actionable`);
+  };
+  recipe.steps.forEach((step, i) => {
+    const n = i + 1;
+    if (!ACTIONS.has(step.action)) {
+      error(n, step.action, `unknown action (valid: ${[...ACTIONS].join(', ')})`);
+      return;
     }
-    // navigate: only http(s) — a literal is checked here, an argument at compile time.
-    if (step.action === 'navigate') {
-      const lit = step.arg?.kind === 'literal' ? step.arg.value : (!step.arg ? step.operand : null);
-      if (lit != null && lit && !/\{[^}]+\}/.test(lit) && !/^https?:\/\//i.test(lit)) errors.push(`navigate: only http(s) URLs ('${lit.slice(0, 40)}')`);
-      if (/\{[^}]+\}/.test(step.operand) && !step.arg) {
-        warnings.push(`navigate: operand contains '{…}' — did you mean '<- {param}' to pass it as an argument?`);
+    // referenced param must be declared, and (when args are known) actually provided
+    if (step.arg?.kind === 'param') {
+      if (!recipe.params.includes(step.arg.name)) {
+        error(n, step.action, `param not declared in signature: {${step.arg.name}}`);
+      } else if (args && !(step.arg.name in args)) {
+        error(n, step.action, `missing argument: no value for {${step.arg.name}}`);
       }
-      continue;
+    }
+    // navigate: only absolute http(s) — a literal/operand is checked here, an argument once its
+    // value is known (args given). `{…}` in the operand without `<-` is only a warning.
+    if (step.action === 'navigate') {
+      if (/\{[^}]+\}/.test(step.operand) && !step.arg) {
+        warning(n, step.action, `operand contains '{…}' — did you mean '<- {param}' to pass it as an argument?`);
+        return;
+      }
+      const target = step.arg
+        ? (step.arg.kind === 'literal' ? step.arg.value : (args ? args[step.arg.name] : undefined))
+        : step.operand;
+      if (target == null) return;   // value unknown here; the missing-argument error above covers it
+      if (!/\{[^}]+\}/.test(String(target)) && !isAbsoluteHttpUrl(target)) {
+        error(n, step.action, `navigate target is not an absolute http(s) URL: '${String(target).slice(0, 60)}'`);
+      }
+      return;
     }
     // wait-url does not use a locator
-    if (step.action === 'wait-url') continue;
+    if (step.action === 'wait-url') return;
     // extract / extract-all: plain locator, or (extract only) a map {key: url | url:/re/ | <locator>} —
     // every locator named in the map is checked too (it used to pass validate and fail at compile).
     if (step.action === 'extract' || step.action === 'extract-all') {
+      if (step.action === 'extract-all' && step.operand.startsWith('{')) {
+        error(n, step.action, 'extract-all takes one locator, not a {…} map');
+        return;
+      }
       const names = step.operand.startsWith('{')
         ? step.operand.replace(/^\{|\}$/g, '').split(',').map((p) => p.trim()).filter(Boolean)
           .map((p) => (p.indexOf(':') < 0 ? null : p.slice(p.indexOf(':') + 1).trim()))
         : [step.operand];
-      if (step.action === 'extract-all' && step.operand.startsWith('{')) errors.push('extract-all takes one locator, not a {…} map');
-      for (const n of names) {
-        if (n == null) { errors.push(`extract: pair without ':' in map '${step.operand}'`); continue; }
-        if (n === 'url' || /^url:\/.*\/$/.test(n)) continue;
-        const loc = locators.get(n);
-        if (!loc) errors.push(`locator not found: '${n}' (step ${step.action})`);
-        else if (!loc.sel) errors.push(`locator '${n}' has no sel: — not actionable (step ${step.action})`);
+      for (const name of names) {
+        if (name == null) { error(n, step.action, `pair without ':' in map '${step.operand}'`); continue; }
+        if (name === 'url' || /^url:\/.*\/$/.test(name)) continue;
+        checkLocator(n, step.action, name);
       }
-      continue;
+      return;
     }
     // return url is special
-    if (step.action === 'return' && step.operand === 'url') continue;
+    if (step.action === 'return' && step.operand === 'url') return;
     // type, type-slowly, click, return <locator>: must exist and have sel
     const loc = locators.get(step.operand);
-    if (!loc) { errors.push(`locator not found: '${step.operand}' (step ${step.action})`); continue; }
-    if (!loc.sel) { errors.push(`locator '${step.operand}' has no sel: — not actionable`); continue; }
-    // if sel is a template, click must supply the hole value
-    if (loc.holes.length && step.action === 'click' && !step.arg) {
-      errors.push(`locator '${step.operand}' is a template (${loc.holes.map((h) => `{${h}}`).join(',')}) but the step does not pass '<- {param}'`);
+    if (!loc) { error(n, step.action, `locator not found: '${step.operand}'`); return; }
+    if (!loc.sel) { error(n, step.action, `locator '${step.operand}' has no sel: — not actionable`); return; }
+    // a template locator in a click: the step must supply the (single) hole value
+    if (step.action === 'click' && loc.holes.length) {
+      const distinct = new Set(loc.holes);
+      if (distinct.size > 1) {
+        error(n, step.action, `locator '${step.operand}' has ${distinct.size} distinct holes (${[...distinct].map((h) => `{${h}}`).join(', ')}): a click step can only provide one value`);
+      } else if (!step.arg) {
+        error(n, step.action, `locator '${step.operand}' is a template (${loc.holes.map((h) => `{${h}}`).join(',')}) but the step does not pass '<- {param}'`);
+      }
     }
-  }
-  return { ok: errors.length === 0, errors, warnings };
+  });
+  return { ok: !issues.some((i) => i.level === 'error'), issues };
+}
+
+// Stable, human-readable rendering: `step 2 (navigate): …` / `recipe: …`, ✗ error / ⚠ warning.
+export function formatIssue(issue) {
+  const where = issue.step > 0 ? `step ${issue.step} (${issue.action})` : 'recipe';
+  return `${where}: ${issue.message}`;
+}
+export function formatDiagnostics(issues) {
+  return issues.map((i) => `${i.level === 'error' ? '✗' : '⚠'} ${formatIssue(i)}`).join('\n');
+}
+
+// --- validation --------------------------------------------------------------------
+// Thin wrapper over diagnose without concrete args (structure only), kept for callers that want
+// flat error/warning strings.
+export function validate(recipe, locators) {
+  const d = diagnose(recipe, locators, null);
+  return {
+    ok: d.ok,
+    errors: d.issues.filter((i) => i.level === 'error').map(formatIssue),
+    warnings: d.issues.filter((i) => i.level === 'warning').map(formatIssue),
+  };
 }

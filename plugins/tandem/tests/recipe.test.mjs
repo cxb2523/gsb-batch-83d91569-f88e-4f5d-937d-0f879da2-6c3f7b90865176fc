@@ -6,9 +6,14 @@
 // Usage: node tests/recipe.test.mjs   (exit 0 = green).
 
 import {
-  parseProfile, parseRecipes, parseLocators, validate,
+  parseProfile, parseRecipes, parseLocators, validate, diagnose,
   compileFast, compileSteps, fillTemplate, assertCompiledSafe,
 } from '../scripts/recipe.mjs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 let pass = 0; let fail = 0;
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -174,6 +179,104 @@ for (const v of ['a"b', "a'b", 'a\\b', '${x}', '`x`', 'require("x")', 'A.(B)+', 
   } catch { allSafe = false; }
 }
 ok('fuzz invariant: every hostile value is inert and parseable', allSafe);
+
+// --- per-step diagnostics (diagnose) ------------------------------------------------
+// One self-made profile covering the five situations: normal compile, missing argument (and a
+// template hole without `<-`), non-absolute navigate target, broken extract map, and a template
+// with several distinct holes under a click. Every error must point at its step number.
+process.stdout.write('[diagnostics]\n');
+const DIAG_MD = `## Locators
+- search-box:
+    sel:       role=textbox[name="Search"]
+- row-by-id:
+    sel:       tr.row >> text="{id}"
+- multi-hole:
+    sel:       role=row[name="{a}"] >> text="{b}"
+- price:
+    sel:       span.price
+
+## Recipes
+good-recipe(q):
+  - navigate: https://example.com/search
+  - type:     search-box  <- {q}
+  - click:    row-by-id   <- {q}
+  - extract:  price
+
+missing-param(q):
+  - navigate: https://example.com/
+  - type:     search-box  <- {q}
+  - click:    row-by-id
+
+bad-url():
+  - navigate: https://example.com/ok
+  - navigate: not-an-absolute-url
+  - return:   url
+
+bad-map():
+  - navigate: https://example.com/
+  - extract:  { title: price, broken, nope: no-such-locator }
+
+multi-hole-click():
+  - navigate: https://example.com/
+  - click:    multi-hole  <- "x"
+
+nav-braces():
+  - navigate: "{url}"
+`;
+const dp = parseProfile(DIAG_MD);
+// 1. normal: no issues, and the recipe still compiles to safe code
+const dGood = diagnose(dp.recipes.get('good-recipe'), dp.locators, { q: 'TCK-1' });
+ok('good recipe: diagnose finds no issues', dGood.ok && dGood.issues.length === 0);
+const goodCode = compileFast(dp.recipes.get('good-recipe'), dp.locators, { q: 'TCK-1' });
+ok('good recipe still compiles', goodCode.includes('await page.goto("https://example.com/search");'));
+ok('good recipe compiled code passes the safety net', assertCompiledSafe(goodCode) === true);
+// 2. missing argument: {q} declared but no value → error at the step that uses it (step 2);
+//    template locator without <- {param} → error at its step (step 3)
+const dMiss = diagnose(dp.recipes.get('missing-param'), dp.locators, {});
+ok('missing argument: not ok', !dMiss.ok);
+ok('missing argument: error at step 2 naming {q}', dMiss.issues.some((i) => i.level === 'error' && i.step === 2 && i.message.includes('{q}')));
+ok('template hole without argument: error at step 3', dMiss.issues.some((i) => i.level === 'error' && i.step === 3 && i.message.includes('template')));
+// 3. illegal navigate target → error at exactly step 2, step 1 (valid URL) untouched
+const dBadUrl = diagnose(dp.recipes.get('bad-url'), dp.locators, {});
+ok('bad url: exactly one error, at step 2', dBadUrl.issues.length === 1 && dBadUrl.issues[0].level === 'error' && dBadUrl.issues[0].step === 2);
+ok('bad url: message says absolute http(s)', dBadUrl.issues[0].message.includes('http(s)'));
+// 4. broken extract map: pair without ':' AND unknown locator → two errors, both at step 2
+const dMap = diagnose(dp.recipes.get('bad-map'), dp.locators, {});
+ok('bad map: two errors, both at step 2', dMap.issues.filter((i) => i.level === 'error').length === 2 && dMap.issues.every((i) => i.step === 2));
+ok("bad map: pair without ':' reported", dMap.issues.some((i) => i.message.includes("without ':'")));
+ok('bad map: unknown locator reported', dMap.issues.some((i) => i.message.includes("locator not found: 'no-such-locator'")));
+// 5. template with several distinct holes under a click → error at step 2 naming the holes
+const dMulti = diagnose(dp.recipes.get('multi-hole-click'), dp.locators, {});
+ok('multi-hole template: one error at step 2', dMulti.issues.length === 1 && dMulti.issues[0].level === 'error' && dMulti.issues[0].step === 2);
+ok('multi-hole template: message names both holes', dMulti.issues[0].message.includes('{a}') && dMulti.issues[0].message.includes('{b}'));
+// warning (not error): navigate operand with {…} but no <- {param}
+const dBrace = diagnose(dp.recipes.get('nav-braces'), dp.locators, {});
+ok('navigate {…} without <- is a warning, recipe still ok', dBrace.ok && dBrace.issues.length === 1 && dBrace.issues[0].level === 'warning' && dBrace.issues[0].step === 1);
+
+// --- diagnostics through the CLI (compile command) -----------------------------------
+// A real profile in a temp TANDEM_DATA_DIR: errors → diagnostics on stderr, NO code on stdout,
+// non-zero exit; a clean recipe → code on stdout, exit 0.
+process.stdout.write('[diagnostics CLI]\n');
+const tmp = mkdtempSync(join(tmpdir(), 'tandem-recipe-diag-'));
+mkdirSync(join(tmp, 'sites'), { recursive: true });
+writeFileSync(join(tmp, 'sites', 'diag.test.md'), DIAG_MD);
+const RECIPE_CLI = fileURLToPath(new URL('../scripts/recipe.mjs', import.meta.url));
+const runCli = (cliArgs) => spawnSync(process.execPath, [RECIPE_CLI, ...cliArgs], { env: { ...process.env, TANDEM_DATA_DIR: tmp }, encoding: 'utf8' });
+
+const cliBad = runCli(['compile', 'diag.test', 'bad-url']);
+ok('CLI: errors → exit non-zero', cliBad.status === 1);
+ok('CLI: errors → no executable code on stdout', !cliBad.stdout.includes('page.goto') && !cliBad.stdout.includes('async (page)'));
+ok('CLI: diagnostics point at the step', cliBad.stderr.includes('step 2 (navigate)'));
+
+const cliMiss = runCli(['compile', 'diag.test', 'missing-param']);
+ok('CLI: missing argument → exit non-zero', cliMiss.status === 1);
+ok('CLI: missing argument located to its steps', cliMiss.stderr.includes('step 2 (type)') && cliMiss.stderr.includes('step 3 (click)'));
+
+const cliGood = runCli(['compile', 'diag.test', 'good-recipe', 'TCK-1']);
+ok('CLI: valid recipe exits 0', cliGood.status === 0);
+ok('CLI: valid recipe emits code on stdout', cliGood.stdout.includes('async (page) =>'));
+ok('CLI: emitted code passes the safety net', assertCompiledSafe(cliGood.stdout.trim()) === true);
+rmSync(tmp, { recursive: true, force: true });
 
 // --- summary ----------------------------------------------------------------------
 process.stdout.write(`\nrecipe: ${pass} ok, ${fail} failures\n`);

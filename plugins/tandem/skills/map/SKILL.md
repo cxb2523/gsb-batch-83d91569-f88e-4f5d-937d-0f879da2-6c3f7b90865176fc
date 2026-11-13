@@ -171,6 +171,11 @@ open-ticket-by-id(id):
 - **`--step` (default, observable):** `recipe.mjs compile <host> <recipe> <args> --step` → steps
   `{action,target,value}` → run them with `browser_type`/`click`/`wait_for`. The human sees each step.
   Precede it with the `fingerprint check` gate (same as for a standalone `sel:`).
+- **Diagnostics:** `compile` validates BEFORE generating. Any error (missing argument, navigate
+  target not absolute http(s), unknown locator or missing `:` in an `extract` map, a template with
+  several distinct holes under one `click`) is listed per step (`✗ step 2 (navigate): …`) on
+  stderr, no code is emitted and the exit code is non-zero. Warnings (`⚠`, e.g. `{…}` in a
+  `navigate` operand without `<- {param}`) do not block. Fix the profile at the step named.
 - **`--fast` (frugal, 1 call):** `recipe.mjs compile … --fast` → a single Playwright function. **Mandatory
   dry-run:** show the code to the human; with their OK, run it with `browser_run_code_unsafe`. That
   tool is RCE-equivalent → only recipes from the co-curated store, never model or page text.

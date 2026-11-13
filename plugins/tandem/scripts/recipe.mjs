@@ -4,7 +4,8 @@
 // A recipe in the profile (sites/<host>.md, section ## Recipes) is a named, PARAMETERIZED
 // sequence of steps over the profile's locators (by their `sel:`). Work is split by
 // responsibility across three modules; this is the public face (re-exports) + the CLI:
-//   recipe-parser.mjs    — understands the DSL: parseLocators/parseRecipes/parseProfile/validate/ACTIONS.
+//   recipe-parser.mjs    — understands the DSL: parseLocators/parseRecipes/parseProfile/ACTIONS,
+//                          and the pre-compile per-step check: diagnose/formatDiagnostics/validate.
 //   recipe-compiler.mjs  — structure → code/steps: fillTemplate/compileFast/compileSteps.
 //   recipe-safety.mjs    — final net over compiled code: assertCompiledSafe.
 //
@@ -20,13 +21,13 @@
 //     - return:   url
 
 import { readFileSync } from 'node:fs';
-import { hasSection, parseProfile, unparsedLocatorLines, validate } from './recipe-parser.mjs';
+import { hasSection, parseProfile, unparsedLocatorLines, diagnose, formatDiagnostics, validate } from './recipe-parser.mjs';
 import { compileFast, compileSteps } from './recipe-compiler.mjs';
 import { normalizeHost } from './host.mjs';
 import { resolveProfile } from './profile.mjs';
 import { isMain } from './is-main.mjs';
 
-export { ACTIONS, parseLocators, parseRecipes, parseProfile, validate } from './recipe-parser.mjs';
+export { ACTIONS, parseLocators, parseRecipes, parseProfile, validate, diagnose, formatIssue, formatDiagnostics } from './recipe-parser.mjs';
 export { fillTemplate, compileFast, compileSteps } from './recipe-compiler.mjs';
 export { assertCompiledSafe } from './recipe-safety.mjs';
 
@@ -70,13 +71,18 @@ if (isCli) {
       const { locators, recipes } = loadProfile(host);
       const recipe = recipes.get(recipeName);
       if (!recipe) { process.stderr.write(`recipe: recipe '${recipeName}' not found in ${host}\n`); process.exit(1); }
-      if (rest.length < recipe.params.length) {
-        process.stderr.write(`recipe: compile requires ${recipe.params.length} arg(s): ${recipe.params.join(', ')}\n`);
+      // Missing positionals stay absent so diagnose can point at the exact step that needs them.
+      const args = Object.fromEntries(recipe.params.map((p, i) => [p, rest[i]]).filter(([, v]) => v !== undefined));
+      // Pre-compile diagnostics: every problem listed per step, errors vs warnings. Any error →
+      // no executable code on stdout and a non-zero exit (a half-valid recipe must not run).
+      const d = diagnose(recipe, locators, args);
+      if (d.issues.length) {
+        process.stderr.write(`diagnostics for '${recipeName}':\n${formatDiagnostics(d.issues).split('\n').map((l) => `  ${l}`).join('\n')}\n`);
+      }
+      if (!d.ok) {
+        process.stderr.write(`recipe: ${d.issues.filter((i) => i.level === 'error').length} error(s) — no code emitted; fix the profile and recompile\n`);
         process.exit(1);
       }
-      const args = Object.fromEntries(recipe.params.map((p, i) => [p, rest[i]]));
-      const v = validate(recipe, locators);
-      if (!v.ok) { process.stderr.write(`recipe: invalid recipe:\n${v.errors.map((e) => `  ${e}`).join('\n')}\n`); process.exit(1); }
       if (flags.has('--step')) process.stdout.write(JSON.stringify(compileSteps(recipe, locators, args), null, 2) + '\n');
       else process.stdout.write(compileFast(recipe, locators, args) + '\n');
       process.exit(0);
