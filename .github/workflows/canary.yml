@@ -1,0 +1,135 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "7 7 * * 1"   # weekly, Mondays (every run bills the proxy or Scraping Browser); avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once (from the default branch) before trusting the badge
+
+# What is measured (README "Read this before trusting a run"): every fully
+# automated run against skyscanner.com so far — local Chromium, the Scraping
+# Browser API over --cdp-endpoint, --cookies-file — was challenged by
+# PerimeterX. A GitHub runner is a datacentre address, so an ungated live run
+# here cannot pass. Each live job therefore needs its secret, and then ASSERTS
+# (exit 0, status, a floor, price and currency coverage, the XHR source).
+#
+# Re-measured 2026-11-05 with both secrets set (a US residential proxy; a
+# Scraping Browser API endpoint, US exit): both jobs reached the site and
+# both were served PerimeterX's challenge page (exit 3, blocked; three fresh
+# Scraping Browser sessions). This repository does not implement a
+# PerimeterX solve, so while that holds a red badge here means "blocked",
+# and the error line carries the stop_reason that says so.
+#
+# A missing secret FAILS the job with an ::error:: naming it. A canary that
+# skipped tested nothing, and a green badge on a skip says the site works
+# when nobody looked. A blocked run (exit 3), a parser failure (exit 5) or
+# zero rows is red too.
+
+jobs:
+  canary-proxy:
+    name: canary (local Chromium via SKYSCANNER_PROXY)
+    runs-on: ubuntu-latest
+    env:
+      HAS_PROXY: ${{ secrets.SKYSCANNER_PROXY != '' }}
+    steps:
+      - name: Fail — no SKYSCANNER_PROXY secret
+        if: env.HAS_PROXY != 'true'
+        run: |
+          echo "::error::canary NOT RUN: the SKYSCANNER_PROXY repository secret is missing. From a \
+          datacentre runner every measured run was challenged by PerimeterX, so this job needs a \
+          residential proxy (http://user:pass@host:port) to test the site at all."
+          exit 1
+      - uses: actions/checkout@v4
+        if: env.HAS_PROXY == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAS_PROXY == 'true'
+        with:
+          python-version: "3.12"
+      - name: Install
+        if: env.HAS_PROXY == 'true'
+        run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+      # The credential goes through the ENVIRONMENT, never argv:
+      # env_config.py reads SKYSCANNER_PROXY itself.
+      - name: Run a real route, 30 days out
+        if: env.HAS_PROXY == 'true'
+        env:
+          SKYSCANNER_PROXY: ${{ secrets.SKYSCANNER_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py --origin LHR --destination JFK \
+            --depart-date "$(date -u -d '+30 days' +%Y-%m-%d)" \
+            --max-results 1000 --format json --out canary_out.json --dump-html \
+            --proxy-budget-mb 10
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+      # The run meters what it sends through SKYSCANNER_PROXY and stops at
+      # --proxy-budget-mb 10. This puts the figure in the step summary and
+      # fails the job when the cap was hit, so a search that has grown heavy
+      # is a red run rather than a quietly larger bill. (The Scraping
+      # Browser job below has no local proxy and is not metered.)
+      - name: Proxy traffic of the run
+        if: ${{ !cancelled() && env.HAS_PROXY == 'true' }}
+        run: python3 .github/proxy_traffic.py "canary-proxy" canary_out.json
+      - name: Assert the run
+        if: env.HAS_PROXY == 'true'
+        run: python3 .github/canary_assert.py canary_out.json "$exit_code"
+      - name: Upload artefacts
+        if: always() && env.HAS_PROXY == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-proxy-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+            canary_out.json.latest_attempt.meta.json
+            canary_out_debug.html
+            canary_out_search_api_debug.json
+          retention-days: 14
+
+  canary-cdp:
+    name: canary (Scraping Browser API via SKYSCANNER_CDP_ENDPOINT)
+    runs-on: ubuntu-latest
+    env:
+      HAS_CDP: ${{ secrets.SKYSCANNER_CDP_ENDPOINT != '' }}
+    steps:
+      - name: Fail — no SKYSCANNER_CDP_ENDPOINT secret
+        if: env.HAS_CDP != 'true'
+        run: |
+          echo "::error::canary NOT RUN: the SKYSCANNER_CDP_ENDPOINT repository secret is missing \
+          (a Scraping Browser API ws:// endpoint). Measured 2026-09-20..29 and again 2026-11-05: \
+          every Scraping Browser session was challenged by PerimeterX on this site, so expect exit 3 \
+          (red) once it is set; the job exists to notice when that changes."
+          exit 1
+      - uses: actions/checkout@v4
+        if: env.HAS_CDP == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAS_CDP == 'true'
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+        if: env.HAS_CDP == 'true'
+      - name: Run over the Scraping Browser API
+        if: env.HAS_CDP == 'true'
+        env:
+          SKYSCANNER_CDP_ENDPOINT: ${{ secrets.SKYSCANNER_CDP_ENDPOINT }}
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py --origin LHR --destination JFK \
+            --depart-date "$(date -u -d '+30 days' +%Y-%m-%d)" \
+            --max-results 1000 --format json --out canary_cdp_out.json --dump-html
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+      - name: Assert the run
+        if: env.HAS_CDP == 'true'
+        run: python3 .github/canary_assert.py canary_cdp_out.json "$exit_code"
+      - name: Upload artefacts
+        if: always() && env.HAS_CDP == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-cdp-${{ github.run_id }}
+          path: |
+            canary_cdp_out.json
+            canary_cdp_out.json.meta.json
+            canary_cdp_out_debug.html
+            canary_cdp_out_search_api_debug.json
+          retention-days: 14

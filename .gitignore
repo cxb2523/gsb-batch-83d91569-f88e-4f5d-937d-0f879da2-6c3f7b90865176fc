@@ -1,0 +1,45 @@
+# Scraper output: large, machine-specific, stale by the time anyone reads it
+*.json
+*.csv
+!sample_output.json
+!sample_output.csv
+!fixtures/*.json
+!captures/*.json
+!routes.example.csv
+skyscanner_results.*
+skyscanner_batch.*
+*_debug.html
+*_debug.json
+*_debug.png
+live_results/
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.fingerprint_cache/
+*.egg-info/
+dist/
+build/
+.venv*/
+venv/
+env/
+.DS_Store
+*.swp
+.idea/
+.vscode/
+*.log
+
+# Secrets. `.env*` rather than `.env` by name: `.env.bak`, `.env.save`,
+# `.env.local` are the same file under another name.
+.env*
+!.env.example
+*.key
+secrets*
+_smoke_roundtrip.env
+
+# A --cookies-file is a real, live session (PerimeterX validation cookies,
+# a signed session JWT, etc.) exported from a browser that solved the
+# challenge as a human — exactly as sensitive as .env, never committable.
+*cookies*.json
+.cookie_import/
