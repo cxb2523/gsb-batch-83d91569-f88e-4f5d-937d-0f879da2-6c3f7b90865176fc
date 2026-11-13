@@ -494,6 +494,10 @@ class FakeDriver:
 
     def run_js(self, body):
         self.js.append(body)
+        # The bridge asks the document how tall it is without scrolling it;
+        # answer with a number, as a browser would.
+        if body.strip() == "return document.body.scrollHeight;":
+            return 1000 + len(self.current)
         if self.after_js is not None:
             self.current = self.after_js
         return True
@@ -736,6 +740,36 @@ def test_seller_feed_scrolls_to_the_profile_counter():
     check("the feed was armed with its own «Показать все» button",
           feed["show_all_clicks"] >= 1 and any("show_all_button" in j for j in d.js))
     eq("seller row says how many listings were written", seller[0]["listings_on_page"], 40)
+    eq("counted as a normal, complete ending", (feed["stop_kind"], feed["abnormal"]), ("counter", False))
+
+
+def test_seller_feed_records_every_round():
+    """Round 0 is the profile page (before the feed is opened); each completed
+    scroll is one more round. Each states what the page held before it, what
+    it added, the height after it, whether the profile's own counter had been
+    reached, and — on the last one — why the scroll ended."""
+    d = FakeDriver([_seller_page(15, active_ads=40), _seller_page(15, active_ads=40)],
+                   scrolls=[_seller_page(30, 40), _seller_page(40, 40)])
+    rc, meta, rows, _ = _run_seller_with(d)
+    feed = meta["transport_facts"]["seller_feed"]
+    rounds = feed["scroll_rounds"]
+    eq("the profile round, then one per scroll",
+       [r["round"] for r in rounds], [0, 1, 2])
+    eq("what each round started from",
+       [r["collected_before"] for r in rounds], [0, 15, 30])
+    eq("what each round added", [r["added"] for r in rounds], [15, 15, 10])
+    eq("cumulative after each round",
+       [r["collected_after"] for r in rounds], [15, 30, 40])
+    check("every round states its document height",
+          all(isinstance(r["doc_height"], int) for r in rounds),
+          repr([r["doc_height"] for r in rounds]))
+    eq("counter reached only at the end",
+       [r["reached_active_ads"] for r in rounds], [False, False, True])
+    eq("only the closing round carries the stop",
+       [r["stop_kind"] for r in rounds], [None, None, "counter"])
+    eq("rounds stays the number of scrolls", feed["rounds"], 2)
+    eq("what was actually written", feed["written"], 40)
+    eq("and the existing stop sentence is kept", feed["stop"], "reached 40")
 
 
 def test_seller_feed_respects_max_products_and_stops_when_still():
@@ -743,14 +777,273 @@ def test_seller_feed_respects_max_products_and_stops_when_still():
                    scrolls=[_seller_page(30, 353), _seller_page(45, 353)])
     rc, meta, rows, _ = _run_seller_with(d, max_products=20)
     eq("--max-products caps the feed", len(rows), 20)
-    eq("and the scrolling stopped there", meta["transport_facts"]["seller_feed"]["rounds"], 1)
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("and the scrolling stopped there", feed["rounds"], 1)
+    eq("named as the --max-products cap, not the counter",
+       (feed["stop_kind"], feed["abnormal"]), ("max_products", False))
+    eq("the page had reached 30; 20 were written", feed["written"], 20)
     d2 = FakeDriver([_seller_page(15, 353), _seller_page(15, 353)],
                     scrolls=[_seller_page(30, 353)])   # then nothing new arrives
     rc, meta, rows, _ = _run_seller_with(d2)
     feed = meta["transport_facts"]["seller_feed"]
     eq("a feed that stops growing ends the scroll", feed["stop"], "feed stopped growing")
     eq("with what it had", len(rows), 30)
-    eq("after the still rounds, not forever", feed["rounds"], 4)
+    eq("after two still rounds, not forever", feed["rounds"], 3)
+    eq("recorded as a normal ending", (feed["stop_kind"], feed["abnormal"]),
+       ("no_new_cards", False))
+    eq("the still rounds are in the facts",
+       [r["added"] for r in feed["scroll_rounds"]], [15, 15, 0, 0])
+
+
+def test_seller_feed_stop_kinds_are_normal_or_abnormal():
+    """The requirement's four normal endings, and the abnormal kinds that
+    must make the run PARTIAL instead of a plausible 'complete'."""
+    import browser_bridge as B
+    eq("four normal endings", B.SELLER_FEED_NORMAL_STOPS,
+       ("counter", "max_products", "no_new_cards", "height_stalled"))
+    for kind in ("navigation", "script", "exception", "wall", "round_limit"):
+        check("%s counts as abnormal" % kind, kind in B.SELLER_FEED_ABNORMAL_STOPS)
+    for kind in B.SELLER_FEED_NORMAL_STOPS:
+        check("%s is not abnormal" % kind, kind not in B.SELLER_FEED_ABNORMAL_STOPS)
+
+
+def test_seller_feed_max_products_15_stays_on_the_profile():
+    """README: `--max-products 15` keeps to the profile page — no feed
+    request at all. The run still records a round."""
+    d = FakeDriver([_seller_page(15, active_ads=353)])
+    rc, meta, rows, _ = _run_seller_with(d, max_products=15)
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("exactly the profile's 15", (rc, len(rows)), (0, 15))
+    eq("the feed was never requested", (feed["requested"], "url" in feed), (False, False))
+    eq("a single profile round", [r["round"] for r in feed["scroll_rounds"]], [0])
+    eq("named as the cap", (feed["stop_kind"], feed["abnormal"]), ("max_products", False))
+    eq("the profile round says the counter itself was NOT reached",
+       feed["scroll_rounds"][0]["reached_active_ads"], False)
+    eq("no scroll happened at all", d.scrolled, 0)
+    eq("and the run is not called short", "seller_listings_short" in meta["transport_facts"], False)
+    # A cap BELOW the profile's 15 is also satisfied without a feed request.
+    d2 = FakeDriver([_seller_page(15, active_ads=353)])
+    rc, meta, rows, _ = _run_seller_with(d2, max_products=12)
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("--max-products 12 keeps to the profile's 15 too", (rc, len(rows)), (0, 12))
+    eq("still no feed request", feed["requested"], False)
+    eq("and no scroll", d2.scrolled, 0)
+    # Categorical: a cap up to the measured profile render (15) stays on the
+    # profile page even when today's profile rendered fewer cards.
+    d3 = FakeDriver([_seller_page(10, active_ads=353)])
+    rc, meta, rows, _ = _run_seller_with(d3, max_products=15)
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("a thin profile with --max-products 15", (feed["requested"], d3.scrolled), (False, 0))
+    eq("reports itself short rather than reading the feed", (rc, len(rows)), (6, 10))
+
+
+def test_seller_feed_exception_mid_scroll_is_partial_and_keeps_rows():
+    """A scroll that throws is not a transport fault: the rows already
+    collected stay, the run ends PARTIAL (exit 6), and the round that broke
+    says so in the sidecar written by BOTH sidecars."""
+    import browser_bridge
+    from output_writer import EXIT_PARTIAL
+
+    class BreakingDriver(FakeDriver):
+        def __init__(self, pages, scrolls, break_on):
+            super().__init__(pages, scrolls=scrolls)
+            self.break_on = break_on
+
+        def scroll_to_bottom(self):
+            if self.scrolled + 1 >= self.break_on:
+                raise RuntimeError("CDP socket closed")
+            return super().scroll_to_bottom()
+
+    d = BreakingDriver([_seller_page(15, active_ads=353), _seller_page(15, active_ads=353)],
+                       [_seller_page(30, 353), _seller_page(45, 353)], break_on=2)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "o")
+        rc = _quiet(browser_bridge.run, _args(mode="seller", url=[SELLER], out=out), d)
+        meta = json.load(open(out + ".meta.json"))
+        attempt = json.load(open(out + ".latest_attempt.meta.json"))
+        rows = json.load(open(out + "_listings.json"))
+    eq("exit 6, the rows written", (rc, len(rows)), (EXIT_PARTIAL, 30))
+    eq("status partial, and named after the interrupted feed",
+       (meta["status"], meta["stop_reason"]), ("partial", "seller_feed_interrupted"))
+    eq("both sidecars carry the same round facts",
+       meta["transport_facts"]["seller_feed"]["scroll_rounds"],
+       attempt["transport_facts"]["seller_feed"]["scroll_rounds"])
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("the broken scroll is the last round, with its reason",
+       (feed["scroll_rounds"][-1]["round"], feed["scroll_rounds"][-1]["stop_kind"]),
+       (2, "exception"))
+    eq("recorded as abnormal", (feed["stop_kind"], feed["abnormal"]), ("exception", True))
+    eq("the sentence names the fault", feed["stop"], "scroll failed: RuntimeError")
+
+
+def test_seller_feed_navigation_failure_mid_leg_is_partial():
+    """A feed page that cannot be navigated to is an abnormal ending: the
+    profile's 15 are written, the run is PARTIAL, and the reason is on the
+    last round."""
+    import browser_bridge
+    from output_writer import EXIT_PARTIAL
+    d = FakeDriver([_seller_page(15, active_ads=353), TimeoutError("feed timed out")])
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "o")
+        rc = _quiet(browser_bridge.run, _args(mode="seller", url=[SELLER], out=out), d)
+        meta = json.load(open(out + ".meta.json"))
+        rows = json.load(open(out + "_listings.json"))
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("exit 6 holding the profile's 15", (rc, len(rows)), (EXIT_PARTIAL, 15))
+    eq("stop reason names the feed, not the count",
+       meta["stop_reason"], "seller_feed_interrupted")
+    eq("named as a navigation failure",
+       (feed["stop_kind"], feed["abnormal"]), ("navigation", True))
+    eq("the profile round is still recorded", feed["scroll_rounds"][0]["round"], 0)
+
+
+def test_seller_feed_stops_when_the_document_stops_growing():
+    """A virtualised list keeps yielding cards while its scroll height stays
+    put. Three rounds of a flat height end the scroll as `height_stalled` —
+    a NORMAL ending: the run still adds what the feed gave it."""
+    import browser_bridge
+
+    class FlatHeightDriver(FakeDriver):
+        """Cards keep arriving, the document height never changes — 5000 px
+        before a scroll and after it, as a virtualised list reports."""
+        def scroll_to_bottom(self):
+            self.scrolled += 1
+            if self.scrolls:
+                self.current = self.scrolls.pop(0)
+            return 5000
+
+        def run_js(self, body):
+            if body.strip() == "return document.body.scrollHeight;":
+                self.js.append(body)
+                return 5000
+            return super().run_js(body)
+
+    d = FlatHeightDriver([_seller_page(15, active_ads=353), _seller_page(15, active_ads=353)],
+                         scrolls=[_seller_page(30, 353), _seller_page(45, 353),
+                                  _seller_page(60, 353), _seller_page(75, 353)])
+    rc, meta, rows, _ = _run_seller_with(d)
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("stopped after three consecutive flat rounds", feed["rounds"], 3)
+    eq("named after the height, not the cards",
+       (feed["stop_kind"], feed["abnormal"]), ("height_stalled", False))
+    eq("the cards it did bring were kept", len(rows), 60)
+    eq("still short of the counter, so still partial (exit 6)",
+       (rc, meta["status"], meta["stop_reason"]),
+       (6, "partial", "seller_listings_short"))
+    eq("every scroll round says the height it saw",
+       [r["doc_height"] for r in feed["scroll_rounds"][-3:]], [5000, 5000, 5000])
+
+def test_seller_feed_script_failure_is_partial():
+    """The «Показать все» script throwing is an abnormal ending too: the
+    feed leg stops on the spot, the profile's rows are kept, exit 6."""
+    import browser_bridge
+    from output_writer import EXIT_PARTIAL
+
+    class NoScriptDriver(FakeDriver):
+        def run_js(self, body):
+            if body.strip() == "return document.body.scrollHeight;":
+                return super().run_js(body)
+            raise RuntimeError("javascript is gone")
+
+    d = NoScriptDriver([_seller_page(15, active_ads=353), _seller_page(15, active_ads=353)])
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "o")
+        rc = _quiet(browser_bridge.run, _args(mode="seller", url=[SELLER], out=out), d)
+        meta = json.load(open(out + ".meta.json"))
+        rows = json.load(open(out + "_listings.json"))
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("exit 6 keeping the profile's 15", (rc, len(rows)), (EXIT_PARTIAL, 15))
+    eq("the script is the reason", (feed["stop_kind"], feed["abnormal"]), ("script", True))
+    eq("and the run names the feed", meta["stop_reason"], "seller_feed_interrupted")
+
+
+def test_seller_feed_firewall_mid_scroll_is_partial():
+    """The firewall replacing the feed mid-scroll is an abnormal ending; the
+    run does not treat the wall's document as the seller's listings."""
+    import browser_bridge
+    from output_writer import EXIT_PARTIAL
+    wall = fixture("wall_captcha.html")
+    d = FakeDriver([_seller_page(15, active_ads=353), _seller_page(15, active_ads=353)],
+                   scrolls=[_seller_page(30, 353), wall])
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "o")
+        rc = _quiet(browser_bridge.run, _args(mode="seller", url=[SELLER], out=out), d)
+        meta = json.load(open(out + ".latest_attempt.meta.json"))
+        rows = json.load(open(out + "_listings.json"))
+    feed = meta["transport_facts"]["seller_feed"]
+    eq("exit 6 holding the profile's rows", (rc, len(rows)), (EXIT_PARTIAL, 15))
+    eq("the wall is the reason", (feed["stop_kind"], feed["abnormal"]), ("wall", True))
+    eq("the run names the feed", meta["stop_reason"], "seller_feed_interrupted")
+
+
+def test_seller_feed_acceptance_on_a_local_sample():
+    """The four required endings, driven by locally built seller-feed pages
+    (fixtures/seller.html with its cards cloned) through the fake driver —
+    no network, no browser. This is the OFFLINE acceptance; it is not
+    evidence that a live feed behaves this way."""
+    import browser_bridge
+    from output_writer import EXIT_PARTIAL
+
+    def run(pages, scrolls, **kw):
+        d = FakeDriver(pages, scrolls=scrolls)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "o")
+            rc = _quiet(browser_bridge.run,
+                        _args(mode="seller", url=[SELLER], out=out, **kw), d)
+            meta = json.load(open(out + ".latest_attempt.meta.json"))
+            rows = json.load(open(out + "_listings.json")) if os.path.exists(
+                out + "_listings.json") else []
+        return rc, meta["transport_facts"]["seller_feed"], rows
+
+    # 1. scrolls to the profile's counter -> complete.
+    rc, feed, rows = run([_seller_page(15, 40), _seller_page(15, 40)],
+                         [_seller_page(30, 40), _seller_page(40, 40)])
+    check("1. counter: complete, 40 rows",
+          (rc, len(rows), feed["stop_kind"], feed["abnormal"]) == (0, 40, "counter", False))
+    eq("1. the closing round says the counter was reached",
+       feed["scroll_rounds"][-1]["reached_active_ads"], True)
+
+    # 2. two consecutive zero-add rounds -> the scroll ends normally; the run
+    #    is still partial because 30 < the profile's 353 (the existing rule).
+    rc, feed, rows = run([_seller_page(15, 353), _seller_page(15, 353)],
+                         [_seller_page(30, 353)])
+    check("2. still feed: a normal scroll ending, 30 rows kept",
+          (len(rows), feed["stop_kind"], feed["abnormal"]) == (30, "no_new_cards", False))
+    check("2. and still exit 6 (30 of 353)", rc == EXIT_PARTIAL)
+    eq("2. the last two rounds added nothing",
+       [r["added"] for r in feed["scroll_rounds"][-2:]], [0, 0])
+
+    # 3. --max-products truncates -> complete at the cap.
+    rc, feed, rows = run([_seller_page(15, 353), _seller_page(15, 353)],
+                         [_seller_page(30, 353), _seller_page(45, 353)], max_products=20)
+    check("3. cap: complete at 20 rows",
+          (rc, len(rows), feed["stop_kind"], feed["written"]) ==
+          (0, 20, "max_products", 20))
+
+    # 4. a scroll throws mid-leg -> partial, rows kept.
+    class BreakingDriver(FakeDriver):
+        def __init__(self, pages, scrolls):
+            super().__init__(pages, scrolls=scrolls)
+            self.break_after = 1
+
+        def scroll_to_bottom(self):
+            if self.scrolled >= self.break_after:
+                raise RuntimeError("CDP socket closed")
+            return super().scroll_to_bottom()
+
+    d = BreakingDriver([_seller_page(15, 353), _seller_page(15, 353)],
+                       [_seller_page(30, 353), _seller_page(45, 353)])
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "o")
+        rc = _quiet(browser_bridge.run, _args(mode="seller", url=[SELLER], out=out), d)
+        meta = json.load(open(out + ".latest_attempt.meta.json"))
+        rows = json.load(open(out + "_listings.json"))
+    feed = meta["transport_facts"]["seller_feed"]
+    check("4. exception: exit 6 with the 30 rows already written",
+          (rc, len(rows)) == (EXIT_PARTIAL, 30))
+    check("4. and the break is on the last round",
+          (feed["stop_kind"], feed["abnormal"],
+           feed["scroll_rounds"][-1]["stop_kind"]) == ("exception", True, "exception"))
 
 
 def test_seller_without_an_id_keeps_its_first_listings():

@@ -830,6 +830,12 @@ SELLER_SHOW_ALL_JS_BODY = (
     "return true;"
 )
 
+# The rendered document's height, WITHOUT scrolling it (the scroll itself is
+# `driver.scroll_to_bottom`). The feed's per-round facts record this height
+# after every round so a reader can tell "the page is no longer growing" apart
+# from "the page stopped adding cards" — they are different symptoms.
+SELLER_DOC_HEIGHT_JS_BODY = "return document.body.scrollHeight;"
+
 
 def seller_items_url(seller_url: str) -> str:
     """`/brands/<slug>/items` — where a shop's sellerId is published when its

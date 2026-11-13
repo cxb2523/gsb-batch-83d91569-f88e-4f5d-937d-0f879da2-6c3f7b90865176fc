@@ -269,6 +269,40 @@ shop with 7331 listings). A run that wrote fewer listings than the
 profile's own counter ends **partial, exit 6** — compare `listings_on_page`
 with `active_ads`; `transport_facts.seller_feed` says why it stopped.
 
+**The feed explains itself round by round.** `transport_facts.seller_feed`
+in BOTH sidecars (`<out>.meta.json` and `<out>.latest_attempt.meta.json`)
+carries `scroll_rounds`: one entry per round. Round 0 is the **profile page**,
+before the feed is opened; every following round is one completed scroll.
+Each entry states `round`, `source` (`profile` / `feed`), `collected_before`
+(cards on the page before that scroll), `added`, `collected_after`,
+`doc_height` (the document height after it), `reached_active_ads` (whether
+the profile's own counter had been reached) and, on the round that ended the
+scroll, `stop_kind`. The same fields at the top level: `stop` (the human
+sentence, unchanged), `stop_kind`, `abnormal` and `written` (rows actually
+saved, after the `--max-products` cap). `stop_kind` is one of
+
+| `stop_kind` | means | run |
+|---|---|---|
+| `counter` | the profile's `active_ads` was reached | complete (exit 0) |
+| `max_products` | the `--max-products` cap (on the profile page or in the feed) | complete (exit 0) |
+| `no_new_cards` | two consecutive scrolls added nothing — the feed is exhausted | complete (exit 0) |
+| `height_stalled` | the document stopped growing while cards kept arriving | complete (exit 0) |
+| `navigation` | the feed (or the shop's `/items` page) could not be opened | **partial, exit 6** |
+| `script` | the «Показать все» click threw | **partial, exit 6** |
+| `exception` | a scroll or a card count threw mid-scroll | **partial, exit 6** |
+| `wall` | the firewall replaced the feed mid-scroll | **partial, exit 6** |
+| `round_limit` | the run hit its scroll ceiling | **partial, exit 6** |
+| `feed_ended` | the loop ended without reaching the counter and without a named cause | **partial, exit 6** |
+| `no_counter` | the profile states no `active_ads` — its rendered listings only | complete (exit 0) |
+| `no_seller_id` / `robots` | the feed was never requested; the counter check reports the shortfall | **partial, exit 6** when short |
+
+The four normal endings are also in `SELLER_FEED_NORMAL_STOPS`; every kind in
+`SELLER_FEED_ABNORMAL_STOPS` sets `abnormal: true` and makes the run partial
+— the rows already gathered are written and exit 6, so a broken scroll never
+reads as a complete view. `--max-products` from 12 to 15 makes **no feed
+request at all** (the cap is satisfied by the profile's own cards) and
+records a single profile round with `stop_kind: max_products`.
+
 **About robots.txt and the seller feed.** The scraper never requests a path
 avito.ru's robots.txt disallows. But scrolling the feed makes the PAGE'S OWN
 script fetch `/web/1/profile/items`, and `/web/` is disallowed for robots.

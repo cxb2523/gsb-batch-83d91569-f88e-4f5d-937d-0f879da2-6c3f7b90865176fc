@@ -51,6 +51,7 @@ An engine supplies an object with:
                                          `return`; each engine wraps it in its
                                          own dialect (Selenium takes it as is,
                                          Playwright/pyppeteer as `() => {…}`)
+    scroll_to_bottom() -> int            the document height after scrolling
     sleep(ms)
     stop()
     autosolve_armed, autosolve_events   rung 1 bookkeeping
@@ -806,12 +807,60 @@ def _run_seller(driver, args, url, facts, log):
     want = seller.active_ads or 0
     if args.max_products:
         want = min(want, args.max_products) if want else args.max_products
-    if want > len(listings):
-        more = _seller_feed(driver, args, url, result["html"], want, facts, log)
+    # Round 0 is the PROFILE page — the round before the feed is opened at
+    # all. It is recorded whether or not the feed is then requested, so a
+    # reader always sees what the profile alone yielded and why the feed (or
+    # its absence) was the next step.
+    feed = {
+        "want": want,
+        "active_ads": seller.active_ads,
+        "profile_cards": len(listings),
+        "requested": False,
+        "rounds": 0,
+        "cards": len(listings),
+        "stop": None,
+        "stop_kind": None,
+        "abnormal": False,
+        "scroll_rounds": [{
+            "round": 0,
+            "source": "profile",
+            "collected_before": 0,
+            "added": len(listings),
+            "collected_after": len(listings),
+            "doc_height": _doc_height(driver),
+            "reached_active_ads": seller.active_ads is not None
+                                  and len(listings) >= seller.active_ads,
+            "stop_kind": None,
+        }],
+    }
+    facts["seller_feed"] = feed
+    # A cap the profile page can satisfy alone needs no feed request at all:
+    # README's `--max-products 15` ("stay on the profile page") must not make
+    # the page fetch `/web/1/profile/items` behind robots' back. 15 is the
+    # measured profile render (2026-10-09) and the contract is categorical:
+    # any cap up to it stays on the profile page, even if this profile
+    # rendered fewer cards today (the run then reports itself short).
+    profile_only = args.max_products is not None \
+        and args.max_products <= SELLER_PROFILE_PAGE_CARDS
+    if want > len(listings) and not profile_only:
+        more = _seller_feed(driver, args, url, result["html"], want,
+                            seller.active_ads, feed, facts, log)
         if more is not None:
             listings = more
+    else:
+        # No feed request is made at all: --max-products 15 (the README's
+        # "stay on the profile page" case), a counter at or below what the
+        # profile renders, or a profile that states no counter. The round 0
+        # facts alone explain the profile-only read.
+        _seller_feed_profile_only(feed, want, seller.active_ads, len(listings), args.max_products)
     if args.max_products:
         listings = listings[:args.max_products]
+    feed = facts.get("seller_feed")
+    if feed is not None:
+        # What the `<out>_listings` file will actually hold — the round
+        # records say how many the page had reached, this says how many
+        # survived the --max-products cap.
+        feed["written"] = len(listings)
     if want and len(listings) < want:
         # 2026-10-10: a shop stating 7331 active listings came back as a
         # `complete` run holding 12. Fewer than the profile's own counter is
@@ -824,17 +873,74 @@ def _run_seller(driver, args, url, facts, log):
 
 
 # Scrolling the feed: a round adds 15 cards when the site answers (measured
-# 2026-10-09: 15 -> 195 in 12 rounds, ~2.7 s each). Three rounds with neither
-# a new card nor a taller page mean the feed is exhausted (family rule: the
+# 2026-10-09: 15 -> 195 in 12 rounds, ~2.7 s each). TWO rounds with neither a
+# new card nor a taller page mean the feed is exhausted (family rule: the
 # terminating condition is data, and one still round is not enough).
 SELLER_SCROLL_PAUSE_MS = 2500
-SELLER_SCROLL_STILL_ROUNDS = 3
+SELLER_SCROLL_STILL_ROUNDS = 2
+SELLER_SCROLL_FLAT_HEIGHT_ROUNDS = 3
 SELLER_SCROLL_MAX_ROUNDS = 400
 SELLER_SHOW_ALL_SETTLE_MS = 3000
 SELLER_SHOW_ALL_MAX_CLICKS = 3
 
+# Why a feed scroll leg ended. The four in NORMAL_STOPS are ENDINGS — the run
+# saw all it was going to see. REFUSED_STOPS never opened the feed at all
+# (no sellerId, robots); they are incomplete for another reason and the
+# profile-counter check reports them. Everything else is ABNORMAL (a
+# navigation, a script or the firewall broke the leg) and the run that hit one
+# finishes PARTIAL (exit 6) holding the rows already collected. The round
+# facts record the machine-readable kind ("stop_kind"); `stop` keeps the
+# human sentence the sidecar has always carried.
+SELLER_FEED_NORMAL_STOPS = ("counter", "max_products", "no_new_cards", "height_stalled")
+SELLER_FEED_REFUSED_STOPS = ("no_seller_id", "robots")
+SELLER_FEED_ABNORMAL_STOPS = ("navigation", "script", "exception", "wall",
+                              "round_limit", "feed_ended")
 
-def _seller_feed(driver, args, profile_url, profile_html, want, facts, log):
+# What a /brands/<slug> profile page renders on first load (measured
+# 2026-10-09). A --max-products cap at or below it is satisfied without
+# opening the feed at all.
+SELLER_PROFILE_PAGE_CARDS = 15
+
+
+def _doc_height(driver) -> Optional[int]:
+    """The rendered document's height, without scrolling it. None when the
+    driver cannot state it (or answers something that is not a number)."""
+    try:
+        value = driver.run_js(P.SELLER_DOC_HEIGHT_JS_BODY)
+    except Exception:  # noqa: BLE001 — a missing height is not a reason to stop
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _seller_feed_profile_only(feed, want, active_ads, cards, max_products) -> None:
+    """Fill in the ending of a seller run that never asked for the feed.
+
+    Reachable in three ways, all deliberate: `--max-products 15` (README:
+    "stay on the profile page"), a counter at or below what the profile
+    renders, and a profile that states no counter at all. There is no scroll,
+    so round 0 — the profile page — is the only round, and it carries the
+    stop.
+    """
+    if max_products is not None \
+            and max_products <= SELLER_PROFILE_PAGE_CARDS \
+            and (active_ads is None or max_products < active_ads):
+        # The cap is what ended the read, so it is the stop — whether or not
+        # today's profile page rendered that many cards.
+        kind, text = "max_products", "reached --max-products (%d) on the profile page" % max_products
+    elif active_ads and cards >= active_ads:
+        kind, text = "counter", "reached %d on the profile page" % active_ads
+    elif active_ads:
+        kind, text = "counter", "%d on the profile page, of %d stated" % (cards, active_ads)
+    else:
+        kind, text = "no_counter", "the profile states no counter — its rendered listings only"
+    feed["stop"] = text
+    feed["stop_kind"] = kind
+    feed["abnormal"] = False
+    feed["scroll_rounds"][0]["stop_kind"] = kind
+
+
+def _seller_feed(driver, args, profile_url, profile_html, want,
+                 active_ads, feed, facts, log):
     """All of a seller's listings, from the profile's full feed.
 
     DECISION (owner, 2026-10-09): the profile page renders 15 listings; the
@@ -844,12 +950,53 @@ def _seller_feed(driver, args, profile_url, profile_html, want, facts, log):
     never requests that path itself — it scrolls, and the site's page does —
     but the purpose of the scroll is that data. README says so plainly.
 
+    `feed` is the seller run's transport_facts.seller_feed and already holds
+    round 0 (the profile page, before the feed was opened). Each completed
+    scroll appends one more round — including one whose scroll threw:
+    `collected_before` is how many cards the page held before that scroll,
+    `added` what it brought, `doc_height` the height after it,
+    `reached_active_ads` whether the profile's own counter had been reached,
+    and `stop_kind` the reason when the round ended the scroll. `rounds` (an
+    int) stays the number of SCROLLS, as it always was.
+
     Returns the parsed rows, or None (keep the profile's 15) when the feed
     cannot be read.
     """
     seller_hash = P.seller_hash_id(profile_html)
-    feed = {"want": want, "rounds": 0, "cards": 0, "stop": None}
-    facts["seller_feed"] = feed
+
+    def record_round(number, before, after, height):
+        entry = {
+            "round": number,
+            "source": "feed",
+            "collected_before": before,
+            "added": None if after is None else after - before,
+            "collected_after": after,
+            "doc_height": height,
+            "reached_active_ads": active_ads is not None and after is not None
+                                  and after >= active_ads,
+            "stop_kind": None,
+        }
+        feed["scroll_rounds"].append(entry)
+        return entry
+
+    def finish(kind, text):
+        feed["stop_kind"] = kind
+        feed["stop"] = text
+        # Only the families the requirement names make the run PARTIAL on
+        # their own. A profile with no sellerId or a robots refusal never
+        # opened the feed; the counter check reports those instead.
+        feed["abnormal"] = kind in SELLER_FEED_ABNORMAL_STOPS
+        if feed["scroll_rounds"]:
+            feed["scroll_rounds"][-1]["stop_kind"] = kind
+
+    def target_stop():
+        # `want` is already capped by --max-products in _run_seller; name the
+        # cap when it is the binding constraint, otherwise the counter.
+        if getattr(args, "max_products", None) is not None \
+                and (active_ads is None or args.max_products < active_ads):
+            return "max_products", "reached --max-products (%d)" % want
+        return "counter", "reached %d" % want
+
     if not seller_hash:
         # 2026-10-10, /brands/a3boots.shop: a shop's profile carries no
         # sellerId at all; its `/brands/<slug>/items` page (robots: allowed)
@@ -857,24 +1004,39 @@ def _seller_feed(driver, args, profile_url, profile_html, want, facts, log):
         items_url = P.seller_items_url(profile_url)
         if P.robots_verdict(items_url)[0]:
             time.sleep(args.delay)
-            found = fetch_with_rotation(driver, args, items_url, "seller", facts, log=log)
+            try:
+                found = fetch_with_rotation(driver, args, items_url, "seller", facts, log=log)
+            except BridgeError as exc:
+                finish("navigation", "items page navigation failed: %s"
+                       % type(exc).__name__)
+                print("[!] the seller's items page could not be reached (%s) — "
+                      "keeping the profile's listings only." % type(exc).__name__,
+                      file=sys.stderr)
+                return None
             if found["state"] == "content":
                 seller_hash = P.seller_hash_id(found["html"])
                 feed["sellerId_from"] = "items page" if seller_hash else None
     if not seller_hash:
-        feed["stop"] = "no sellerId on the profile"
+        finish("no_seller_id", "no sellerId on the profile")
         print("[!] no sellerId on the profile — keeping its first listings only.", file=sys.stderr)
         return None
     feed_url = P.seller_all_url(profile_url, seller_hash)
     feed["url"] = feed_url
     allowed, rule = P.robots_verdict(feed_url)
     if not allowed:
-        feed["stop"] = "robots: %s" % rule
+        finish("robots", "robots: %s" % rule)
         return None
     time.sleep(args.delay)
-    result = fetch_with_rotation(driver, args, feed_url, "seller", facts, log=log)
+    feed["requested"] = True
+    try:
+        result = fetch_with_rotation(driver, args, feed_url, "seller", facts, log=log)
+    except BridgeError as exc:
+        finish("navigation", "feed navigation failed: %s" % type(exc).__name__)
+        print("[!] the seller's feed could not be reached (%s) — keeping the "
+              "profile's listings only." % type(exc).__name__, file=sys.stderr)
+        return None
     if result["state"] != "content":
-        feed["stop"] = "feed page: %s" % result["state"]
+        finish("navigation", "feed page: %s" % result["state"])
         print("[!] the seller's feed came back %s — keeping the profile's listings only."
               % result["state"], file=sys.stderr)
         return None
@@ -887,51 +1049,105 @@ def _seller_feed(driver, args, profile_url, profile_html, want, facts, log):
     feed["show_all_clicks"] = 0
 
     def click_show_all():
-        try:
-            clicked = bool(driver.run_js(P.SELLER_SHOW_ALL_JS_BODY))
-        except Exception as exc:  # noqa: BLE001
-            feed["show_all_error"] = type(exc).__name__
-            return False
+        clicked = bool(driver.run_js(P.SELLER_SHOW_ALL_JS_BODY))
         if clicked:
             feed["show_all_clicks"] += 1
             driver.sleep(SELLER_SCROLL_PAUSE_MS)
         return clicked
 
-    click_show_all()
-    count = driver.count(P.SELLER_CARD_SELECTOR)
-    still, last = 0, (count, None)
-    while count < want and feed["rounds"] < SELLER_SCROLL_MAX_ROUNDS:
+    def click_or_stop():
+        """True/False from the click; None when the script itself broke —
+        an abnormal ending, not a failed click to shrug at."""
+        try:
+            return click_show_all()
+        except Exception as exc:  # noqa: BLE001
+            feed["show_all_error"] = type(exc).__name__
+            finish("script", "show-all click failed: %s: %s"
+                   % (type(exc).__name__, mask_text(str(exc))[:120]))
+            return None
+
+    armed = click_or_stop()
+    try:
+        count = driver.count(P.SELLER_CARD_SELECTOR)
+    except Exception as exc:  # noqa: BLE001
+        count = 0
+        # No scroll completed, so this is not a round of its own: the stop
+        # lands on the last round there is — the profile's round 0.
+        finish("exception", "counting cards failed: %s" % type(exc).__name__)
+        armed = None
+    still_cards = 0
+    flat_height = 0
+    last_height = _doc_height(driver)
+    while armed is not None and feed["stop_kind"] is None and count < want \
+            and feed["rounds"] < SELLER_SCROLL_MAX_ROUNDS:
+        before = count
         try:
             height = driver.scroll_to_bottom()
         except Exception as exc:  # noqa: BLE001
-            feed["stop"] = "scroll failed: %s" % type(exc).__name__
+            # A scroll that throws still completes a ROUND: the facts say what
+            # the page held when it threw, that this round added nothing, the
+            # height the document still reports, and why it ended. The rows
+            # already collected are kept; the run is PARTIAL.
+            feed["rounds"] += 1
+            record_round(feed["rounds"], before, before, _doc_height(driver))
+            finish("exception", "scroll failed: %s" % type(exc).__name__)
             break
         driver.sleep(SELLER_SCROLL_PAUSE_MS)
         feed["rounds"] += 1
-        count = driver.count(P.SELLER_CARD_SELECTOR)
-        if (count, height) == last:
-            still += 1
-            if still == 2 and feed["show_all_clicks"] < SELLER_SHOW_ALL_MAX_CLICKS:
-                click_show_all()
-            if still >= SELLER_SCROLL_STILL_ROUNDS:
-                feed["stop"] = "feed stopped growing"
-                break
+        try:
+            new_count = driver.count(P.SELLER_CARD_SELECTOR)
+        except Exception as exc:  # noqa: BLE001
+            record_round(feed["rounds"], before, None, height)
+            finish("exception", "counting cards failed: %s" % type(exc).__name__)
+            break
+        added = new_count - before
+        record_round(feed["rounds"], before, new_count, height)
+        kind, text = None, None
+        if new_count >= want:
+            kind, text = target_stop()
         else:
-            still = 0
-        last = (count, height)
+            still_cards = still_cards + 1 if added <= 0 else 0
+            if last_height is not None and height == last_height:
+                flat_height += 1
+            else:
+                flat_height = 0
+            if still_cards >= SELLER_SCROLL_STILL_ROUNDS:
+                kind, text = "no_new_cards", "feed stopped growing"
+            elif flat_height >= SELLER_SCROLL_FLAT_HEIGHT_ROUNDS:
+                # Cards keep arriving but the page no longer extends: the
+                # scroll itself is capped (a virtualised list).
+                kind, text = "height_stalled", "document height stopped growing"
+            elif added <= 0 and feed["show_all_clicks"] < SELLER_SHOW_ALL_MAX_CLICKS:
+                # One still round is not proof: re-arm «Показать все» once
+                # before a second still round ends the scroll.
+                if click_or_stop() is None:
+                    break
+        count = new_count
+        last_height = height
+        if kind:
+            finish(kind, text)
+            break
         if log and feed["rounds"] % 5 == 0:
             log("  seller feed: %d of %d listings after %d scrolls" % (count, want, feed["rounds"]))
     html = driver.content() or ""
     if P.is_wall(html):
         # The feed can meet the firewall mid-scroll; what is on screen is gone.
-        feed["stop"] = "the firewall interrupted the feed"
+        finish("wall", "the firewall interrupted the feed")
         print("[!] the firewall interrupted the seller feed — keeping the profile's listings only.",
               file=sys.stderr)
         return None
     _, rows = P.parse_seller(html, url=profile_url)
     rows = output_writer.dedupe_by_sku(rows, set())
     feed["cards"] = len(rows)
-    feed["stop"] = feed["stop"] or ("reached %d" % want if len(rows) >= want else "feed ended")
+    if feed["stop_kind"] is None:
+        # No round recorded a reason: the loop either never ran (the feed
+        # page opened already at the target) or hit the round cap.
+        if count >= want:
+            finish(*target_stop())
+        elif feed["rounds"] >= SELLER_SCROLL_MAX_ROUNDS:
+            finish("round_limit", "gave up after %d rounds" % feed["rounds"])
+        else:
+            finish("feed_ended", "feed ended")
     if log:
         log("  seller feed: %d listings (%s)" % (len(rows), feed["stop"]))
     return rows if rows else None
@@ -943,6 +1159,11 @@ def _stop_reason(args, facts: Dict[str, Any], pages_requested: int) -> str:
     if args.mode == "seller":
         if not facts["pages_completed"]:
             return "no_profile"
+        # A feed leg that broke (navigation, script, an exception mid-scroll,
+        # the firewall) leaves the run PARTIAL whatever the count says: it is
+        # not a complete view, and the round facts say where it broke.
+        if (facts.get("seller_feed") or {}).get("abnormal"):
+            return "seller_feed_interrupted"
         return "seller_listings_short" if facts.get("seller_listings_short") else "single_page_mode"
     if facts["failed_pages"]:
         return "pages_failed"

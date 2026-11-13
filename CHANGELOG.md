@@ -11,9 +11,23 @@ entry in a blockquote.
 ### Changed
 
 - CI only: the scheduled canary now starts at 02:23 UTC (daily) instead of 05:23, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
+- > `--mode seller`'s "feed stopped growing" now means **two** consecutive scrolls with no new card, not three: a round is recorded and judged on its own data, and the second still round is the evidence. A feed that dies after one still round therefore ends two scrolls earlier than before. The `--max-products 15` path is unchanged — still no feed request.
 
 ### Added
 
+* **`--mode seller` explains its feed round by round.**
+  `transport_facts.seller_feed.scroll_rounds` now holds one fact per round —
+  round 0 the profile page (before the feed is opened), then one per
+  completed scroll — with `round`, `source`, `collected_before`, `added`,
+  `collected_after`, `doc_height`, `reached_active_ads` and the round's
+  `stop_kind`. The section's `stop_kind` and `abnormal` separate the four
+  normal endings (`counter`, `max_products`, `no_new_cards`,
+  `height_stalled`) from a broken leg (`navigation`, `script`, `exception`,
+  `wall`, `round_limit`), which now ends the run **partial, exit 6** with the
+  rows already written; `stop_reason` is then `seller_feed_interrupted`.
+  Both sidecars carry the same facts; `stop` keeps its old human sentence and
+  `written` says how many rows survived `--max-products`. README has the
+  table.
 * **`--fingerprint`, `--fp-tags`, `--fp-country`, `--fp-refresh`
   (Playwright, local browser).** Fetches a profile from the 2Captcha
   Fingerprint API and applies it: user agent with matching client hints
