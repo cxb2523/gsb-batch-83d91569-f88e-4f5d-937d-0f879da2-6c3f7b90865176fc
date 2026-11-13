@@ -1,0 +1,370 @@
+name: tests
+
+# Runs the offline suite only. Nothing here touches farfetch.com, 2captcha.com
+# or any credential — GitHub Actions has no key, and a CI job that hits a live
+# site fails for reasons that have nothing to do with the commit.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the README claims. Claiming it without testing it is
+        # how a walrus operator or a `X | None` annotation ships and breaks it.
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile everything
+        # Catches a syntax error on the oldest supported Python before the
+        # suite gets a chance to skip the file.
+        run: python -m compileall -q .
+
+      - name: Offline test suite
+        # Prints its own count. No network, no key, ~1s.
+        run: python smoke_test.py
+
+      - name: Offline test suite, via pytest
+        # tests/test_smoke.py wraps the same run above for the pytest entry
+        # point pyproject.toml declares — this step exists so THAT wrapper
+        # can't silently rot even though the line above already covers the
+        # actual checks.
+        run: |
+          pip install pytest
+          pytest -q
+
+      - name: Every CLI answers --help
+        # A crash in argparse setup or a bad local import is invisible to the
+        # test suite but breaks the first thing any user types. The engine
+        # libraries are deliberately NOT installed here, so an ImportError
+        # naming one of them is expected; anything else is a failure.
+        run: |
+          python - <<'EOF'
+          import subprocess, sys
+
+          ENGINE_LIBS = ("playwright", "pyppeteer", "selenium", "webdriver_manager")
+          failed = []
+
+          for script in ["playwright_scraper.py", "puppeteer_scraper.py",
+                         "selenium_scraper.py", "scraper_api_client.py",
+                         "fingerprint_client.py", "env_config.py",
+                         "diff_runs.py"]:
+              r = subprocess.run([sys.executable, script, "--help"],
+                                 capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"ok       {script}")
+                  continue
+              blob = r.stdout + r.stderr
+              if "ModuleNotFoundError" in blob and any(l in blob for l in ENGINE_LIBS):
+                  print(f"skipped  {script} (engine library not installed here)")
+                  continue
+              print(f"FAILED   {script}\n{blob}")
+              failed.append(script)
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      - name: Committed sample output is real
+        # The README links to these two files, so a push without them ships
+        # broken links. And a sample invented by hand drifts from the schema and
+        # teaches readers the wrong field names, so these are cut from a real
+        # run rather than written by hand.
+        run: |
+          python - <<'EOF'
+          import csv, json, sys
+          from pathlib import Path
+
+          MARKERS = ("sample-product-", "example brand", "sample product",
+                     "product description text", "lorem ipsum")
+
+          fail = []
+          for name in ("sample_output.json", "sample_output.csv"):
+              if not Path(name).is_file():
+                  fail.append(f"{name} is missing — regenerate it from a real run")
+
+          if not fail:
+              rows = json.loads(Path("sample_output.json").read_text())
+              if not rows:
+                  fail.append("sample_output.json is empty")
+              blob = json.dumps(rows).lower()
+              hit = [m for m in MARKERS if m in blob]
+              if hit:
+                  fail.append(f"sample_output.json looks fabricated: {hit}")
+
+              # Column set must match what the writers actually produce.
+              from output_writer import Product
+              from dataclasses import asdict
+              expected = list(asdict(Product()).keys())
+              for i, row in enumerate(rows):
+                  if list(row.keys()) != expected:
+                      fail.append(f"row {i} columns drifted from output_writer.Product")
+                      break
+
+              with open("sample_output.csv", newline="", encoding="utf-8") as f:
+                  header = next(csv.reader(f))
+              if header != expected:
+                  fail.append("sample_output.csv header drifted from output_writer.Product")
+
+          for line in fail:
+              print("FAILED:", line)
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Config reporter runs with no .env present
+        run: python env_config.py
+
+      - name: No credentials committed
+        # A key pasted into a file during debugging is the one mistake in this
+        # repo that cannot be undone by a later commit.
+        #
+        # THIS RUNS THE SHIPPED CHECK, not a copy of it. There used to be an
+        # inline grep here with its own allowlist, and the two disagreed in a
+        # way that mattered: the inline version matched only `ws://` and
+        # `wss://`, so an `http://user:pass@` credential would have sailed
+        # past CI, while `.github/ci_checks.py` — which does match `http://`
+        # — was in the repo and invoked by nothing at all. Two sources of
+        # truth, one of them dead, and the live one narrower than the dead
+        # one.
+        run: python3 .github/ci_checks.py --secret-check
+
+  lint:
+    # Ruff and mypy, both gated on a deliberately NARROW configuration whose
+    # boundaries are argued in pyproject.toml. The short version: Ruff's
+    # broader rule sets produce 205-311 findings here and the largest groups
+    # tell this package to use Python 3.10+ annotation syntax, which would
+    # break the 3.9 the matrix above tests; mypy is clean on the shared core
+    # and has 26 findings on the primary engine that are one repeated shape.
+    #
+    # Both are therefore gates that pass today and mean something when they
+    # fail, rather than a wall of advice nobody intends to take — which is the
+    # same standard this repo applies to its canary.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the linters
+        # From the requirements file, not inline: a pin written in a `run:`
+        # step is invisible to Dependabot, so it would never be proposed for
+        # a bump and would quietly rot. The pins and the reason for them live
+        # in requirements-dev.txt.
+        run: pip install -r requirements-dev.txt
+
+      - name: ruff
+        run: ruff check . --output-format=github
+
+      - name: mypy
+        # No file list here: pyproject's [tool.mypy] `files` is the single
+        # source of truth, so the gate cannot widen or narrow by editing the
+        # workflow and leaving the config behind.
+        run: mypy
+
+  docker:
+    # Nothing in this repo built the image until now, which is how every repo
+    # in this family came to ship one that died with ModuleNotFoundError on
+    # every invocation, `--help` included — the Dockerfile's own comment says
+    # so. The offline suite now checks the COPY list against the entrypoint's
+    # import graph statically, but that proves one of four things. The other
+    # three need a real build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: docker build -t farfetch-scraper:ci .
+
+      - name: The entrypoint runs
+        # The CMD is --help, which is the exact invocation a missing module
+        # breaks. If a COPY line is wrong, this is where it shows.
+        run: docker run --rm farfetch-scraper:ci | head -5
+
+      - name: Chromium really launches
+        # `playwright install --with-deps chromium` exiting 0 is not evidence
+        # the browser starts: a missing shared library only surfaces on
+        # launch. Nothing else in CI would catch that.
+        run: |
+          docker run --rm --entrypoint python3 farfetch-scraper:ci -c "
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              b = p.chromium.launch()
+              print('chromium ok', b.version)
+              b.close()
+          "
+
+      - name: The image carries no .env, no test suite and no fixtures
+        # A .env baked into an image is a credential published to everyone who
+        # can pull it. The other two are not secrets, just weight — but a
+        # smoke_test.py inside the image means the COPY list is broader than
+        # it looks and the .env exclusion may be too.
+        run: |
+          set +e
+          found=$(docker run --rm --entrypoint sh farfetch-scraper:ci -c \
+            'ls -a /app' | grep -E '^\.env$|^smoke_test\.py$|^tests$|^\.git$')
+          if [ -n "$found" ]; then
+            echo "::error::The image contains files it must not ship:"
+            echo "$found"
+            exit 1
+          fi
+          echo "image contents are clean"
+          docker run --rm --entrypoint sh farfetch-scraper:ci -c 'ls /app'
+
+  engine-smoke:
+    # The offline job above installs NO engine library on purpose (that's what
+    # makes it offline), so smoke_test.py's engine-guarded checks (the UA built
+    # from the real launched browser version, the content() navigation-race
+    # retry, the fingerprint glue, the selenium version guards) silently skip in
+    # every run of it — and "skipped, engine not installed" reads identically to
+    # a real import regression. This job is what makes them execute.
+    #
+    # ONE VENV PER ENGINE, and that is the whole point of the rewrite. The
+    # previous recipe was `pip install playwright pyppeteer selenium` into a
+    # single environment, with a comment saying `pip check` would complain and
+    # that this was "expected and harmless". It is not harmless: the three
+    # engines pin mutually unsatisfiable versions (playwright wants pyee >=13,
+    # pyppeteer wants <12; pyppeteer wants urllib3 <2, selenium wants >=2), so
+    # pip resolves the conflict by reaching for whatever it can. On a sibling
+    # repo that installed pyppeteer 0.0.25 — a stub, not the >=1.0.2 the
+    # requirements file asks for — and CI was green against a version the repo
+    # does not support.
+    #
+    # A matrix over the three, each built from its OWN requirements files,
+    # tests the versions users actually get, lets `pip check` pass per venv
+    # (which proves each requirements file is self-consistent, a thing nothing
+    # checked before), and is exactly what the README tells users to do.
+    #
+    # Browser BINARIES: the offline suite imports the libraries and never
+    # launches one. The proxy-meter step at the end does launch a real
+    # browser against a stub proxy on 127.0.0.1 (Playwright's own Chromium,
+    # the runner's Chrome for pyppeteer and Selenium).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: playwright
+            # The name the suite reports as skipped, which is the import name
+            # and not always the extra's name — pyppeteer is the odd one.
+            library: playwright
+          - engine: puppeteer
+            library: pyppeteer
+          - engine: selenium
+            library: selenium
+    name: engine-smoke (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install core + ${{ matrix.engine }} in a clean venv
+        run: |
+          python -m venv .venv-${{ matrix.engine }}
+          .venv-${{ matrix.engine }}/bin/python -m pip install --upgrade pip
+          .venv-${{ matrix.engine }}/bin/pip install \
+            -r requirements.txt -r requirements-${{ matrix.engine }}.txt
+
+      - name: pip check
+        # A real gate, not a noisy one. In a single-engine environment there
+        # is nothing for it to complain about, so a failure here means this
+        # engine's own requirements file is internally inconsistent — which is
+        # a thing a user would hit on install and nothing previously caught.
+        run: .venv-${{ matrix.engine }}/bin/pip check
+
+      - name: The installed version is the one the requirements file asks for
+        # Guards the exact failure above: pip resolving a conflict by
+        # installing something far older than the pin. `pip install -r` would
+        # have errored on an unsatisfiable pin, but only in a venv that has
+        # nothing else pulling the other way, which is what this job now is.
+        run: |
+          .venv-${{ matrix.engine }}/bin/python - <<'PY'
+          import re, sys
+          from importlib.metadata import version
+          lib = "${{ matrix.library }}"
+          req = open("requirements-${{ matrix.engine }}.txt").read()
+          want = re.search(rf"{lib}>=([0-9.]+)", req).group(1)
+          got = version(lib)
+          def parts(v): return tuple(int(x) for x in v.split(".")[:3])
+          print(f"{lib}: installed {got}, requirements asks >= {want}")
+          sys.exit(0 if parts(got) >= parts(want) else 1)
+          PY
+
+      - name: Offline test suite, with ${{ matrix.engine }} importable
+        # The suite prints one machine-readable line naming every engine
+        # library it could not import. THIS engine must not be on it: if it
+        # is, the library is installed and the module still failed to import,
+        # which is a real regression wearing the same words as an expected
+        # absence. The other two are absent by design and are not checked here
+        # — the sibling matrix legs cover them.
+        run: |
+          .venv-${{ matrix.engine }}/bin/python smoke_test.py | tee smoke.log
+          skipped=$(grep '^SKIPPED_ENGINES:' smoke.log | cut -d: -f2- | tr -d ' ')
+          echo "suite reported skipped engines: [$skipped]"
+          if echo ",$skipped," | grep -q ",${{ matrix.library }},"; then
+            echo "FAILED: ${{ matrix.library }} is installed in this job, and the"
+            echo "        suite still reported its checks as skipped — that is an"
+            echo "        import error, not an expected absence."
+            exit 1
+          fi
+
+      - name: This engine's CLI answers --help
+        run: .venv-${{ matrix.engine }}/bin/python ${{ matrix.engine }}_scraper.py --help
+
+      - name: Install Playwright's Chromium (playwright only)
+        if: matrix.engine == 'playwright'
+        run: .venv-playwright/bin/playwright install --with-deps chromium
+
+      - name: The proxy meter against a stub proxy, in a real browser
+        # tests/test_proxy_meter.py compares this engine's byte count with
+        # what a local stub proxy saw. PROXY_METER_REQUIRE makes a missing
+        # engine or browser a failure here instead of a skip.
+        env:
+          PROXY_METER_REQUIRE: ${{ matrix.library }}
+        run: .venv-${{ matrix.engine }}/bin/python -m unittest -v tests.test_proxy_meter
+
+      - name: The console scripts install and resolve
+        # A [project.scripts] entry naming a missing target installs happily
+        # and fails only when a user runs it. Installing the package and
+        # running the command is the only thing that proves otherwise.
+        run: |
+          .venv-${{ matrix.engine }}/bin/pip install --no-deps .
+          .venv-${{ matrix.engine }}/bin/farfetch-scraper-${{ matrix.engine }} --help >/dev/null
+          echo "farfetch-scraper-${{ matrix.engine }} runs"
+
+      - name: ...and a command for an engine that is NOT installed explains itself
+        # Installing one extra still puts all three commands on PATH. The other
+        # two must exit 2 with the pip line, not a ModuleNotFoundError
+        # traceback for a command the install itself created.
+        run: |
+          set +e
+          for other in playwright puppeteer selenium; do
+            [ "$other" = "${{ matrix.engine }}" ] && continue
+            out=$(.venv-${{ matrix.engine }}/bin/farfetch-scraper-$other --help 2>&1)
+            code=$?
+            if [ "$code" != "2" ] || ! echo "$out" | grep -q "pip install"; then
+              echo "FAILED: farfetch-scraper-$other exited $code without naming"
+              echo "        the extra to install:"
+              echo "$out" | tail -5
+              exit 1
+            fi
+            echo "farfetch-scraper-$other: exit 2, names the extra"
+          done

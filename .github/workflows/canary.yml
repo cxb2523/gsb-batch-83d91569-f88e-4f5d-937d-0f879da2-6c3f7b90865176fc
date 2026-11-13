@@ -1,0 +1,207 @@
+name: canary
+
+# tests.yml (deliberately) never touches farfetch.com — see its own header
+# comment for why. That leaves a real gap: a selector or JSON-LD shape change
+# on the site itself only shows up when a user hits it and files an issue, and
+# the offline badge stays green throughout. This workflow is the other half —
+# a real run, on a real category URL, on a schedule — so a site-side break is
+# caught here first.
+#
+# TWO SIGNALS, and they are not redundant. The 2026-09-11 audit found this
+# workflow reporting failures it could not interpret: farfetch.com refuses a
+# GitHub runner's datacentre address, so the free run went red on days the
+# site and this code were both fine, while the exit-code table it printed
+# listed a code (124) no engine returns and had no entry for the codes they
+# do. A check that is red every morning is a check everyone learns to ignore.
+#
+#   reachability-no-proxy  — free, no secret, every Monday, and DOCUMENTED AS
+#                            "datacentre refusal expected": farfetch.com
+#                            refused the GitHub runner (exit 3) on every one
+#                            of the last 10 runs before 2026-10-15. A block
+#                            here is a notice, not a failure. Anything else —
+#                            0 products, a fetch failure, a partial run —
+#                            still fails. This job is NOT the data test.
+#
+#   production-like        — THE data test. Needs the FARFETCH_PROXY secret
+#                            (a residential exit) and is strict about
+#                            everything, a block included. When the secret is
+#                            absent the job FAILS with an error naming it:
+#                            a canary that never reaches the site must not
+#                            show green. Until 2026-10-15 it skipped green
+#                            instead, so the badge was green for a month
+#                            while no run reached the site.
+#
+# The proxy secret is passed through the ENVIRONMENT, never as a --proxy
+# argument. env_config.py already reads FARFETCH_PROXY, an unset secret
+# arrives as an empty string which the loader treats as unset, so the same
+# step is correct with and without it — and the credential never reaches a
+# command line, where anything that can run `ps` could read it. This file
+# used to carry a commented-out `--proxy "${{ secrets.FARFETCH_PROXY }}"`
+# line, which would have put it in argv the moment anyone uncommented it.
+on:
+  schedule:
+    # Once a week (Mondays), off the hour, so it isn't competing with everyone else's
+    # on-the-hour cron jobs for runner availability.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  reachability-no-proxy:
+    name: reachability (no proxy, datacentre refusal expected)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Scrape a real, known-good category page
+        id: run
+        # Same filtered category URL the README and TROUBLESHOOTING.md use as
+        # the known-good example throughout — chosen so a 0-result run here
+        # means either the site changed or the category itself is gone, not
+        # "this URL never had products" (see README: a bare hub URL always
+        # returns 0 and that is not a bug).
+        #
+        # --pages 3, not 1: with one page, pagination is never exercised at
+        # all, so a renamed next-page attribute (or the ?page= fallback
+        # breaking) would stay invisible here — which is precisely the kind
+        # of silent decay this workflow exists to catch. Three pages is
+        # enough to cross the page boundary twice while keeping the weekly
+        # request count trivial.
+        #
+        # set +e: GitHub Actions runs `run:` steps as `bash -e ...` by
+        # default, so without this the scraper exiting non-zero would abort
+        # the script on THAT line and `echo "exit_code=$?"` below would never
+        # run at all — continue-on-error only stops the STEP from failing
+        # the job, it does not touch the shell's own errexit behaviour.
+        # Confirmed live: under `bash -e`, a script that exits 4 mid-run never
+        # reaches a later `echo` line.
+        continue-on-error: true
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://www.farfetch.com/shopping/kids/girls-clothing-4/items.aspx" \
+            --pages 3 --out canary_run --dump-html canary_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        # No `set +e` and no continue-on-error: this step SHOULD fail the job
+        # when the code is one worth failing on. canary_check.py decides
+        # which those are, and --allow-block tells it that a refusal from
+        # this address is information about the address, not about the site.
+        # The proxy-backed job below omits the flag, so a block fails there.
+        run: python3 .github/canary_check.py --exit-code "${{ steps.run.outputs.exit_code }}" --allow-block
+
+      - name: Sanity-check the scraped data
+        # Only when the run actually produced output. Exit 0 says "some
+        # products were written" and nothing about whether they are right.
+        if: steps.run.outputs.exit_code == '0'
+        run: python3 .github/canary_check.py --data canary_run
+
+      - name: Upload run artifacts (output, HTML snapshot, debug dumps)
+        # Always, not just on failure: a run that returns the WRONG number of
+        # products with no error is exactly the kind of regression that needs
+        # the actual bytes the parser saw, not just a pass/fail badge.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: canary-no-proxy-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  production-like:
+    name: production-like (residential proxy)
+    runs-on: ubuntu-latest
+    # `secrets` is not available in a job-level `if`, so presence is tested
+    # through the job env and read in each step's `if` — the same shape the
+    # Claude workflows in this repo use for their token.
+    env:
+      HAVE_PROXY: ${{ secrets.FARFETCH_PROXY != '' }}
+    steps:
+      - name: Require the proxy secret
+        # Fails, not skips: without a residential exit this canary cannot
+        # reach the site, and a job that never reaches the site must not
+        # end green. The reachability job is no substitute for this one —
+        # from a datacentre address it is refused on every run.
+        if: env.HAVE_PROXY != 'true'
+        run: |
+          echo "::error::The FARFETCH_PROXY secret is not set, so this canary cannot reach farfetch.com: the site refuses GitHub's datacentre addresses. Add a residential proxy URL as the repository secret FARFETCH_PROXY (read from the environment by env_config.py, never put on a command line)."
+          exit 1
+
+      - uses: actions/checkout@v7
+        if: env.HAVE_PROXY == 'true'
+
+      - uses: actions/setup-python@v7
+        if: env.HAVE_PROXY == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright engine
+        if: env.HAVE_PROXY == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Scrape a real, known-good category page through the proxy
+        id: run
+        if: env.HAVE_PROXY == 'true'
+        continue-on-error: true
+        env:
+          # Read by env_config.py, exactly as a local .env would be. NOT
+          # passed as --proxy: a credential in argv is readable by anything
+          # that can run `ps`, which is why the README tells users to keep
+          # credentials in .env.
+          FARFETCH_PROXY: ${{ secrets.FARFETCH_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://www.farfetch.com/shopping/kids/girls-clothing-4/items.aspx" \
+            --pages 3 --out canary_run --dump-html canary_run.html --proxy-budget-mb 10
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Proxy traffic
+        # What the run sent through FARFETCH_PROXY, read from its sidecar,
+        # into the job summary. Red when the run stopped at the 10 MB budget
+        # (stop_reason proxy_budget_exceeded); a missing sidecar is reported,
+        # not failed — the next step judges the run itself.
+        if: always() && env.HAVE_PROXY == 'true'
+        run: python3 .github/proxy_traffic_summary.py canary_run production-like 10
+
+      - name: Interpret the exit code
+        if: env.HAVE_PROXY == 'true'
+        # No --allow-block here: from a residential exit, a block is news.
+        run: python3 .github/canary_check.py --exit-code "${{ steps.run.outputs.exit_code }}"
+
+      - name: Sanity-check the scraped data
+        if: env.HAVE_PROXY == 'true' && steps.run.outputs.exit_code == '0'
+        run: python3 .github/canary_check.py --data canary_run
+
+      - name: Upload run artifacts (output, HTML snapshot, debug dumps)
+        if: always() && env.HAVE_PROXY == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: canary-production-like-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.latest_attempt.meta.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14

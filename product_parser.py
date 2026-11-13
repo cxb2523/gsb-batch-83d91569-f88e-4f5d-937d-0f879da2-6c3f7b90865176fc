@@ -1,0 +1,870 @@
+"""
+product_parser.py
+-------------------
+Extracts Product records from a Farfetch kids category/hub page.
+
+Strategy, in order of preference:
+  1. schema.org JSON-LD blocks (<script type="application/ld+json">) — used
+     if Farfetch embeds per-product Product data there. Some large
+     e-commerce sites do, some only embed page-level metadata (CollectionPage
+     / ItemList without full Product entries) — this path is harmless either
+     way, since step 2 catches whatever step 1 misses.
+  2. URL-pattern + regex fallback. Farfetch product links follow a very
+     distinctive, stable pattern:
+         /shopping/kids/<brand-and-item-slug>-item-<digits>.aspx
+     This is a far more durable anchor for "this is a product card" than
+     guessing a CSS/utility class name, which is the mistake that cost the
+     most time on a previous single-site scraper in this same family
+     (Tailwind-class-based sites reuse generic layout classes everywhere,
+     so class-only matching produces false positives). Once a product link
+     is found, price/discount are extracted via regex over that element's
+     own text — again, text-content regex survives a class-name/theme
+     change that would silently break a CSS selector.
+
+FIXED, and worth knowing why the fix looks the way it does: this site
+publishes only ONE price per product in its listing JSON-LD, and on a
+discounted item it is the INTERMEDIATE one. Measured on four products from
+a /sale/all/ category:
+
+    tile:     Originalpreis 245 / Sale-Preis 135 / Endpreis 108 EUR
+              Sale-Discount -45%   Promo-Discount -20%
+    JSON-LD:  offers.price = 135        <- the middle number
+
+Verified live afterwards on a full /sale/all/ page: 96 products, 95 rows
+corrected. The one skipped row is the guard working — sku 23538433 had a
+JSON-LD price of 126 against tile prices of 133 and 101, so the two views
+disagreed about the product and the row was left alone rather than
+overwritten. That shape appears to be a product listed by more than one
+boutique; it is rare (1 in 96) and worth a warning rather than a guess.
+
+All four agreed: JSON-LD gave 135 / 65 / 60 / 426 where the tiles showed
+108 / 52 / 48 / 341, and each pair of printed percentages compounded to the
+implied discount within 0.1pp. So `parse_products` now runs a DOM pass over
+a SUCCESSFUL JSON-LD parse (`_overlay_tile_prices`), matched by
+-item-<digits>, and takes the lowest number in a tile as `price` and the
+highest as `original_price`. `tile_prices_overlay=False` restores the raw
+JSON-LD figures.
+
+Two things that look like the obvious implementation and are wrong:
+
+  - `line-through` does NOT mean "the old price". With a promo applied the
+    SALE price is struck through too — three of three tiles inspected.
+  - The price elements have no data-testid and their classes are
+    build-generated hashes (`ltr-12ss2mb-Footnote e82sgrh11`). Neither
+    survives a deploy.
+
+Sorting the tile's numbers is stable against both, and against locale.
+
+A related correction: `discount_pct` used to be read from the first "-NN%"
+in the tile, which on a two-stage discount is the sale percentage rather
+than what the buyer saves. It is now computed from the prices, with the
+printed percentages kept only as a cross-check that logs on disagreement.
+
+On three prices in one tile: the original build guessed this meant several
+boutiques stocking the same item, each at its own discount. It does not.
+"$160 $80 $64 -50% -20%" is ONE product's discount chain — 160 -50% -> 80,
+then -20% -> 64 — the same shape later confirmed on four live products from
+a /sale/all/ page. The guess happened to produce the right price (lowest is
+what you pay, highest is the list price) but the wrong explanation, and the
+wrong explanation sent the discount percentage to the first "-NN%" in the
+text. Kept here because a plausible mechanism that predicts the observation
+is not the same as the cause. Sizes and per-boutique detail are on the
+product page; this scraper is listing-level.
+
+No live browser was available to reverse-engineer Farfetch's actual CSS
+classes when this was written (unlike the Kohl's build in this same
+family, which WAS live-tested) — the URL-pattern approach above was chosen
+specifically because it doesn't need that. If prices/titles come back
+empty in your first real run, open the `{out}_page1_debug.html` dump the
+engine writes on failure before assuming the whole approach is wrong — it
+is far more likely a scoping tweak (see NOTE in _parse_css_fallback
+below).
+"""
+
+import json
+import logging
+import re
+from html import unescape
+from typing import List, Optional
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
+
+from bs4 import BeautifulSoup
+
+from output_writer import Product
+
+logger = logging.getLogger(__name__)
+
+SELECTORS = {
+    # The one selector this parser actually depends on. Farfetch product
+    # detail URLs all end in "-item-<digits>.aspx" — this has been stable
+    # across Farfetch redesigns for years, unlike any single CSS class.
+    "item_link": 'a[href*="-item-"]',
+}
+
+# Farfetch geo-redirects: the same category URL served to a European exit IP
+# lands on /de/ with prices as "125 €", while a US exit IP gets "$125". A
+# $-only price regex therefore returns ZERO products on any non-US locale —
+# confirmed live on 2026-08-24 from a European IP, where the page rendered
+# 96 products in "125 €" form. The symbol may lead or trail the number
+# depending on locale, so both orders are matched.
+#
+# Note this only affects the CSS/URL-pattern fallback path. The JSON-LD path
+# reads offers.price/priceCurrency as structured numbers and was never
+# currency-sensitive.
+_CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
+
+# A bare "$" is not enough on its own: several markets prefix it, and
+# reporting HK$1,234 as 1234 USD is not a rounding error, it is the wrong
+# currency. Longest-first, so "HK$" is tried before "$" (see _PREFIXED_RE).
+# A bare "$" still maps to USD via _CURRENCY_SYMBOLS — on the US site that
+# is what it means, and the JSON-LD path supplies the real currency whenever
+# the site publishes one, so this only decides the fallback path's guess.
+_PREFIXED_SYMBOLS = {
+    "HK$": "HKD", "NZ$": "NZD", "AU$": "AUD", "CA$": "CAD", "US$": "USD",
+    "A$": "AUD", "C$": "CAD", "S$": "SGD", "R$": "BRL", "NT$": "TWD",
+}
+
+# Markets where Farfetch prints a 3-letter ISO code instead of a symbol —
+# "AED 100", "SAR 250", "100 CHF". A tile priced that way used to match
+# nothing in _PRICE_RE and was therefore dropped as "not a product tile",
+# silently losing every product on such a locale rather than reporting one
+# with an unknown currency.
+#
+# An explicit allowlist, not a bare [A-Z]{3}: the latter matches any three
+# capitals next to a number, so a size chart ("XXL 100") or a spec line
+# would start producing phantom prices. Every entry here is a real ISO 4217
+# code, so a match names the currency as a fact rather than a guess.
+_CURRENCY_CODES = frozenset("""
+    USD EUR GBP JPY CHF AUD CAD NZD SGD HKD TWD KRW CNY MOP
+    AED SAR QAR KWD BHD OMR JOD ILS TRY EGP MAD ZAR NGN KES
+    SEK NOK DKK ISK PLN CZK HUF RON BGN HRK RSD UAH RUB
+    INR IDR MYR THB PHP VND PKR LKR BDT KZT
+    BRL MXN ARS CLP COP PEN UYU
+""".split())
+
+# Space characters used as a THOUSANDS separator. French, Russian and
+# several other locales group with a space rather than a comma or a dot, and
+# a rendered page uses a no-break variant so the number does not wrap: a
+# plain space, NBSP (U+00A0), narrow NBSP (U+202F) and thin space (U+2009)
+# all appear in the wild. Before these were recognised, "1 234 €" matched
+# only its last group and parsed as 234 — an order of magnitude off, silently.
+_GROUP_SPACES = "    "
+
+# Amount, in any of the three grouping conventions:
+#   1,234.56 / 1.234,56 / 1 234,56 / 125 / 125.00
+#
+# The space-grouped form deliberately requires FULL groups of exactly three
+# digits (`1 234`, not `5 200` from a size list next to a price). Sizes on
+# this site read "5 yrs, 6 yrs", so they cannot match — but a looser pattern
+# would happily read two unrelated numbers as one.
+_AMOUNT = (r"\d{1,3}(?:[" + _GROUP_SPACES + r"]\d{3})+(?:[.,]\d{1,2})?"
+           r"|[\d.,]+(?:[.,]\d{1,2})?")
+# Compound symbols before the bare ones, so "HK$" is not read as "$".
+_PREFIXED_RE = "|".join(re.escape(s) for s in
+                        sorted(_PREFIXED_SYMBOLS, key=len, reverse=True))
+_PRICE_RE = re.compile(
+    r"(?:(" + _PREFIXED_RE + r"|[$€£¥])\s?(" + _AMOUNT + r")"  # symbol first: HK$1,234 / €125,00
+    r"|(" + _AMOUNT + r")\s?([$€£¥])"                    # symbol last:  125,00 €
+    r"|\b([A-Z]{3})\s(" + _AMOUNT + r")\b"               # code first:   AED 100
+    r"|\b(" + _AMOUNT + r")\s([A-Z]{3})\b)"              # code last:    100 CHF
+)
+_DISCOUNT_RE = re.compile(r"-(\d{1,2})%")
+
+# Every Farfetch product URL ends in "-item-<digits>.aspx", and those digits
+# ARE the product id. Farfetch's listing JSON-LD carries no `sku`/`productID`
+# field at all — verified across two separate live captures two weeks apart
+# (2026-08-12 and 2026-08-24), so this is a standing gap, not a regression —
+# which meant every row in every run so far had sku=None despite the id
+# sitting in plain sight in the URL. Recover it from there.
+_SKU_IN_URL_RE = re.compile(r"-item-(\d+)\.aspx")
+
+# Fingerprints of the two bot-challenge families seen across this project
+# family. Originally lived only in scraper_api_client.py; needed here too so
+# the three browser engines can tell "blocked before parsing" (EXIT_BLOCKED)
+# apart from "the page rendered fine and genuinely has zero products"
+# (EXIT_NO_PRODUCTS) — the two collapsed into the same exit code before this
+# was shared, contradicting the exit-code contract in the README.
+BOT_CHALLENGE_MARKERS = {
+    "akamai": ("sec-if-cpt-container", "Powered and protected by Akamai", "_sec/cp_challenge"),
+    "cloudflare": ("cf-challenge", "challenge-platform", "cdn-cgi/challenge-platform"),
+}
+
+
+# An Akamai REFUSAL is not an Akamai CHALLENGE, and the markers above only
+# know the second. A challenge ships a widget and an invitation to prove
+# yourself; a refusal is the edge declining to proxy the request at all —
+# 318 bytes under HTTP 403, no widget, nothing to solve. Measured live on
+# 2026-09-14 from a datacentre address, which is what every request to
+# farfetch.com from this address now returns:
+#
+#     <title>Access Denied</title>
+#     <h1>Access Denied</h1>
+#     You don't have permission to access "http://www.farfetch.com/..."
+#     Reference #18.222c1102.1789401082.23f65d48
+#     https://errors.edgesuite.net/18.222c1102.1789401082.23f65d48
+#
+# Nothing in BOT_CHALLENGE_MARKERS appears on it, so detect_bot_challenge
+# returned None and a plainly blocked run exited 4 ("no products") — telling
+# the caller the category was empty. That is this codebase's worst bug class
+# (doing less than it says while reporting success), and it is what the
+# 2026-09-11 audit found and what the live canary had been hitting.
+#
+# TWO ENCODINGS, and this is the part that is easy to get wrong. The SAME
+# page reaches the parser spelled two different ways depending on transport:
+#
+#   raw bytes (requests/curl → scraper_api_client):
+#       https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;222c...
+#   browser DOM (page.content() → the three browser engines):
+#       https://errors.edgesuite.net/18.222c1102...
+#
+# Akamai entity-escapes the punctuation; a browser parses it and serialises
+# it back out plain. So a literal "errors.edgesuite.net" marker matches the
+# browser engines and SILENTLY MISSES the API client — measured: 0
+# occurrences in the raw form. Normalise the entities before matching rather
+# than listing both spellings, or the next marker added here has the same
+# hole. (The audit's own suggested markers, "errors.edgesuite.net" and
+# "Reference #", are both in exactly this trap: 0 matches on the raw page.)
+_DENY_TITLE_RE = re.compile(r"<title[^>]*>\s*Access Denied\s*</title>", re.I)
+
+# Akamai's ERROR-reporting host, and only that host. Deliberately NOT the
+# bare string "edgesuite": edgesuite.net is also an ordinary Akamai asset
+# domain, so a site whose own images are served from it would report every
+# page as blocked. That is the trap tokopedia-scraper fell into with a bare
+# "akamai" marker — a marker that matches a good page is
+# worse than no marker. "errors.edgesuite.net" appears only on the error page.
+_DENY_ERROR_HOST = "errors.edgesuite.net"
+
+# Only the head of the document is normalised and searched. The refusal page
+# is 318-426 bytes in full, so its markers are always inside this window;
+# bounding it keeps a 1.8MB listing page from being unescaped on every fetch,
+# and keeps a product title that happens to read "Access Denied" deep in the
+# grid from being mistaken for one.
+_DENY_SCAN_BYTES = 4096
+
+
+def detect_access_denied(html: str) -> bool:
+    """True if `html` is an edge REFUSAL page rather than site content.
+
+    Separate from the challenge markers because the correct response differs:
+    a challenge may be solvable where a refusal never is — only a different
+    exit address changes a refusal's outcome.
+    """
+    if not html:
+        return False
+    head = unescape(html[:_DENY_SCAN_BYTES])
+    return bool(_DENY_TITLE_RE.search(head)) or _DENY_ERROR_HOST in head
+
+
+def detect_bot_challenge(html: str) -> Optional[str]:
+    """Return the vendor name if `html` looks like a bot-challenge
+    interstitial or an edge refusal rather than real content, else None."""
+    for vendor, markers in BOT_CHALLENGE_MARKERS.items():
+        if any(marker in html for marker in markers):
+            return vendor
+    # Checked last, and reported under the same vendor name: the response an
+    # engine takes is identical (rotate to another exit), so this refines the
+    # REASON without changing the decision. Last, because a page carrying a
+    # real challenge widget should be named for that widget.
+    if detect_access_denied(html):
+        return "akamai"
+    return None
+
+
+def describe_block(html: str, vendor: str) -> str:
+    """One human-readable phrase for WHY a page counts as blocked.
+
+    Shared by the three engines so they cannot describe the same page
+    differently — the same argument that puts finish_run() in output_writer.
+    A refusal and a challenge both exit 3, but they suggest different next
+    steps, and a log that calls a refusal a "challenge" sends the reader
+    looking for a widget that is not there.
+    """
+    name = vendor.capitalize()
+    if detect_access_denied(html):
+        return (f"{name}'s refusal page (\"Access Denied\" — the edge "
+                f"declined the request outright; there is no challenge to "
+                f"solve, so only a different exit address changes this)")
+    return f"{name}'s challenge page"
+
+
+def _sku_from_url(url: Optional[str]) -> Optional[str]:
+    """Pull the product id out of a Farfetch product URL, if it's there."""
+    if not url:
+        return None
+    m = _SKU_IN_URL_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _normalize_amount(raw: str) -> Optional[float]:
+    """Parse a price amount written in either decimal convention.
+
+    When BOTH separators appear, 'whichever comes last is the decimal point'
+    disambiguates correctly on its own. When only one kind appears, that is
+    ambiguous between a thousands grouping and a decimal point — "1,234"
+    could be 1234 or (misread) 1.234 — and no currency this parser recognises
+    uses a 3-digit decimal subunit. So a single separator followed by exactly
+    3 digits is a thousands grouping, not a decimal point; anything else (1 or
+    2 digits, or no separator at all) is read as a decimal amount instead.
+    """
+    # A grouping space is punctuation, not part of the number. Stripped
+    # before anything else so the dot/comma logic below sees "1234,56"
+    # rather than "1 234,56".
+    for space in _GROUP_SPACES:
+        raw = raw.replace(space, "")
+
+    last_dot, last_comma = raw.rfind("."), raw.rfind(",")
+    if last_dot != -1 and last_comma != -1:
+        if last_dot > last_comma:
+            norm = raw.replace(",", "")
+        else:
+            norm = raw.replace(".", "").replace(",", ".")
+    else:
+        sep_pos = max(last_dot, last_comma)
+        trailing = raw[sep_pos + 1:] if sep_pos != -1 else ""
+        if len(trailing) == 3 and trailing.isdigit():
+            norm = raw.replace(".", "").replace(",", "")
+        else:
+            norm = raw.replace(",", ".")
+    try:
+        return float(norm)
+    except ValueError:
+        return None
+
+
+def _prices_in(text: str):
+    """Return ([amounts], currency_code_or_None) for all prices in `text`.
+
+    Recognises four shapes, because Farfetch prints all of them depending on
+    the locale the exit IP lands on: symbol-first ("$125.00"), symbol-last
+    ("125,00 €"), ISO-code-first ("AED 100") and ISO-code-last ("100 CHF").
+    See _CURRENCY_CODES for why the code forms are matched against an
+    allowlist rather than a bare [A-Z]{3}.
+    """
+    amounts, currency = [], None
+    for m in _PRICE_RE.finditer(text):
+        sym = m.group(1) or m.group(4)
+        code = m.group(5) or m.group(8)
+        if code and code not in _CURRENCY_CODES:
+            # Three capitals next to a number that are not a real currency —
+            # a size ("XXL 100"), a spec, a model name. Not a price.
+            continue
+        raw = m.group(2) or m.group(3) or m.group(6) or m.group(7)
+        if currency is None:
+            # A written-out ISO code names the currency outright, and a
+            # prefixed symbol ("HK$") is nearly as good. Only a BARE symbol
+            # is a guess — see _PREFIXED_SYMBOLS.
+            currency = (code or _PREFIXED_SYMBOLS.get(sym)
+                        or _CURRENCY_SYMBOLS.get(sym))
+        amount = _normalize_amount(raw)
+        if amount is not None:
+            amounts.append(amount)
+    return amounts, currency
+_RATING_RE_COUNT_FIRST = re.compile(r"([\d,]+)\s*(?:user )?reviews?.*?([\d.]+)\s*out of 5", re.IGNORECASE)
+_RATING_RE_RATING_FIRST = re.compile(r"([\d.]+)\s*out of 5.*?([\d,]+)\s*reviews?", re.IGNORECASE)
+
+
+def _to_float(text: Optional[str]) -> Optional[float]:
+    if not text:
+        return None
+    m = re.search(r"[\d,]+\.\d+|\d+", text.replace(",", ""))
+    return float(m.group()) if m else None
+
+
+def _parse_rating_from_aria(aria_label: str):
+    """Best-effort only — Farfetch listing tiles may not show a rating at
+    all (common on luxury/boutique marketplaces). Returns (None, None) if
+    nothing matches; callers must treat rating as optional."""
+    for pattern, order in ((_RATING_RE_COUNT_FIRST, "count_first"), (_RATING_RE_RATING_FIRST, "rating_first")):
+        m = pattern.search(aria_label)
+        if m:
+            a, b = m.group(1), m.group(2)
+            count, rating = (a, b) if order == "count_first" else (b, a)
+            return _to_float(rating), int(count.replace(",", ""))
+    return None, None
+
+
+def _image_url(image):
+    """First usable image URL from any shape schema.org allows for `image`.
+
+    All four are legal and this project has met three: a bare string, a list
+    of strings, an ImageObject (`{"@type": "ImageObject", "url": ...}`), and a
+    list of those. The old one-liner indexed `[0]` into whatever it found,
+    so an ImageObject raised KeyError and killed the run — a crash over a
+    field that is decoration next to price and sku.
+    """
+    if isinstance(image, str):
+        return image or None
+    if isinstance(image, dict):
+        url = image.get("url") or image.get("contentUrl")
+        return url if isinstance(url, str) else None
+    if isinstance(image, (list, tuple)):
+        for item in image:
+            found = _image_url(item)
+            if found:
+                return found
+    return None
+
+
+def _parse_jsonld(html: str, base_url: str) -> List[Product]:
+    soup = BeautifulSoup(html, "html.parser")
+    products: List[Product] = []
+
+    for tag in soup.find_all("script", {"type": "application/ld+json"}):
+        try:
+            data = json.loads(tag.string or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        blocks = data if isinstance(data, list) else [data]
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            # `@graph` is the other standard way schema.org markup is
+            # published: one block holding a flat list of typed nodes rather
+            # than an ItemList. Farfetch does not use it today, but a parser
+            # that silently returns zero products when a site switches to it
+            # reports "empty category" for what is really an unread format —
+            # the exact failure this project has an exit code to distinguish.
+            graph = block.get("@graph")
+            items = block.get("itemListElement")
+            if isinstance(graph, list):
+                candidates = graph
+            elif items:
+                candidates = items
+            else:
+                candidates = [block]
+
+            for entry in candidates:
+                node = entry.get("item", entry) if isinstance(entry, dict) else entry
+                if not isinstance(node, dict) or node.get("@type") not in ("Product", ["Product"]):
+                    continue
+
+                # `or {}` on every one of these, not just a default: the
+                # default only applies when the key is ABSENT, and JSON-LD in
+                # the wild carries explicit nulls. `"offers": null` used to
+                # raise AttributeError on the next line and take the whole
+                # run down with it.
+                offers = node.get("offers") or {}
+                if isinstance(offers, list):
+                    offers = next((o for o in offers if isinstance(o, dict)), {})
+                if not isinstance(offers, dict):
+                    offers = {}
+                agg_rating = node.get("aggregateRating") or {}
+                if not isinstance(agg_rating, dict):
+                    agg_rating = {}
+
+                # Farfetch's own JSON-LD (confirmed live) nests the product
+                # URL under offers.url, not directly on the Product node —
+                # node.get("url") is simply absent there. Check both, in
+                # that order, rather than assuming one convention.
+                url_path = node.get("url") or offers.get("url") or ""
+
+                resolved_url = urljoin(base_url, url_path) if url_path else base_url
+                products.append(Product(
+                    url=resolved_url,
+                    # Farfetch's listing JSON-LD has no sku/productID at all,
+                    # so this falls through to the URL every time in practice.
+                    sku=node.get("sku") or node.get("productID") or _sku_from_url(resolved_url),
+                    title=node.get("name"),
+                    brand=(node.get("brand") or {}).get("name") if isinstance(node.get("brand"), dict) else node.get("brand"),
+                    price=_to_float(str(offers.get("price"))) if offers.get("price") is not None else None,
+                    # No fallback to "USD" here: if Farfetch's own JSON-LD
+                    # genuinely omits priceCurrency, presenting a guess as a
+                    # fact is worse for a cross-country price comparison than
+                    # admitting the currency is unknown.
+                    currency=offers.get("priceCurrency"),
+                    rating=_to_float(str(agg_rating.get("ratingValue"))) if agg_rating.get("ratingValue") else None,
+                    review_count=int(agg_rating["reviewCount"]) if str(agg_rating.get("reviewCount", "")).isdigit() else None,
+                    in_stock=("InStock" in str(offers.get("availability", ""))) if offers.get("availability") else None,
+                    image_url=_image_url(node.get("image")),
+                    # Upgraded to "jsonld+dom" by _overlay_tile_prices when
+                    # the rendered tile corroborates or corrects this figure.
+                    price_source="jsonld",
+                ))
+    return products
+
+
+def _parse_css_fallback(html: str, base_url: str, category: Optional[str]) -> List[Product]:
+    soup = BeautifulSoup(html, "html.parser")
+    products: List[Product] = []
+    seen_urls = set()
+
+    for a in soup.select(SELECTORS["item_link"]):
+        href = a.get("href")
+        if not href:
+            continue
+        full_url = urljoin(base_url, href)
+        if full_url in seen_urls:
+            continue
+
+        # NOTE / first thing to check if this comes back empty on a real run:
+        # Farfetch sometimes splits one product into TWO adjacent <a> tags
+        # sharing the same href (one wrapping the image, one wrapping the
+        # brand/name/price text) rather than one tile. We scope to the link
+        # itself first; if there's no price text inside it, we widen to its
+        # immediate parent — but ONLY if that parent still contains exactly
+        # this one product link. Widening past that would silently pull in
+        # a sibling tile's price/image whenever this link happens to be
+        # junk (e.g. a "Sizing guide" link matching the URL shape by
+        # coincidence but sharing a grid container with real products) —
+        # caught by a fixture test while building this, not live traffic.
+        scope = a
+        text = scope.get_text(" ", strip=True)
+        if not _PRICE_RE.search(text) and scope.parent is not None:
+            candidate = scope.parent
+            if len(candidate.select(SELECTORS["item_link"])) == 1:
+                scope = candidate
+                text = scope.get_text(" ", strip=True)
+
+        prices, currency = _prices_in(text)
+        if not prices:
+            continue  # not a product tile (e.g. a nav link that happens to match)
+        seen_urls.add(full_url)
+
+        price = min(prices)
+        original_price = max(prices) if len(prices) > 1 else None
+        # Computed from the prices, not read off the page: a tile can print two
+        # compounding percentages and the first one is not the buyer's discount.
+        discount_pct = _discount_from(price, original_price, text)
+
+        img = scope.find("img")
+        title = None
+        if img and img.get("alt"):
+            title = img["alt"].strip() or None
+        if not title:
+            # Strip the price/discount substrings out of the tile's own text
+            # as a last-resort title — better than nothing, worse than alt text.
+            cleaned = _PRICE_RE.sub("", text)
+            cleaned = _DISCOUNT_RE.sub("", cleaned)
+            title = cleaned.strip(" ·-") or None
+
+        rating, review_count = (None, None)
+        rating_el = scope.find(attrs={"aria-label": re.compile(r"out of 5|reviews?", re.IGNORECASE)})
+        if rating_el:
+            rating, review_count = _parse_rating_from_aria(rating_el.get("aria-label", ""))
+
+        products.append(Product(
+            url=full_url,
+            sku=_sku_from_url(full_url),
+            title=title,
+            price=price,
+            # Only what the tile itself states (ISO code, prefixed or bare
+            # symbol, via _prices_in). Nothing stated is null — never a
+            # defaulted "USD", which would present a guess as a fact.
+            currency=currency,
+            original_price=original_price,
+            discount_pct=discount_pct,
+            rating=rating,
+            review_count=review_count,
+            image_url=(img.get("src") or img.get("data-src")) if img else None,
+            category=category,
+            # Read straight off the tile, with no JSON-LD to cross-check.
+            price_source="dom",
+        ))
+    return products
+
+
+# Path segments that are never a category: the site's own route prefixes, and
+# the two-letter locale Farfetch inserts when it geo-redirects (`/de/shopping/...`).
+# `all` is skipped too: on a sale URL like /shopping/women/sale/all/items.aspx
+# the informative segment is `sale`, not the generic bucket after it.
+_NOT_A_CATEGORY = {"shopping", "sets", "items.aspx", "all"}
+
+
+def count_product_links(html: str) -> int:
+    """How many DISTINCT products the page links to, by id.
+
+    Counts ids rather than anchors because a tile links to its product twice,
+    from the image and from the title — counting anchors would double every
+    figure and make a threshold mean half what it says.
+
+    Used to tell "this category is empty" from "the parser returned nothing
+    from a page that is full of products", which are opposite answers: the
+    first is a fact about the catalogue, the second is a bug in here.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    ids = set()
+    for a in soup.select(SELECTORS["item_link"]):
+        item_id = _sku_from_url(a.get("href") or "")
+        if item_id:
+            ids.add(item_id)
+    return len(ids)
+
+
+def page_url(url: str, page_num: int) -> str:
+    """Return `url` with Farfetch's own `?page=` parameter set to `page_num`.
+
+    The fallback for when NEXT_PAGE_SELECTOR finds nothing. Following the
+    site's own next-page link is still preferred — it is whatever the site
+    itself considers correct — but a scraper whose pagination depends
+    ENTIRELY on three `data-testid`-style selectors has a silent-success
+    failure mode: rename one attribute and every run stops after page 1 and
+    reports a complete, successful result with 1/50th of the data. Neither
+    the offline suite nor a one-page canary would notice.
+
+    Site-specific URL knowledge, hence living here beside category_from_url
+    rather than in an engine: `?page=N` is Farfetch's convention, confirmed
+    on the paginated category URLs this project targets.
+
+    Existing query parameters (filters, sort order) are preserved, and an
+    existing `page` is replaced rather than appended twice.
+    """
+    parts = urlparse(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k.lower() != "page"]
+    query.append(("page", str(page_num)))
+    return urlunparse(parts._replace(query=urlencode(query)))
+
+
+def category_from_url(url: str):
+    """Best-effort category label from a listing URL.
+
+    `category` is a free-text label for grouping rows, and the page itself does
+    not supply one — so before this existed it was `null` on every row unless
+    the caller remembered `--category`. A column that is empty by default reads
+    as a broken field rather than an optional one.
+
+    The last path segment before `items.aspx` is the category:
+
+        /shopping/kids/girls-clothing-4/items.aspx        -> girls-clothing-4
+        /de/shopping/kids/girls-clothing-4/items.aspx     -> girls-clothing-4
+        /shopping/kids/items.aspx                         -> kids
+
+    The numeric suffix is kept deliberately. It is Farfetch's own category id,
+    it is stable, and stripping it would silently merge two categories that
+    differ only by id. A caller who wants a tidier label passes --category,
+    which always wins.
+
+    Returns None when nothing usable is in the path (a search URL, say), which
+    leaves the field null exactly as before.
+    """
+    if not url:
+        return None
+    try:
+        parts = [seg for seg in urlparse(url).path.split("/") if seg]
+    except ValueError:
+        return None
+
+    if parts and parts[-1].lower().endswith(".aspx"):
+        parts = parts[:-1]
+
+    # Drop a leading two-letter locale, but only in first position — a category
+    # is free to be two characters long anywhere else.
+    if parts and len(parts[0]) == 2 and parts[0].isalpha():
+        parts = parts[1:]
+
+    parts = [seg for seg in parts if seg.lower() not in _NOT_A_CATEGORY]
+    return parts[-1] if parts else None
+
+
+
+# How far to widen from a product link when looking for its tile. Eight levels
+# covers the observed markup; the loop stops earlier the moment a candidate
+# holds more than one product link.
+_MAX_TILE_WIDEN = 8
+
+
+def _tile_scope(anchor):
+    """The outermost ancestor of `anchor` that still holds exactly ONE product link.
+
+    Stopping one level too late is the "junk-link data theft" failure: every
+    tile then reports its neighbours' prices. Confirmed the hard way twice — in
+    the original build, and again while diagnosing the price overlay, where a
+    too-wide scope showed three different products with one product's prices.
+    """
+    best, node = anchor, anchor
+    for _ in range(_MAX_TILE_WIDEN):
+        node = node.parent
+        if node is None or not hasattr(node, "select"):
+            break
+        if len(node.select(SELECTORS["item_link"])) != 1:
+            break
+        best = node
+    return best
+
+
+def _discount_from(price, original_price, text):
+    """Percentage off, computed from the prices rather than read from the page.
+
+    This site can show TWO percentages on one tile — a sale discount and a
+    promo discount that compounds on top of it:
+
+        Originalpreis 245 EUR  Sale-Preis 135 EUR  Endpreis 108 EUR
+        Sale-Discount -45%     Promo-Discount -20%
+
+    Reading the first percentage gives -45%, which is not the discount the
+    buyer receives; 245 -> 108 is -55.9%, and -45% compounded with -20% is
+    -56.0%. So the arithmetic on the prices is the trustworthy source and the
+    printed percentages are only a cross-check. Verified on four products, all
+    four agreeing to within 0.1pp.
+    """
+    if original_price and price is not None and original_price > price:
+        computed = round((1 - price / original_price) * 100, 1)
+
+        # Cross-check against whatever the page printed. A mismatch is worth a
+        # log line rather than a silent override: it means either a third
+        # discount stage or a price we misread.
+        percents = [float(m) for m in _DISCOUNT_RE.findall(text)]
+        if percents:
+            remaining = 1.0
+            for pct in percents:
+                remaining *= (1 - pct / 100)
+            stated = round((1 - remaining) * 100, 1)
+            if abs(stated - computed) > 1.0:
+                logger.debug(
+                    "Discount mismatch: prices imply %.1f%%, the page's "
+                    "percentages %s compound to %.1f%%. Using the prices.",
+                    computed, percents, stated)
+        return computed
+
+    # No usable pair of prices. A single printed percentage is better than
+    # nothing, but cannot be verified.
+    match = _DISCOUNT_RE.search(text)
+    return float(match.group(1)) if match else None
+
+
+def tile_prices(html: str, base_url: str):
+    """{sku: (amounts, currency, tile_text)} for every tile showing a price.
+
+    Exists because farfetch.com's listing JSON-LD publishes ONE price per
+    product, and on a discounted item it is the INTERMEDIATE one — the sale
+    price before a site-wide promo, not the price at checkout. Confirmed live
+    on four products from a /sale/all/ category: JSON-LD said 135 / 65 / 60 /
+    426 where the tiles showed 108 / 52 / 48 / 341.
+
+    Deliberately does NOT use line-through to identify the old price: when a
+    promo applies the SALE price is struck through as well, on all four
+    products sampled. Nor the class names, which are build-generated hashes
+    (`ltr-12ss2mb-Footnote`) with no data-testid to fall back on. Sorting the
+    numbers is stable against both.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    out = {}
+
+    for a in soup.select(SELECTORS["item_link"]):
+        href = a.get("href")
+        if not href:
+            continue
+        sku = _sku_from_url(urljoin(base_url, href))
+        if not sku or sku in out:
+            continue
+
+        scope = _tile_scope(a)
+        text = scope.get_text(" ", strip=True)
+        amounts, currency = _prices_in(text)
+        if amounts:
+            out[sku] = (amounts, currency, text)
+
+    return out
+
+
+def _overlay_tile_prices(products, html: str, base_url: str):
+    """Correct price / original_price / discount_pct from the DOM, in place.
+
+    Only touches a product whose tile shows MORE than one price: a single price
+    means no discount, and JSON-LD's figure is then correct and better trusted
+    (it is structured data). Returns how many rows were corrected.
+    """
+    tiles = tile_prices(html, base_url)
+    if not tiles:
+        logger.debug("No priced tiles found in the DOM; leaving JSON-LD prices "
+                     "as they are.")
+        return 0
+
+    corrected = 0
+    confirmed = 0
+    for product in products:
+        entry = tiles.get(product.sku)
+        if entry is None:
+            # No rendered tile for this product — this site paints a variable
+            # fraction of them — so `price` stays the raw JSON-LD figure and
+            # price_source stays "jsonld": on a discounted item that may be
+            # the pre-promo price, and the row says so rather than implying
+            # a confidence it does not have.
+            continue
+        amounts, _tile_currency, text = entry  # tile currency deliberately unused, see below
+        if len(set(amounts)) < 2:
+            # One price on the tile means there is no discount to correct, so
+            # the JSON-LD figure IS what a customer pays — and the DOM just
+            # said so. That is corroboration, not a correction.
+            product.price_source = "jsonld+dom"
+            confirmed += 1
+            continue
+
+        low, high = min(amounts), max(amounts)
+
+        # The JSON-LD price should be one of the tile's numbers. If it is not,
+        # the two views disagree about which product this is — most likely the
+        # tile scope is wrong — and overwriting would corrupt a correct row.
+        if product.price is not None and not any(
+                abs(product.price - amount) < 0.01 for amount in amounts):
+            logger.warning(
+                "sku %s: JSON-LD price %.2f is not among the tile's prices %s "
+                "— leaving the row untouched.", product.sku, product.price,
+                amounts)
+            continue
+
+        product.price = low
+        product.original_price = high
+        product.discount_pct = _discount_from(low, high, text)
+        product.price_source = "jsonld+dom"
+        confirmed += 1
+        # Deliberately NOT overwriting product.currency from the tile here.
+        # JSON-LD's priceCurrency is structured data straight from the site;
+        # the tile's currency is guessed from a bare symbol, and $ alone maps
+        # to USD in _CURRENCY_SYMBOLS regardless of whether the real currency
+        # is AUD/CAD/SGD/HKD/NZD — overlaying it would replace a correct
+        # currency with a wrong one on every non-USD "$" market, silently
+        # breaking the cross-country price comparison this project documents
+        # as a use case.
+        corrected += 1
+
+    if corrected:
+        logger.info("Corrected prices on %d of %d products from the DOM "
+                    "(JSON-LD publishes the pre-promo price).",
+                    corrected, len(products))
+    # Coverage, not just corrections: the interesting number for judging a
+    # run is how many rows the DOM could vouch for at all. A low figure on a
+    # sale page means the snapshot was taken before the tiles painted, and
+    # the uncorrected rows may carry pre-promo prices.
+    if products:
+        share = confirmed / len(products)
+        unconfirmed = len(products) - confirmed
+        if unconfirmed:
+            log = logger.info if share >= 0.9 else logger.warning
+            log("DOM-confirmed prices on %d of %d products (%.0f%%). The "
+                "other %d carry the raw JSON-LD figure "
+                "(price_source=\"jsonld\"), which on a discounted item may be "
+                "the pre-promo price.",
+                confirmed, len(products), share * 100, unconfirmed)
+        else:
+            logger.info("DOM-confirmed prices on all %d products.", confirmed)
+    return corrected
+
+
+def parse_products(html: str, base_url: str, category: Optional[str] = None,
+                   tile_prices_overlay: bool = True) -> List[Product]:
+    """Products from a listing page. JSON-LD first, CSS/URL patterns as fallback.
+
+    `tile_prices_overlay` runs a DOM pass over a SUCCESSFUL JSON-LD parse to
+    correct the prices. It defaults on because without it every discounted row
+    carries the pre-promo price — see tile_prices() for the measurements. Pass
+    False to get the raw JSON-LD figures, which is occasionally what you want
+    when comparing against the site's own structured data.
+    """
+    # An explicit label always wins; otherwise derive one from the URL so the
+    # column is populated by default. Note base_url is the URL the browser
+    # ENDED on, so after a geo-redirect this reflects the page actually parsed.
+    label = category or category_from_url(base_url)
+
+    products = _parse_jsonld(html, base_url)
+    if not products:
+        # The fallback reads the same tiles directly, so its prices are already
+        # right; no overlay needed on this path.
+        return _parse_css_fallback(html, base_url, label)
+
+    for p in products:
+        p.category = label
+    if tile_prices_overlay:
+        _overlay_tile_prices(products, html, base_url)
+    return products

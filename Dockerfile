@@ -1,0 +1,30 @@
+# Builds the Playwright engine (the one the README recommends) into a
+# container with its own Chromium — for a CI canary run or a scheduled job,
+# not required for local development (`pip install` directly is simpler there).
+#
+#   docker build -t farfetch-scraper .
+#   docker run --rm -v "$PWD/out:/out" farfetch-scraper \
+#     --url "https://www.farfetch.com/shopping/kids/girls-clothing-4/items.aspx" \
+#     --pages 1 --out /out/girls_clothing
+#
+# Pass --proxy/--twocaptcha-key the same way as running locally, or mount a
+# .env at /app/.env — nothing here bakes in a credential.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt requirements-playwright.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-playwright.txt \
+    # Playwright's own apt-get for Chromium's shared-library dependencies —
+    # not pip packages, so this has to run as a separate, explicit step.
+    && playwright install --with-deps chromium
+
+# Every module the entrypoint imports, transitively. This list had fallen
+# behind: proxy_pool.py was missing while the engine imports it at module
+# level, so the image died with ModuleNotFoundError on every invocation,
+# `--help` included. Nothing noticed, because CI never built the image.
+COPY arg_types.py captcha_solver.py notify.py run_state.py env_config.py fingerprint_client.py output_writer.py \
+     playwright_scraper.py product_parser.py product_detail_parser.py diff_runs.py proxy_pool.py proxy_meter.py ./
+
+ENTRYPOINT ["python3", "playwright_scraper.py"]
+CMD ["--help"]
