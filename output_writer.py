@@ -253,6 +253,71 @@ ROW_CLASS_BY_MODE = {"hot": Post, "user": Post, "post": Post}
 # that `sku` carries for that mode.
 UNIQUE_BY_SKU_MODES = ("hot", "user", "post")
 
+# Modes whose rows carry post bodies that Weibo may truncate and that this
+# repo completes through /ajax/statuses/longtext. `post` fetches COMMENTS,
+# never post bodies, so its sidecar carries none of the long-text fields —
+# they would describe work the run did not do.
+LONG_TEXT_MODES = ("hot", "user")
+
+# The sidecar keys that settle the long-text story for one run. The four
+# buckets are mutually exclusive and exhaustive over the rows the SITE
+# flagged as long, so `long_text_flagged` always equals the other three
+# summed.
+LONG_TEXT_FLAGGED = "long_text_flagged"
+LONG_TEXT_RECOVERED = "long_text_recovered"
+LONG_TEXT_ALREADY_COMPLETE = "long_text_already_complete"
+LONG_TEXT_FAILED = "long_text_failed"
+
+
+def long_text_summary(rows: Sequence[Any], mode: str) -> dict:
+    """Tally the long-text recovery from the ROWS BEING WRITTEN.
+
+    Deliberately counted here, from the final row objects, rather than
+    carried out of the engines' request loops. A request counter can
+    describe a different set of rows than the output: a page can fail after
+    recovery, a row can be deduped away, or the recovery pass may never run
+    because transport died first. The sidecar's job is to tell a consumer
+    how many WRITTEN rows are incomplete, so the tally is derived from the
+    same `rows` list that `save` writes, after every mutation the run made.
+
+    The buckets, for rows whose site-side `is_long_text` is true:
+
+      long_text_recovered        /longtext returned more body; the row's
+                                 text_source is `longtext` and it is whole.
+      long_text_already_complete the endpoint answered that no more text
+                                 existed (or nothing longer): isLongText was
+                                 a false positive, the row was whole all
+                                 along, text_source is `inline`.
+      long_text_failed           the endpoint was unreachable or its answer
+                                 could not be read; the row STILL has
+                                 text_truncated True and holds the short
+                                 body. This is the only failure bucket.
+
+    Returns {} for modes that do not fetch post bodies (`post`), so no
+    long-text field can appear in a sidecar whose run never did the work.
+    """
+    if mode not in LONG_TEXT_MODES:
+        return {}
+    flagged = recovered = already_complete = failed = 0
+    for row in rows:
+        if not getattr(row, "is_long_text", False):
+            continue
+        flagged += 1
+        if getattr(row, "text_truncated", False):
+            # Only a failed recovery leaves a flagged row truncated —
+            # apply_longtext clears the flag in every reached case.
+            failed += 1
+        elif getattr(row, "text_source", None) == "longtext":
+            recovered += 1
+        else:
+            already_complete += 1
+    return {
+        LONG_TEXT_FLAGGED: flagged,
+        LONG_TEXT_RECOVERED: recovered,
+        LONG_TEXT_ALREADY_COMPLETE: already_complete,
+        LONG_TEXT_FAILED: failed,
+    }
+
 
 def dedupe_by_key(rows: Sequence[Any], seen: Set[str], key: str = "sku") -> List[Any]:
     """Drop rows whose key already appeared earlier in this same run.
@@ -580,6 +645,16 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     `--mode hot` records `feed_rerolled`, because that feed is not
     addressable at all — see dedupe_by_key.
 
+    `hot` and `user` also carry the long-text recovery verdict, counted
+    from the written rows by `long_text_summary`: `long_text_flagged`
+    (rows the site's isLongText marked), `long_text_recovered` (the
+    longtext endpoint supplied the rest), `long_text_already_complete`
+    (the endpoint said there was no more text, so the flag was a false
+    positive), and `long_text_failed` (unreachable or unparseable — the
+    row stays text_truncated). The first three partition the first, so a
+    consumer sees at a glance how many written bodies are incomplete.
+    `post` fetches no post bodies and gets none of these keys.
+
     `pages_failed` lists the pages that did not yield data, by number.
     `pages_completed` alone was enough only while pages were fetched strictly
     in order, where "3 of 10 completed" could only mean 1-2-3: a count is not
@@ -717,6 +792,14 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Post)
 
+    # The long-text verdict is computed once, here, from the rows being
+    # written — not passed in by an engine — so the four numbers cannot
+    # drift from the output (see long_text_summary). The caller's extra may
+    # still carry request-time notes under other names, but these four keys
+    # are owned by the row-derived tally and override any same-named value.
+    extra = dict(extra or {})
+    extra.update(long_text_summary(rows, mode))
+
     # Declared, not discovered. The CSV neutralises a cell a spreadsheet
     # would execute; the JSON does not, so the two outputs of one run can
     # differ by exactly this many cells and the sidecar says by how many.
@@ -724,7 +807,6 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # returning an exit code and no caller changes shape.
     if fmt in ("csv", "both"):
         escaped = count_csv_escapes(rows, row_cls)
-        extra = dict(extra or {})
         # Housekeeping goes UNDER the caller's keys: a value the caller
         # passed under the same name is theirs and is not overwritten.
         extra.setdefault("csv_cells_escaped", escaped)

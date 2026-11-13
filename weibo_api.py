@@ -551,9 +551,10 @@ def scrape(args) -> int:
                 stop_reason = "feed_not_addressable"
 
         if args.mode in ("hot", "user") and rows:
-            recovered, attempted, _ = _recover_long_text(client, rows)
-            extra["long_text_flagged"] = attempted
-            extra["long_text_recovered"] = recovered
+            # The sidecar verdict is derived from the written rows inside
+            # finish_run (long_text_summary); this call's only job here is
+            # to mutate the rows. Its return values feed the log lines.
+            _recover_long_text(client, rows)
 
     except TransportError as exc:
         log.error("[x] nothing was reached: %s", mask_secrets(str(exc)))

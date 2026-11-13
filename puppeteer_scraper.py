@@ -844,9 +844,10 @@ async def _scrape_async(args) -> int:
                 stop_reason = "feed_not_addressable"
 
         if args.mode in ("hot", "user") and rows:
-            recovered, attempted = await _recover_long_text(session, args, rows)
-            extra["long_text_flagged"] = attempted
-            extra["long_text_recovered"] = recovered
+            # Mutates the rows; the sidecar's long-text counts are derived
+            # from those rows in finish_run (long_text_summary), so nothing
+            # about the outcome is handed back through extra.
+            await _recover_long_text(session, args, rows)
 
     finally:
         await session.close()

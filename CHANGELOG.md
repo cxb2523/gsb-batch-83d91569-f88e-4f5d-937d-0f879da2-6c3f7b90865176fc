@@ -10,6 +10,24 @@ notes lead with it.
 
 ## [Unreleased]
 
+### Added
+
+- **The long-text recovery outcome is now summarised in every `hot`/`user`
+  run's `<out>.meta.json`.** A flagged post whose `/longtext` completion
+  failed stayed marked `text_truncated`, but nothing aggregated those
+  attempts, so a consumer of the `title` column could not tell how many
+  rows in a batch were actually incomplete. The sidecar now carries four
+  fields counted from the rows that are written — `long_text_flagged`
+  (rows `isLongText` marked), `long_text_recovered` (the endpoint returned
+  the rest), `long_text_already_complete` (the endpoint answered that no
+  more text existed, so the flag was a false positive and the post was
+  whole), and `long_text_failed` (the endpoint was unreachable or its
+  answer unreadable; the row stays truncated). The three outcome fields
+  partition `long_text_flagged`, and because the tally is derived from the
+  final row objects in `output_writer.long_text_summary` rather than from
+  request counters, it cannot disagree with the output. `post` mode fetches
+  no post bodies and its sidecar gains none of these fields.
+
 ## [0.1.1] — 2026-10-16
 
 > **Behaviour change.** `--allow-empty` now writes an empty file only for a

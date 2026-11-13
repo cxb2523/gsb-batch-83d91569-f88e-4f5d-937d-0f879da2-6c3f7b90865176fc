@@ -158,6 +158,22 @@ recover (one was 13 characters long). When the endpoint answers "there is no
 more text", the row is marked **whole**, not truncated. `text_truncated` is
 True only when the endpoint could not be asked.
 
+Each `hot`/`user` run settles that story in the `<out>.meta.json` sidecar,
+with four numbers counted from the rows actually written (so they always
+agree with the data beside them):
+
+| Field | Meaning |
+|---|---|
+| `long_text_flagged` | rows the site's `isLongText` marked as needing completion |
+| `long_text_recovered` | the longtext endpoint returned the rest; the row is whole |
+| `long_text_already_complete` | the endpoint said there was no more text — the flag was a false positive and the post was whole |
+| `long_text_failed` | the endpoint was unreachable or its answer unreadable; the row keeps `text_truncated: true` and its short body |
+
+The three outcome fields partition `long_text_flagged`, so a quick
+subtraction tells you how many written bodies are incomplete. A single
+failed completion never stops the run. `post` mode fetches comments rather
+than post bodies, so its sidecar carries none of these fields.
+
 ### The number that is not a number
 
 Every post carries this, identically, including posts with 18 likes:
@@ -337,6 +353,8 @@ source  scraped_at  url  sku  title  text_source  text_truncated …
   repo in this family writes this column, so one schema works across them.
 * Every run writes `<out>.meta.json` beside the data: status, stop reason,
   which fetches failed by number, and the mode-specific honesty fields.
+  For `hot` and `user` that includes the long-text recovery verdict
+  (`long_text_flagged` / `_recovered` / `_already_complete` / `_failed`).
 
 ### CSV neutralises formulas; JSON does not
 

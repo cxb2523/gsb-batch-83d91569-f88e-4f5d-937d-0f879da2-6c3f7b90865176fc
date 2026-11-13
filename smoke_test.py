@@ -817,6 +817,110 @@ def test_truncation_semantics():
        "a shorter 'recovery' never overwrites a longer body")
 
 
+def test_long_text_summary_partitions_the_flagged_rows():
+    """The sidecar verdict is derived from the WRITTEN rows, and the four
+    buckets stay mutually exclusive and exhaustive.
+
+    A request counter would not catch a row that stayed truncated because
+    the recovery pass never ran, or one that finished whole after a false
+    isLongText flag; counting the row objects does, and cannot disagree
+    with the file that is written beside the sidecar.
+    """
+    from output_writer import Post, long_text_summary
+
+    def flagged_row(sku, source, truncated):
+        return Post(sku=sku, is_long_text=True, text_source=source,
+                    text_truncated=truncated)
+
+    rows = [
+        # The site never flagged these: never counted.
+        Post(sku="plain-1", is_long_text=False, text_source="inline",
+             text_truncated=False),
+        Post(sku="plain-2", is_long_text=False, text_source="inline",
+             text_truncated=False),
+        # Flagged, endpoint returned the rest.
+        flagged_row("long-ok", "longtext", False),
+        # Flagged, endpoint said there was no more text: whole all along.
+        flagged_row("false-flag", "inline", False),
+        # A second "already complete" via the never-shorten branch.
+        flagged_row("false-flag-2", "inline", False),
+        # Flagged and never reached: the only rows that stay truncated.
+        flagged_row("dead-end", "longtext_failed", True),
+        flagged_row("dead-end-2", "longtext_failed", True),
+    ]
+    summary = long_text_summary(rows, "hot")
+    eq(summary["long_text_flagged"], 5, "five rows were flagged by the site")
+    eq(summary["long_text_recovered"], 1, "one was genuinely recovered")
+    eq(summary["long_text_already_complete"], 2,
+       "two flags were false positives — those posts were whole")
+    eq(summary["long_text_failed"], 2,
+       "two could not be recovered and stay truncated")
+    eq(summary["long_text_recovered"] + summary["long_text_already_complete"]
+       + summary["long_text_failed"], summary["long_text_flagged"],
+       "the three outcome buckets partition the flagged rows")
+    eq(summary["long_text_failed"],
+       sum(1 for r in rows if r.text_truncated),
+       "the failure bucket equals the truncated rows actually written")
+
+    # `user` gets the identical row-derived treatment.
+    eq(long_text_summary(rows, "user"), summary,
+       "hot and user summarise the same way")
+
+    # `post` fetches comments, never post bodies: no long-text fields may
+    # appear in its sidecar at all, even if a row carries the columns.
+    eq(long_text_summary(rows, "post"), {},
+       "post mode invents no long-text fields")
+    eq(long_text_summary([], "hot"),
+       {"long_text_flagged": 0, "long_text_recovered": 0,
+        "long_text_already_complete": 0, "long_text_failed": 0},
+       "a flagged-free run still reports the four zeros")
+
+
+def test_finish_run_writes_the_row_derived_long_text_verdict():
+    """Through finish_run, the sidecar agrees with the rows, not with any
+    number an engine might have carried, and `post` stays clean."""
+    import output_writer as O
+
+    base = dict(blocked=False, stop_reason="completed", pages_requested=1,
+                pages_completed=1, start_url="u", final_url="u")
+    rows = [
+        O.Post(sku="a", is_long_text=True, text_source="longtext",
+               text_truncated=False),
+        O.Post(sku="b", is_long_text=True, text_source="inline",
+               text_truncated=False),
+        O.Post(sku="c", is_long_text=True, text_source="longtext_failed",
+               text_truncated=True),
+        O.Post(sku="d", is_long_text=False, text_source="inline",
+               text_truncated=False),
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        prefix = os.path.join(d, "hot")
+        with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            # A stale, wrong request-time number under the same names must
+            # be overridden by the row-derived truth.
+            rc = O.finish_run(rows, prefix, "json", False, mode="hot",
+                              extra={"long_text_flagged": 99,
+                                     "long_text_recovered": 99,
+                                     "long_text_failed": 99}, **base)
+        eq(rc, 0, "rows written")
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        eq((meta["long_text_flagged"], meta["long_text_recovered"],
+            meta["long_text_already_complete"], meta["long_text_failed"]),
+           (3, 1, 1, 1),
+           "the sidecar matches the written rows, overriding engine counters")
+
+        # post mode: comments rows and no long-text keys whatsoever.
+        post_rows = [O.Post(sku="cmt1", is_long_text=False,
+                            text_source="inline", text_truncated=False,
+                            comment_id="cmt1", parent_sku="a")]
+        p2 = os.path.join(d, "post")
+        with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            O.finish_run(post_rows, p2, "json", False, mode="post", **base)
+        meta2 = json.load(open(p2 + ".meta.json", encoding="utf-8"))
+        leaked = [k for k in meta2 if k.startswith("long_text_")]
+        eq(leaked, [], "post mode's sidecar carries no long_text_* fields")
+
+
 def test_zero_width_is_not_a_truncation_signal():
     """Pinned as a KNOWN NON-SIGNAL, with the measurement.
 
@@ -2880,6 +2984,73 @@ def test_browserless_run_outcomes():
     check(_FakeClient.calls and "group_id=999999" in _FakeClient.calls[0],
           "--category is the feed group the request asks for")
 
+    # The long-text verdict in the sidecar is derived from the written rows
+    # and covers all three /longtext outcomes plus the no-flag case.
+    flagged_in_fixture = sum(1 for n in HOT["statuses"]
+                             if n.get("isLongText"))
+    eq(flagged_in_fixture, 1, "the hot fixture flags exactly one post")
+
+    # Default script: /longtext answers "empty" (nothing more to recover),
+    # so the one flagged post was whole all along.
+    rc, meta = _browserless_run({"hottimeline": [hot]}, ["--mode", "hot"])
+    eq(rc, 0, "a normal hot run completes")
+    eq((meta["long_text_flagged"], meta["long_text_recovered"],
+        meta["long_text_already_complete"], meta["long_text_failed"]),
+       (1, 0, 1, 0),
+       "endpoint said 'no more text': flagged but complete, not a failure")
+
+    # The endpoint actually returns the rest: a genuine recovery.
+    rc, meta = _browserless_run(
+        {"hottimeline": [hot], "statuses/longtext": [("content", LONGTEXT)]},
+        ["--mode", "hot"])
+    eq((meta["long_text_flagged"], meta["long_text_recovered"],
+        meta["long_text_already_complete"], meta["long_text_failed"]),
+       (1, 1, 0, 0), "a real long-text body is recovered and counted once")
+
+    # The endpoint cannot be reached (a wall classifies as a non-answer):
+    # the single flagged row stays truncated and is the failure bucket.
+    rc, meta = _browserless_run(
+        {"hottimeline": [hot],
+         "statuses/longtext": [("login_wall", LOGIN_WALL)]},
+        ["--mode", "hot"])
+    eq(rc, 0, "one dead long-text call does not interrupt the run")
+    eq((meta["long_text_flagged"], meta["long_text_recovered"],
+        meta["long_text_already_complete"], meta["long_text_failed"]),
+       (1, 0, 0, 1),
+       "an unreachable endpoint leaves the row truncated and counted failed")
+    eq(meta["text_truncated_rows"], 1,
+       "and the generic truncated-row count still agrees with the rows")
+
+    # A transport fault on the recovery call is the same outcome.
+    import weibo_api as W
+    rc, meta = _browserless_run(
+        {"hottimeline": [hot],
+         "statuses/longtext": [W.TransportError("connection refused")]},
+        ["--mode", "hot"])
+    eq((meta["long_text_flagged"], meta["long_text_failed"]), (1, 1),
+       "a raised transport error is a failed recovery, not a crash")
+
+    # user mode with no flagged posts: the four zeros are still written,
+    # because a verdict about the run is part of every run's sidecar.
+    rc, meta = _browserless_run(
+        {"getWaterFallContent": [("content", USER)],
+         "profile/info": [("content", PROFILE)]},
+        ["--mode", "user", "--url", "https://weibo.com/u/123456"])
+    eq(rc, 0, "a user run completes")
+    eq((meta["long_text_flagged"], meta["long_text_recovered"],
+        meta["long_text_already_complete"], meta["long_text_failed"]),
+       (0, 0, 0, 0), "a run with no flagged posts reports four zeros")
+
+    # post mode fetches no post bodies: no long-text fields may appear.
+    rc, meta = _browserless_run(
+        {"statuses/show": [("content", SHOW)],
+         "buildComments": [("content", COMMENTS)]},
+        ["--mode", "post",
+         "--url", "https://weibo.com/2803301701/RiPCAfklU"])
+    eq(rc, 0, "a post run completes")
+    leaked = [k for k in (meta or {}) if k.startswith("long_text_")]
+    eq(leaked, [], "post mode invents no long-text sidecar fields")
+
 
 # --- the browser engines, driven with a fake session -----------------------
 
@@ -3050,6 +3221,37 @@ def _engine_outcome_checks(mod, name):
                       ["--mode", "hot", "--category", "999999"])
     check(rec["urls"] and "group_id=999999" in rec["urls"][0],
           f"{name}: --category is the feed group the request asks for")
+
+    # The long-text verdict is row-derived in finish_run, so every engine
+    # gets it without passing counts itself. Default script answers
+    # "empty": the one flagged post was whole and is not a failure.
+    rec = _engine_run(mod, name, {"hottimeline": [hot]}, ["--mode", "hot"])
+    meta = rec["meta"] or {}
+    eq((meta.get("long_text_flagged"), meta.get("long_text_recovered"),
+        meta.get("long_text_already_complete"), meta.get("long_text_failed")),
+       (1, 0, 1, 0),
+       f"{name}: the sidecar reports the false-flag outcome from the rows")
+
+    # A walled /longtext leaves the flagged row truncated; the run still
+    # finishes and the failure is tallied rather than raised.
+    rec = _engine_run(
+        mod, name,
+        {"hottimeline": [hot], "statuses/longtext": [(403, LOGIN_WALL)]},
+        ["--mode", "hot"])
+    eq(rec["rc"], 0, f"{name}: a dead long-text call never breaks the run")
+    meta = rec["meta"] or {}
+    eq((meta.get("long_text_flagged"), meta.get("long_text_failed")),
+       (1, 1), f"{name}: the unreachable row is the failure bucket")
+    eq(meta.get("text_truncated_rows"), 1,
+       f"{name}: and it still holds the truncated short body")
+
+    # post mode: comments only, so the sidecar must not invent the fields.
+    rec = _engine_run(mod, name,
+                      {"statuses/show": [(200, SHOW)],
+                       "buildComments": [(200, COMMENTS)]}, post)
+    eq(rec["rc"], 0, f"{name}: a post run completes")
+    leaked = [k for k in (rec["meta"] or {}) if k.startswith("long_text_")]
+    eq(leaked, [], f"{name}: post mode carries no long_text_* fields")
 
     refusals = NEGATIVE_FLAG_CASES + (
         ["--concurrency", "0"], ["--concurrency", "2"],
