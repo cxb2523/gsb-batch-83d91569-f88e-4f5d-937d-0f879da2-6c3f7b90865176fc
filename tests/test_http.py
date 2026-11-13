@@ -85,3 +85,53 @@ def test_get_raises_blocked_error(blocked_page_html: str):
         assert "unauthorized accesses" in str(exc).lower() or "blocked" in str(exc).lower()
     else:
         raise AssertionError("expected BlockedError")
+
+
+def test_last_attempts_counts_every_proxy_request(list_page_html: str, blocked_page_html: str):
+    client = Client(
+        delay=0,
+        proxies=("http://proxy-a:8080", "http://proxy-b:8080"),
+        sleeper=lambda _seconds: None,
+    )
+    script = [blocked_page_html, list_page_html]
+    used: list[str | None] = []
+
+    class FakeResponse:
+        def __init__(self, text: str):
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeHttp:
+        def __init__(self, proxy: str | None):
+            self.proxy = proxy
+
+        def get(self, url: str) -> FakeResponse:
+            used.append(self.proxy)
+            return FakeResponse(script.pop(0))
+
+        def close(self) -> None:
+            return None
+
+    def open_fake() -> None:
+        client._http = FakeHttp(client._current_proxy())
+
+    client._http.close()
+    client._open = open_fake
+    open_fake()
+    body = client.get("https://avherald.com/")
+    assert "headline_avherald" in body
+    assert used == ["http://proxy-a:8080", "http://proxy-b:8080"]
+    assert client.last_attempts == 2
+    client.close()
+
+
+def test_last_attempts_resets_for_each_url(list_page_html: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=list_page_html)
+
+    client = Client(delay=0, transport=httpx.MockTransport(handler), sleeper=lambda _: None)
+    client.get("https://avherald.com/")
+    client.get("https://avherald.com/h?list=&opt=0")
+    assert client.last_attempts == 1

@@ -46,9 +46,11 @@ Run the same command again for the next batch. The saved list-page position is k
 
 `python -m avherald_scraper` is the same entry point.
 
-Exit status: `0` finished, `1` request failure or IP-block page, `2` invalid configuration.
+Exit status: `0` finished, `1` request failure, IP-block page, or unwritable page log, `2` invalid configuration.
 
 On a terminal, a progress bar stays on stderr while pages are fetched. `--quiet` hides it. The summary on stdout lists only the counts that changed.
+
+Every run also writes a page log: `<database stem>.pages.json` beside the database by default (`data/avherald.pages.json`). It lists each requested list URL in order with `status` (`ok`, `blocked`, `failed`), `attempts`, and a short `error`, plus the `resume_url` the next run will open. `--pages-log PATH` or `pages_log` in `config.ini` moves it. A blocked or failed page stops the walk, keeps the rows already stored, and leaves the bookmark on that page so the next run retries it.
 
 ## Configuration
 
@@ -68,6 +70,7 @@ Command-line flags win, then [`config.ini`](config.ini), then built-in defaults.
 | `--proxy` | direct | HTTP(S) proxy. Repeat the flag or use commas. A ban tries the next host |
 | `--timeout` | `20` | Request timeout in seconds |
 | `--user-agent` | tool identifier | `User-Agent` header |
+| `--pages-log` | `<db stem>.pages.json` | Per-run JSON page log |
 | `--dry-run` | off | Parse and print. Do not write |
 | `--resume` / `--no-resume` | on | Continue from the saved list page |
 | `--fresh` | off | Drop the saved position and start at the first list page |
@@ -90,6 +93,7 @@ Edit [`config.ini`](config.ini) in the project root. Booleans are `true` or `fal
 | `sort` | `crawl` | `--sort` |
 | `categories` | `crawl` | `-c`, `--category` |
 | `max_pages` | `crawl` | `-p`, `--pages` |
+| `pages_log` | `crawl` | `--pages-log` |
 | `resume` | `crawl` | `--resume` |
 | `fresh` | `crawl` | `--fresh` |
 | `dry_run` | `crawl` | `--dry-run` |
@@ -141,6 +145,8 @@ LIMIT 5;
 | `first_seen_at`, `last_seen_at` | UTC timestamps |
 
 A later crawl refreshes the heading, dates, icon, and category, and leaves `first_seen_at` in place. `crawl_state` holds the resume URL for each sort and category selection.
+
+`data/avherald.pages.json` records the last run: one entry per list URL with `status`, `attempts`, and `error`, plus the `resume_url` the next run will open. `--dry-run` writes this file too, without touching the database or the bookmark. See the [database reference](https://docs.kolja-nolte.com/av-herald) for the field table.
 
 ## Development
 

@@ -36,7 +36,8 @@ import sys
 # --db and --config are paths.
 from pathlib import Path
 
-# Download failures raised by the HTTP client.
+# Download failures raised by the HTTP client. They reach the CLI only from
+# the page log write or an unexpected path; a failed page is in the result.
 import httpx
 
 # Shown by --version. This is the string in __init__.py.
@@ -56,10 +57,7 @@ from avherald_scraper.config import (
     resolve_ini_path,
 )
 
-# A blocked IP is reported on its own, separate from a generic failure.
-from avherald_scraper.http import BlockedError
-
-# run() does the crawl. ScrapeResult is what we format afterward.
+# run() does the crawl. A blocked page is in the result, not an exception.
 from avherald_scraper.scraper import ScrapeResult, run
 
 # Help text lists the legal category names from this tuple.
@@ -206,6 +204,16 @@ Settings live in config.ini. CLI flags win.
         help="override the default User-Agent",
     )
 
+    # The per-run page log. Defaults to the database folder and stem.
+    where.add_argument(
+        "--pages-log",
+        type=Path,
+        default=None,
+        dest="pages_log",
+        metavar="PATH",
+        help="per-page JSON log (config.ini crawl.pages_log, else <db>.pages.json beside the database)",
+    )
+
     # BooleanOptionalAction gives both --dry-run and --no-dry-run.
     where.add_argument(
         "--dry-run",
@@ -297,18 +305,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # From here on, failures are crawl failures.
     try:
-        # This downloads list pages and maybe writes SQLite.
+        # This downloads list pages and maybe writes SQLite. A blocked or
+        # failed page is recorded in the result instead of raised, so the
+        # page log still gets written.
         result = run(config)
 
-    # The site served the ban page. The message already says what to try.
-    except BlockedError as exc:
-        # Same channel as other errors.
-        print(exc, file=sys.stderr)
-
-        # 1 means we started, then stopped.
-        return 1
-
-    # A failed download, a bad database, or a filesystem error.
+    # A bad database or a filesystem error, including a page log that could
+    # not be written. The run counts as failed.
     except (httpx.HTTPError, sqlite3.Error, OSError) as exc:
         # Prefix it so a stack-free message is still obviously a failure.
         print(f"scrape failed: {exc}", file=sys.stderr)
@@ -333,6 +336,23 @@ def main(argv: list[str] | None = None) -> int:
         elif config.dry_run or config.verbose:
             # One line per article.
             print(_format_records(result))
+
+    # A blocked or failed page ended the walk early. The page log says which.
+    if result.failed:
+        # The summary above still lists what was stored before the stop.
+        last = result.pages[-1] if result.pages else None
+
+        # Name the page and the reason on stderr, away from the summary.
+        if last is not None:
+            # The reason is already short. `blocked` or `failed` leads it.
+            print(
+                f"page {last.status}: {last.url}"
+                + (f" ({last.error})" if last.error else ""),
+                file=sys.stderr,
+            )
+
+        # 1 means the run started, then stopped.
+        return 1
 
     # 0 is success, including "kept nothing".
     return 0
@@ -362,6 +382,7 @@ def _cli_overrides(args: argparse.Namespace) -> dict:
         "proxy": args.proxy,
         "timeout": args.timeout,
         "user_agent": args.user_agent,
+        "pages_log": args.pages_log,
         "dry_run": args.dry_run,
         "verbose": args.verbose,
         "quiet": args.quiet,
@@ -397,6 +418,7 @@ def _format_show_config(config: RunConfig, ini_path: Path | None) -> str:
         f"delay: {config.delay}",
         f"timeout: {config.timeout}",
         f"proxy: {proxy}",
+        f"pages_log: {config.resolved_pages_log_path()}",
         f"resume: {str(config.resume).lower()}",
         f"fresh: {str(config.fresh).lower()}",
         f"dry_run: {str(config.dry_run).lower()}",
@@ -455,6 +477,11 @@ def _format_summary(result: ScrapeResult, config) -> str:
     if result.resumed_from:
         # The URL itself is noise. The fact of a resume is enough.
         lines.append("resumed")
+
+    # The per-page log is how a failure page and the next position are checked.
+    if result.pages_log_path is not None:
+        # Always name it, so the file can be found after a quiet-looking run.
+        lines.append(f"pages: {result.pages_log_path}")
 
     # The CLI prints this as one block.
     return "\n".join(lines)

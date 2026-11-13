@@ -129,6 +129,23 @@ class RunConfig:
     # Ignore that saved page and start at the first list page.
     fresh: bool = False
 
+    # Where the per-run page log goes. None means "beside the database".
+    pages_log: Path | None = None
+
+    def resolved_pages_log_path(self) -> Path:
+        """Return the page-log path, defaulting to the database's folder."""
+
+        # --pages-log, or `pages_log` in config.ini, wins.
+        if self.pages_log is not None:
+            # Relative paths stay relative to the working directory.
+            return Path(self.pages_log)
+
+        # `data/avherald.sqlite` becomes `data/avherald.pages.json`.
+        database = Path(self.database_path)
+
+        # Same folder, database stem, and the documented suffix.
+        return database.parent / f"{database.stem}.pages.json"
+
     def resolved_start_url(self) -> str:
         """Return the first list URL, either the override or a built one."""
 
@@ -457,6 +474,11 @@ def _apply(config: RunConfig, updates: Mapping[str, Any]) -> RunConfig:
     if "database_path" in cleaned:
         # Relative paths stay relative to the working directory.
         cleaned["database_path"] = Path(cleaned["database_path"])
+
+    # The page log is a path too. None keeps the "beside the database" default.
+    if "pages_log" in cleaned and cleaned["pages_log"] is not None:
+        # Relative paths stay relative to the working directory.
+        cleaned["pages_log"] = Path(cleaned["pages_log"])
 
     # Stored without a trailing slash so URL joins don't double up.
     if "base_url" in cleaned:

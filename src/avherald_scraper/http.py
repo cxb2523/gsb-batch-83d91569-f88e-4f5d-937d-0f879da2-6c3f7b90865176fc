@@ -79,6 +79,10 @@ class Client:
         # Counts finished downloads so the first page can skip the pause.
         self._gets = 0
 
+        # Requests sent for the URL most recently passed to get().
+        # A proxy retry adds to this, because it is still the same page.
+        self.last_attempts = 0
+
         # One leftover string argument still means a single proxy.
         if proxy and not proxies:
             # The scraper passes the tuple. Tests sometimes pass one string.
@@ -155,11 +159,15 @@ class Client:
         """Download `url` and return the HTML.
 
         A ban page or a transport error tries the next proxy. When every
-        proxy has failed, the last error is raised.
+        proxy has failed, the last error is raised. `last_attempts` reports
+        how many requests this call actually sent.
         """
 
         # One pause per page, not per proxy retry.
         slept = False
+
+        # Fresh count for this URL. Proxy retries add to it below.
+        self.last_attempts = 0
 
         # At least one attempt. Extra attempts exist only when more proxies do.
         while True:
@@ -173,6 +181,9 @@ class Client:
 
             # One GET. Redirects are already allowed on the client.
             try:
+                # Count the request before it goes out, so a failure still counts.
+                self.last_attempts += 1
+
                 # The open client targets the current proxy.
                 response = self._http.get(url)
 

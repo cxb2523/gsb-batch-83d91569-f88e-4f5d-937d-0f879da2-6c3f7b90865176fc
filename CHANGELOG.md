@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+* crawl(pages): write a per-run JSON page log with `status`, `attempts`, and `error` for each requested list URL, plus the `resume_url` the next run will open
+* config(pages_log): default the page log to `<database stem>.pages.json` beside the database, and allow `crawl.pages_log` in `config.ini` or `--pages-log PATH`
+* crawl(fail): stop at the first blocked or failed page, keep the rows already stored, and leave the bookmark on that page so the next run retries it
+* http(attempts): report how many requests one URL took, including proxy retries
+
 ## [2.0.0] - 2026-10-31
 
 Complete rewrite of the 1.x script as a `src/` package. Listing headlines are stored by article id.

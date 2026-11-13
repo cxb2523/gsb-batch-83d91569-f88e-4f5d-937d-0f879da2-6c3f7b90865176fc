@@ -34,13 +34,19 @@ import threading
 from collections import Counter
 
 # ScrapeResult is frozen. _Crawl is the mutable scratchpad while we walk.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+# The page log is stamped with the run's own start time.
+from datetime import UTC, datetime
 
 # The database path may be a string from config.ini.
 from pathlib import Path
 
 # HtmlFetcher is a small protocol so tests can pass a fake downloader.
 from typing import Protocol
+
+# A failed download reaches us as an httpx error, unless it is a block page.
+import httpx
 
 # Every knob for one run, already merged from the CLI and config.ini.
 from avherald_scraper.config import RunConfig
@@ -52,10 +58,13 @@ from avherald_scraper.db import Database
 from avherald_scraper.export import export_articles
 
 # The real downloader. Tests inject their own and never construct this.
-from avherald_scraper.http import Client
+from avherald_scraper.http import BlockedError, Client
 
 # What the parser returns, and what we eventually store.
 from avherald_scraper.models import ArticleRecord
+
+# The per-page outcome: status values, records, and the JSON writer.
+from avherald_scraper.pages_log import BLOCKED, FAILED, OK, PageRecord, write_pages_log
 
 # One listing page in, rows and a next URL out.
 from avherald_scraper.parser import parse_list_page
@@ -108,6 +117,15 @@ class ScrapeResult:
     # json, csv, or xlsx path when that copy was written. None for sqlite-only.
     export_path: Path | None = None
 
+    # One entry per requested list page, in request order.
+    pages: tuple[PageRecord, ...] = ()
+
+    # The page log this run wrote. Usually beside the database.
+    pages_log_path: Path | None = None
+
+    # True when a page was blocked or failed, so the CLI exits 1.
+    failed: bool = False
+
     # Tally the kept rows by category for the summary line.
     def category_counts(self) -> dict[str, int]:
         """Count the kept rows by category name."""
@@ -153,10 +171,19 @@ class _Crawl:
     # Set when we opened a saved URL instead of the first list page.
     resumed_from: str | None
 
+    # One record per URL requested, in request order.
+    pages: list[PageRecord] = field(default_factory=list)
+
+    # Set once a page is blocked or fails. Later pages are not requested.
+    failed: bool = False
+
 
 # Download listing pages and, unless this is a dry run, write them to SQLite.
 def run(config: RunConfig, *, client: HtmlFetcher | None = None) -> ScrapeResult:
     """Crawl listing pages and, unless this is a dry run, write SQLite."""
+
+    # The page log is stamped from this, before the first request.
+    run_started_at = datetime.now(UTC)
 
     # True when we created the HTTP client and therefore must close it.
     owned_client = False
@@ -199,6 +226,12 @@ def run(config: RunConfig, *, client: HtmlFetcher | None = None) -> ScrapeResult
     # Draws on a terminal. Quiet runs and pipes leave it blank.
     progress = _Progress(config)
 
+    # Set by the walk below. A setup or unexpected error leaves it None.
+    crawl: _Crawl | None = None
+
+    # Written once the walk has finished.
+    pages_log_path: Path | None = None
+
     # The database and the HTTP client both need closing if we opened them.
     try:
         # Walk pages until the limit, the page cap, or the end of the list.
@@ -215,7 +248,8 @@ def run(config: RunConfig, *, client: HtmlFetcher | None = None) -> ScrapeResult
             # Inserts and updates share one transaction.
             inserted, updated = db.upsert_many(crawl.records)
 
-            # The next invocation reads this bookmark back.
+            # The next invocation reads this bookmark back. A failed page
+            # leaves resume_url on that page, so the next run retries it.
             db.save_checkpoint(
                 config.crawl_key(),
                 resume_url=crawl.resume_url,
@@ -249,6 +283,17 @@ def run(config: RunConfig, *, client: HtmlFetcher | None = None) -> ScrapeResult
             # Shuts the httpx pool.
             close()
 
+    # A normal walk leaves a complete file. A write failure propagates as
+    # OSError, which the CLI reports as a failed run with exit code 1.
+    if crawl is not None:
+        # Dry runs write this file too, even though the database stays alone.
+        pages_log_path = write_pages_log(
+            config.resolved_pages_log_path(),
+            run_started_at=run_started_at,
+            pages=crawl.pages,
+            resume_url=crawl.resume_url,
+        )
+
     # Freeze the walk into the object the CLI prints.
     result = ScrapeResult(
         pages_fetched=crawl.pages_fetched,
@@ -261,6 +306,9 @@ def run(config: RunConfig, *, client: HtmlFetcher | None = None) -> ScrapeResult
         records=tuple(crawl.records),
         resumed_from=crawl.resumed_from,
         export_path=export_path,
+        pages=tuple(crawl.pages),
+        pages_log_path=pages_log_path,
+        failed=crawl.failed,
     )
 
     # The CLI formats this for humans.
@@ -492,6 +540,12 @@ def _crawl(
     # Empty bar first, so the wait for the first page is visible.
     progress.start()
 
+    # One record per URL, kept in the order the requests went out.
+    pages: list[PageRecord] = []
+
+    # Flipped when a page is blocked or fails. Nothing after it is requested.
+    failed = False
+
     # Stop at the limit even if more pages exist.
     while url and len(collected) < config.limit:
         # `--pages` is an extra cap on top of the article limit.
@@ -499,11 +553,39 @@ def _crawl(
             # Leave resume_url pointing at the page we did not fetch.
             break
 
-        # Raises BlockedError when the site returns the ban page.
-        html = fetcher.get(url)
+        # Raises BlockedError when the site returns the ban page, and an
+        # httpx error when every proxy has been used.
+        try:
+            # A block page raises before any HTML comes back.
+            html = fetcher.get(url)
+
+        # Every configured proxy served the ban page.
+        except BlockedError as exc:
+            # Still the same page, so the bookmark stays on it.
+            pages.append(PageRecord(url, BLOCKED, _attempts(fetcher), _reason(exc)))
+
+            # A blocked page ends the walk. The pages already parsed are kept.
+            failed = True
+
+            # resume_url is still this URL.
+            break
+
+        # Any other request or parsing problem is a plain failure.
+        except (httpx.HTTPError, OSError) as exc:
+            # Short, per the file format. The CLI prints the same reason.
+            pages.append(PageRecord(url, FAILED, _attempts(fetcher), _reason(exc)))
+
+            # Do not request a later page after a failure.
+            failed = True
+
+            # The next run retries this URL.
+            break
 
         # Count the page only after it actually came back.
         pages_fetched += 1
+
+        # A successful page still says how many proxy attempts it took.
+        pages.append(PageRecord(url, OK, _attempts(fetcher)))
 
         # next_url is None on the last page.
         rows, next_url = parse_list_page(html, source_page=url, base_url=config.base_url)
@@ -621,7 +703,37 @@ def _crawl(
         last_article_id=last_article_id,
         completed=completed,
         resumed_from=resumed_from,
+        pages=pages,
+        failed=failed,
     )
+
+
+def _attempts(fetcher: HtmlFetcher) -> int:
+    """Return how many requests the previous get() actually sent."""
+
+    # The real client tracks proxy retries. A test double may not.
+    value = getattr(fetcher, "last_attempts", None)
+
+    # Without the counter, one call is the only honest answer.
+    if not isinstance(value, int) or value < 1:
+        # At least the page was requested once.
+        return 1
+
+    # Includes every proxy that was tried for this URL.
+    return value
+
+
+def _reason(exc: BaseException) -> str:
+    """Return a short one-line reason for the page-log `error` field."""
+
+    # A missing message still has to say something.
+    text = str(exc).strip() or exc.__class__.__name__
+
+    # Keep the first line and bound the length so the JSON stays readable.
+    first = text.splitlines()[0]
+
+    # Long messages get cut. The details are still on stderr from the CLI.
+    return first[:200]
 
 
 # Choose the opening URL, and whether this run should stop at the first known id.
