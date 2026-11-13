@@ -1,0 +1,106 @@
+name: Auto-Renew PythonAnywhere
+
+on:
+  schedule:
+    - cron: "0 4 1,15 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  renew_and_keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Setup Python
+        run: |
+          echo "Python version:"
+          python3 --version
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt
+
+      - name: Run renewal script
+        env:
+          PA_USERNAME: ${{ secrets.PA_USERNAME }}
+          PA_PASSWORD: ${{ secrets.PA_PASSWORD }}
+          ACCOUNT_1_USERNAME: ${{ secrets.ACCOUNT_1_USERNAME }}
+          ACCOUNT_1_PASSWORD: ${{ secrets.ACCOUNT_1_PASSWORD }}
+          ACCOUNT_2_USERNAME: ${{ secrets.ACCOUNT_2_USERNAME }}
+          ACCOUNT_2_PASSWORD: ${{ secrets.ACCOUNT_2_PASSWORD }}
+          ACCOUNT_3_USERNAME: ${{ secrets.ACCOUNT_3_USERNAME }}
+          ACCOUNT_3_PASSWORD: ${{ secrets.ACCOUNT_3_PASSWORD }}
+          ACCOUNT_4_USERNAME: ${{ secrets.ACCOUNT_4_USERNAME }}
+          ACCOUNT_4_PASSWORD: ${{ secrets.ACCOUNT_4_PASSWORD }}
+          ACCOUNT_5_USERNAME: ${{ secrets.ACCOUNT_5_USERNAME }}
+          ACCOUNT_5_PASSWORD: ${{ secrets.ACCOUNT_5_PASSWORD }}
+          ACCOUNT_6_USERNAME: ${{ secrets.ACCOUNT_6_USERNAME }}
+          ACCOUNT_6_PASSWORD: ${{ secrets.ACCOUNT_6_PASSWORD }}
+          ACCOUNT_7_USERNAME: ${{ secrets.ACCOUNT_7_USERNAME }}
+          ACCOUNT_7_PASSWORD: ${{ secrets.ACCOUNT_7_PASSWORD }}
+          ACCOUNT_8_USERNAME: ${{ secrets.ACCOUNT_8_USERNAME }}
+          ACCOUNT_8_PASSWORD: ${{ secrets.ACCOUNT_8_PASSWORD }}
+          ACCOUNT_9_USERNAME: ${{ secrets.ACCOUNT_9_USERNAME }}
+          ACCOUNT_9_PASSWORD: ${{ secrets.ACCOUNT_9_PASSWORD }}
+          ACCOUNT_10_USERNAME: ${{ secrets.ACCOUNT_10_USERNAME }}
+          ACCOUNT_10_PASSWORD: ${{ secrets.ACCOUNT_10_PASSWORD }}
+          ACCOUNT_CREDENTIALS_JSON: ${{ secrets.ACCOUNT_CREDENTIALS_JSON }}
+        run: python3 renew_python_anywhere.py
+
+      - name: Keep Alive Workflow (Success)
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create logs directory if it doesn't exist
+          mkdir -p .github/logs
+
+          LOG_FILE=".github/logs/workflow_runs.log"
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          # Commit the log
+          git add $LOG_FILE
+          git commit -m "log: workflow run SUCCESS on $TIMESTAMP"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          git push origin "$REF_NAME"
+
+          echo "✅ Success logged and committed"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+
+      - name: Keep Alive Workflow (Failure)
+        if: failure()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create logs directory if it doesn't exist
+          mkdir -p .github/logs
+
+          LOG_FILE=".github/logs/workflow_runs.log"
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          # Commit the log
+          git add $LOG_FILE
+          git commit -m "log: workflow run FAILED on $TIMESTAMP"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
+          git push origin "$REF_NAME"
+
+          echo "❌ Failure logged and committed"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
