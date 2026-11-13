@@ -243,7 +243,14 @@ and the category's own `total_results` and `page_count`. `status` is one of:
 |---|---|---|
 | `complete` | 0 | the whole listing was read — the site ran out of products, every page it reported was fetched, or the products reached its own total |
 | `limited` | 0 | every page asked for was fetched, but `--pages` ended the run before the listing did: a sample |
-| `partial` | 6 | some pages were gathered, then a page failed — including a page inside the category's own total that came back with no rows (`stop_reason: parser_found_nothing`) |
+| `partial` | 6 | some pages were gathered, then a page failed — including a page inside the category's own total that came back with no rows (`stop_reason: parser_found_nothing` / `page_not_painted`), and a page 2 that returned page 1's models because `?page=N` did not reach it (`stop_reason: pagination_not_addressable`) |
+
+A run that stops early names **every** page it did not read in
+`pages_failed`, and `pages_completed` counts only the pages it did: the two
+come from one predicate per engine, so a page cannot be counted as completed
+and listed as failed at the same time. A page-2 URL that serves page 1's
+models is a failed page by that measure — the response arrived, but not with
+page 2 in it — and the run ends `partial`, never `complete`.
 
 `diff_runs.py` refuses to compare two runs unless both are `complete`, both
 have a sidecar, and both read the same listing; `--force` overrides it. Until
@@ -301,6 +308,15 @@ with the failing page named in the sidecar), a category page that never
 loaded, a `--pages` sample of a longer category (`limited`, and refused by
 `diff_runs.py`), and a page whose form points the POST anywhere but its own
 `https://…lg.com/{locale}/mkt/ajax/`.
+
+The browser engine is driven the same way, without a browser: `scrape()` runs
+over local HTML fixtures in the site's own markup, with the real classifier
+and the real grid parser underneath. Those cases pin the ending judgements —
+two addressable pages and an exhausted third (`complete`, exit 0), a page 2
+that returns page 1's models (`partial`, exit 6, page 2 in `pages_failed`), a
+concurrent page 3 served with no parsed rows (`partial`, exit 6, page 3 in
+`pages_failed`), a page 2 that is the category's last page (`complete`,
+exit 0), and a `--pages` sample (`limited`, exit 0).
 
 ## Guides
 

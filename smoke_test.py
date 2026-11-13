@@ -3443,6 +3443,249 @@ def check_zero_rows_never_end_a_run_as_complete():
     eq("and page 2 listed as failed", (meta or {}).get("pages_failed"), [2])
 
 
+# ---------------------------------------------------------------------------
+# The two ending judgements: a page that could not be ADDRESSED, and a page
+# that was served but parsed to nothing under concurrency (2026-11-14)
+# ---------------------------------------------------------------------------
+# lg.com's /ru and /ua listings publish no next-page link. Pagination is a
+# constructed `?page[number]=N` verified against page 2's model set, and the
+# engines already record `pagination_not_addressable` when that check fails.
+# What they got WRONG was the ending: `finish_run` saw two "completed" pages
+# and wrote a complete-looking run, and `pages_failed` was EMPTY because the
+# duplicate page 2 counted as read. The second defect sits in the concurrent
+# path: a page served with a grid but zero parsed rows stopped dispatch and
+# was never listed among the failed pages.
+def _pw_html(models):
+    """A served /ru/televisions grid page in the fixture's own shape.
+
+    Built from the same machinery the classifier keys on — the site's asset
+    paths, `#categoryFilterForm`, `.product-list-box` — with one card per
+    model code, so the REAL classifier and the REAL grid parser run over it.
+    """
+    assets = "".join(f'<link rel="stylesheet" href="/lg5-common-gp/css/p{i}.css"/>'
+                     for i in range(6))
+    cards = "".join(
+        f'<div class="item"><a href="/ru/televisions/lg-{m.lower()}">'
+        f'<span data-model-name="{m}" data-model-year="2026">'
+        f'<span class="model-group"><a class="active">55"</a></span>'
+        f'</span></a></div>' for m in models)
+    return (f'<!DOCTYPE html><html><head>{assets}</head><body>'
+            f'<form id="categoryFilterForm" method="post" '
+            f'action="/ru/mkt/ajax/category/retrieveCategoryProductList">'
+            f'<input name="categoryId" value="CT20206007"/></form>'
+            f'<div class="product-list-box">{cards}</div></body></html>')
+
+
+def _pw_shell_html():
+    """Served, built of LG's own assets, but the grid has not painted."""
+    assets = "".join(f'<link rel="stylesheet" href="/lg5-common-gp/css/p{i}.css"/>'
+                     for i in range(6))
+    return (f'<!DOCTYPE html><html><head>{assets}</head><body>'
+            f'<p>Loading the category…</p></body></html>')
+
+
+def check_pagination_and_zero_rows_end_the_run_honestly():
+    """Drive playwright_scraper.scrape() over local HTML — no browser, no
+    network. Every page is a fixture in the site's own markup, and the
+    classifier and parser underneath are the real ones.
+
+    A page 2 that returns page 1's model set proves `?page=N` did not work.
+    That is a PARTIAL run (exit 6), not a complete one, and page 2 belongs
+    in `pages_failed`: it answered, but not with its own page. A page 3..N
+    that was served and parsed to zero rows belongs there too, however the
+    run fetched it (workers or one at a time).
+    """
+    print("\n[pagination that does not reach the page, and pages that read nothing]")
+    engine = ENGINES.get("playwright_scraper")
+    if engine is None:
+        skip("pagination/zero-rows ending judgements", "playwright not installed")
+        return
+
+    class _StubPW:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Page:
+        def __init__(self, pages, base):
+            self._pages, self._base, self.url = pages, base, base
+            self._html = ""
+
+        def goto(self, url, **kw):
+            self.url = url
+            num = 1
+            if "page=" in url:
+                num = int(url.split("page=")[1].split("&")[0])
+            spec = self._pages.get(num, ())       # past the end: empty grid
+            self._html = spec if isinstance(spec, str) else _pw_html(list(spec))
+
+            class _Response:
+                status = 200
+            return _Response()
+
+        def wait_for_timeout(self, *a):
+            pass
+
+        def content(self):
+            return self._html
+
+        def reload(self, **kw):
+            pass
+
+        def close(self):
+            pass
+
+        def evaluate(self, *a, **kw):
+            return {}
+
+        def locator(self, *a):
+            class _L:
+                def count(inner):
+                    return 6
+            return _L()
+
+    class _Session:
+        def __init__(self, *a, **kw):
+            self.page = None
+            self.pool = None
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+        def relaunch(self):
+            pass
+
+    def run(pages, n_pages, concurrency=1):
+        base = "https://www.lg.com/ru/televisions"
+        tmp = tempfile.mkdtemp()
+        out = os.path.join(tmp, "pw")
+
+        def fetch(session, args, pool, page_num, url):
+            # The real classifier and the real grid parser, over local HTML.
+            session.page.goto(url)
+            html = session.page.content()
+            outcome = engine.PageOutcome(page_num=page_num, url=url)
+            outcome.final_url = url
+            outcome.state = page_flow.classify(html, status_code=200,
+                                               url=url, page_num=page_num)
+            if outcome.state.state == page_flow.CONTENT:
+                outcome.products = parse_products(html, url, page=page_num)
+            return outcome
+
+        original = (engine.sync_playwright, engine._BrowserSession,
+                    engine._fetch_one_page, engine.proxy_pool_from_args,
+                    engine.check_exit_or_raise)
+
+        def make_session(*a, **kw):
+            session = _Session()
+            session.page = _Page(pages, base)
+            return session
+
+        args = SimpleNamespace(url=base, pages=n_pages, delay=0,
+                               concurrency=concurrency, cdp_endpoint=None,
+                               out=out, format="json", allow_empty=False,
+                               retries=1, proxy_block_retries=0, retry_delay=0,
+                               dump_html=None, category=None)
+        try:
+            engine.sync_playwright = lambda: _StubPW()
+            engine._BrowserSession = make_session
+            engine._fetch_one_page = fetch
+            engine.proxy_pool_from_args = lambda a: None
+            engine.check_exit_or_raise = lambda *a, **k: None
+            with redirect_stdout(io.StringIO()):
+                rc = engine.scrape(args)
+        finally:
+            (engine.sync_playwright, engine._BrowserSession,
+             engine._fetch_one_page, engine.proxy_pool_from_args,
+             engine.check_exit_or_raise) = original
+        meta = _meta(out)
+        try:
+            shutil.rmtree(tmp)
+        except OSError:
+            pass
+        return rc, meta or {}
+
+    # 1. Two pages that can be paged through, and page 2 brings new models:
+    #    the constructed URL works, so the run is complete and exit 0.
+    rc, meta = run({1: ["AAA1", "AAA2", "AAA3"], 2: ["BBB1", "BBB2", "BBB3"]}, 3)
+    eq("two addressable pages then an exhausted one: complete, exit 0", rc, 0)
+    eq("with the site's own end as the reason", meta.get("status"), "complete")
+    eq("and no page listed as failed", meta.get("pages_failed"), [])
+    eq("having read all three pages", meta.get("pages_completed"), 3)
+    eq("and kept page 2's new models", meta.get("products"), 6)
+    eq("the sidecar records that pages WERE addressable", meta.get("addressable"), True)
+
+    # 2. Page 2 is page 1's model set again: `?page=2` did not reach page 2.
+    #    PARTIAL, exit 6, and page 2 in pages_failed — a partial run that
+    #    names no failed page is the defect this pins.
+    rc, meta = run({1: ["CCC1", "CCC2", "CCC3"], 2: ["CCC1", "CCC2", "CCC3"]}, 2)
+    eq("a page 2 that repeats page 1 is a partial run, exit 6",
+       rc, EXIT_PARTIAL)
+    eq("with the stop reason preserved", meta.get("stop_reason"),
+       "pagination_not_addressable")
+    eq("the sidecar does not call it complete", meta.get("status"), "partial")
+    eq("and page 2 is a failed page, not a completed one",
+       meta.get("pages_failed"), [2])
+    eq("so only page 1 counts as completed", meta.get("pages_completed"), 1)
+    eq("and the duplicates never reach the output", meta.get("products"), 3)
+
+    # 3. Under --concurrency, a page served with a grid but parsed to zero
+    #    rows stops dispatch and must be listed as failed — the case the old
+    #    bookkeeping missed because it only looked at `not ok / read_nothing`
+    #    in one place and the concurrent branch reported the reason but not
+    #    the page.
+    rc, meta = run({1: ["DDD1"], 2: ["EEE1"], 3: _pw_shell_html(),
+                    4: ["FFF1"]}, 4, concurrency=2)
+    eq("a concurrent page served with no readable rows is exit 6",
+       rc, EXIT_PARTIAL)
+    eq("with the reason page_flow gives for an unread page",
+       meta.get("stop_reason"), "page_not_painted")
+    eq("the sidecar says partial", meta.get("status"), "partial")
+    eq("and names the page that read nothing", meta.get("pages_failed"), [3])
+
+    # 4. Page 2 IS the last page of the category: the listing genuinely ended
+    #    there, so the run is complete and exit 0 — an empty grid is a
+    #    property of the DATA, not a failure.
+    rc, meta = run({1: ["GGG1", "GGG2"]}, 2)
+    eq("a page 2 that is the category's last page is still complete, exit 0",
+       rc, 0)
+    eq("with the site's own end as the reason", meta.get("stop_reason"),
+       "listing_exhausted")
+    eq("and nothing in pages_failed", meta.get("pages_failed"), [])
+    eq("while both pages count as read", meta.get("pages_completed"), 2)
+
+    # 5. The --pages ceiling is untouched: reading only part of a listing is
+    #    `limited` (exit 0), never `complete` and never `partial`.
+    rc, meta = run({1: ["HHH1", "HHH2"], 2: ["III1", "III2"]}, 2)
+    eq("--pages short of the listing's end is a limited run, exit 0", rc, 0)
+    eq("and the sidecar says limited", meta.get("status"), "limited")
+    eq("with no page reported as failed", meta.get("pages_failed"), [])
+
+    # 6. The other engines' page bookkeeping uses the SAME predicate, read off
+    #    disk so the check runs with no driver installed.
+    for name in ("puppeteer_scraper.py", "selenium_scraper.py"):
+        src = open(os.path.join(REPO, name), encoding="utf-8").read()
+        check(f"{name}: one predicate decides both completed and failed pages",
+              "ok_pages = [o for o in outcomes if not o.failed]" in src
+              and "failed_pages = [o.page_num for o in outcomes if o.failed]" in src)
+        check(f"{name}: an unaddressable page 2 is marked, not dropped from "
+              f"the record",
+              "outcome.unaddressable = True" in src
+              and "outcomes.remove(outcome)" not in src)
+
+    # 7. The browserless engine keeps page 2 in its record too, so the same
+    #    sidecar contract holds there.
+    sac_src = open(os.path.join(REPO, "scraper_api_client.py"), encoding="utf-8").read()
+    check("scraper_api_client.py: an unaddressable page 2 is named, not "
+          "popped from the record",
+          "unread.add(page_num)" in sac_src and "outcomes.pop()" not in sac_src)
+
+
 def check_output_file_modes():
     """mkstemp creates at 0600 and os.replace keeps it, so every output was
     readable by its owner only, and a rewrite narrowed a shared 0664 file."""
@@ -3717,6 +3960,7 @@ def main() -> int:
                   check_family_sync_2026_09_29, check_supply_chain,
                   check_exit_5_when_content_was_never_obtained,
                   check_zero_rows_never_end_a_run_as_complete,
+                  check_pagination_and_zero_rows_end_the_run_honestly,
                   check_output_file_modes, check_csv_formulas_are_neutralised,
                   check_every_solve_goes_through_the_page_budget,
                   check_credential_scan_judges_paths_inside_the_repo,

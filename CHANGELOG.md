@@ -7,6 +7,27 @@ means fixes, not that every flag is frozen.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A listing whose pages cannot be addressed by URL no longer reports a
+  complete-looking run.** lg.com's `/ru` and `/ua` category pages publish no
+  next-page link, so page 2 is a constructed `?page[number]=2` verified
+  against page 1's model codes. When that check failed the engine already
+  recorded `stop_reason: pagination_not_addressable`, but `finish_run` saw
+  every fetched page counted as completed and still decided from that — and
+  the sidecar's `pages_failed` was empty, because the duplicated page 2
+  counted as read. The run now ends `partial` (exit 6) with that stop reason
+  and page 2 in `pages_failed`, in every engine (Playwright, pyppeteer,
+  Selenium and the Scraper API client).
+- **A page served under `--concurrency` with a grid but no parsed rows is
+  now a failed page.** Pages 3..N that come back `read_nothing` already
+  stopped dispatch, but the concurrent path did not list the page in
+  `pages_failed`; the run now reports `partial` (exit 6) with
+  `page_flow.zero_rows_reason` as its `stop_reason` and the page's number
+  listed. A page 2 that IS the category's last page still ends
+  `listing_exhausted` (exit 0), and `--pages` short of the listing's end is
+  still `limited` (exit 0).
+
 ### Changed
 
 - Dependencies: `certifi` 2026.7.22 -> 2026.10.23 in every lock (PYSEC-2026-4320, fixed in 2026.10.18). In the CI tooling lock only, `filelock` 4.0.3 -> 4.2.9 on Python 3.11+ (4.1.0 on 3.10, the newest release that supports it) and `msgpack` 1.2.2 -> 1.2.4, both dependencies of `pip-audit`. No other pins moved.

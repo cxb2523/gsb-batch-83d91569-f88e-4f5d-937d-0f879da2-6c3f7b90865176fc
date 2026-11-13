@@ -119,6 +119,11 @@ class PageOutcome:
     products: List = field(default_factory=list)
     state: Optional[page_flow.PageState] = None
     load_failed: bool = False
+    # The address asked for this page and the answer was another page's rows:
+    # `?page[number]=N` did not reach page N, so nothing after page 1 can be
+    # fetched by URL. The response was SERVED and parsed — but those rows are
+    # page 1's, which is exactly why this page must not count as read.
+    unaddressable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -138,6 +143,19 @@ class PageOutcome:
         lost its products — is never a reason to call the run complete.
         """
         return self.ok and not self.complete_here and not self.products
+
+    @property
+    def failed(self) -> bool:
+        """Did this page bring back what the run asked it for?
+
+        ONE predicate for every place that counts pages, so a page cannot be
+        counted as completed in `pages_completed` while it is simultaneously
+        the page the sidecar names in `pages_failed`. Three things make it a
+        failure: the page never answered (`not ok`), it answered but was not
+        read (`read_nothing`), or the URL that asked for it did not reach it
+        (`unaddressable`).
+        """
+        return not self.ok or self.read_nothing or self.unaddressable
 
 
 # Chromium's own names for "the proxy is the problem, not the site". Matched
@@ -746,6 +764,11 @@ def scrape(args) -> int:
                     # The constructed URL came back with page 1's products.
                     # Stopping and SAYING so is the whole point: this is the
                     # failure that reports a complete run holding one page.
+                    # The page is recorded as failed too: it answered, but the
+                    # answer was another page's, so it was never READ — and a
+                    # sidecar that says partial while naming no failed page
+                    # hides which page the data is missing from.
+                    second.unaddressable = True
                     logger.error(
                         "Page 2 (%s) returned nothing that page 1 did not "
                         "already have, so this listing cannot be paged through "
@@ -765,9 +788,15 @@ def scrape(args) -> int:
                         more, unattempted, ran_out = _fetch_pages_concurrently(
                             args, pool, specs, concurrency)
                         outcomes.extend(more)
-                        failed = [o for o in more if not o.ok or o.read_nothing]
+                        failed = [o for o in more if o.failed]
                         if failed:
-                            worst = min(failed, key=lambda o: o.page_num)
+                            # A page that was SERVED and yielded no rows names
+                            # itself, even when a lower-numbered page failed to
+                            # load: "this page was not read" is a fact about
+                            # the data, and the sidecar's stop_reason should say
+                            # that rather than blame a timeout on another page.
+                            unread = [o for o in failed if o.read_nothing]
+                            worst = min(unread or failed, key=lambda o: o.page_num)
                             if worst.read_nothing:
                                 stop_reason = page_flow.zero_rows_reason(worst.state)
                             else:
@@ -825,9 +854,12 @@ def scrape(args) -> int:
                         "earlier page.", oc.page_num, len(oc.products) - len(fresh))
         all_products.extend(fresh)
 
-    # A page served but not read is a failed page, not a completed one.
-    ok_pages = [o for o in outcomes if o.ok and not o.read_nothing]
-    failed_pages = [o.page_num for o in outcomes if not o.ok or o.read_nothing]
+    # A page served but not read — or a page whose URL did not reach it — is
+    # a failed page, not a completed one. Both sides of this come from ONE
+    # predicate (`PageOutcome.failed`), so a page can never be counted in
+    # `pages_completed` and named in `pages_failed` at the same time.
+    ok_pages = [o for o in outcomes if not o.failed]
+    failed_pages = [o.page_num for o in outcomes if o.failed]
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
 

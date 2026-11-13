@@ -238,6 +238,10 @@ def _fetch_page(args, page_num: int, url: str):
 
 def scrape(args) -> int:
     outcomes: List[Tuple[int, object, list]] = []
+    # Pages that were served but never READ: no rows, or rows that were
+    # another page's. Not a property of the outcome tuple — it is a fact about
+    # whether the page's own URL reached it.
+    unread: set = set()
     blocked = False
     stop_reason = "completed"
     total_results = None
@@ -292,7 +296,11 @@ def scrape(args) -> int:
                     logger.error("Page 2 returned nothing page 1 did not already "
                                  "have — this listing cannot be paged through by "
                                  "URL. Stopping and reporting a PARTIAL run.")
-                    outcomes.pop()
+                    # Keep the page in `unread`: its rows are page 1's, so it
+                    # was served and not READ, and the sidecar must name it in
+                    # `pages_failed` rather than report a partial run with no
+                    # page to point at.
+                    unread.add(page_num)
                     stop_reason = "pagination_not_addressable"
                     break
             fresh = [p for p in products if p.sku is None or p.sku not in seen]
@@ -310,8 +318,10 @@ def scrape(args) -> int:
 
     def _read(o) -> bool:
         # Fetched, not blocked, and either rows or the site's own "nothing
-        # here". A served page that yielded no rows was not read.
+        # here". A served page that yielded no rows was not read, and neither
+        # was one whose URL brought back another page's rows.
         return (o[1] is not None and not o[1].policy.blocked
+                and o[0] not in unread
                 and (bool(o[2]) or o[1].policy.complete))
 
     ok_pages = [o for o in outcomes if _read(o)]

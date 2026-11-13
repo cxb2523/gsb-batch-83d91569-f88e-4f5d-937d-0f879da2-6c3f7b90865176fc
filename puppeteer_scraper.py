@@ -91,6 +91,11 @@ class PageOutcome:
     products: List = field(default_factory=list)
     state: Optional[page_flow.PageState] = None
     load_failed: bool = False
+    # The address asked for this page and the answer was another page's rows:
+    # `?page[number]=N` did not reach page N, so nothing after page 1 can be
+    # fetched by URL. The response was SERVED and parsed — but those rows are
+    # page 1's, which is exactly why this page must not count as read.
+    unaddressable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -109,6 +114,18 @@ class PageOutcome:
         lost its products — is never a reason to call the run complete.
         """
         return self.ok and not self.complete_here and not self.products
+
+    @property
+    def failed(self) -> bool:
+        """Did this page bring back what the run asked it for?
+
+        ONE predicate for every place that counts pages, so a page cannot be
+        counted as completed in `pages_completed` while it is simultaneously
+        the page the sidecar names in `pages_failed`: the page never answered
+        (`not ok`), it answered with no rows (`read_nothing`), or the URL that
+        asked for it did not reach it (`unaddressable`).
+        """
+        return not self.ok or self.read_nothing or self.unaddressable
 
 
 _PROXY_ERROR_MARKERS = (
@@ -576,13 +593,19 @@ async def _scrape(args) -> int:
                 if page_num == 2:
                     addressable = _addressable(previous, outcome)
                     if not addressable:
+                        # Served, but with page 1's rows: the URL did not
+                        # reach page 2, so it was never READ. Kept in
+                        # `outcomes` (its duplicates are dropped from the
+                        # output) and named in `pages_failed` — a sidecar that
+                        # says partial while naming no failed page hides which
+                        # page the data is missing from.
+                        outcome.unaddressable = True
                         logger.error(
                             "Page 2 (%s) returned nothing page 1 did not already "
                             "have, so this listing cannot be paged through by "
                             "URL. Stopping and reporting a PARTIAL run rather "
                             "than a complete-looking one.", outcome.url)
                         stop_reason = "pagination_not_addressable"
-                        outcomes.remove(outcome)
                         break
                 fresh = [p for p in outcome.products
                          if p.sku is None or p.sku not in seen]
@@ -605,9 +628,11 @@ async def _scrape(args) -> int:
                         oc.page_num, len(oc.products) - len(fresh))
         all_products.extend(fresh)
 
-    # A page served but not read is a failed page, not a completed one.
-    ok_pages = [o for o in outcomes if o.ok and not o.read_nothing]
-    failed_pages = [o.page_num for o in outcomes if not o.ok or o.read_nothing]
+    # A page served but not read — or a page whose URL did not reach it — is
+    # a failed page, not a completed one. Both sides come from ONE predicate,
+    # so a page cannot be in `pages_completed` and `pages_failed` at once.
+    ok_pages = [o for o in outcomes if not o.failed]
+    failed_pages = [o.page_num for o in outcomes if o.failed]
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
     return finish_run(all_products, args.out, args.format, args.allow_empty,
