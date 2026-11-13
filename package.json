@@ -1,0 +1,45 @@
+{
+  "name": "chadmin",
+  "version": "2.0.0",
+  "description": "ClickHouse admin panel — query monitor and access management for single nodes, self-hosted clusters, and ClickHouse Cloud.",
+  "main": "index.js",
+  "scripts": {
+    "dev-server": "vite --config frontend/vite.config.ts",
+    "dev": "vite --config frontend/vite.config.ts",
+    "watch": "CHOKIDAR_USEPOLLING=true vite build --watch --config frontend/vite.config.ts",
+    "build": "vite build --config frontend/vite.config.ts"
+  },
+  "keywords": [
+    "clickhouse",
+    "admin",
+    "dashboard",
+    "symfony"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@clickhouse/click-ui": "0.1.0",
+    "clipboard-polyfill": "4.1.1",
+    "date-fns": "4.1.0",
+    "dayjs": "1.11.20",
+    "highlight.js": "11.11.1",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "react-transition-group": "4.4.5",
+    "sql-formatter": "15.7.3",
+    "styled-components": "6.4.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.4",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/react-transition-group": "4.4.12",
+    "@vitejs/plugin-react": "6.0.1",
+    "autoprefixer": "10.5.0",
+    "postcss": "8.5.25",
+    "tailwindcss": "4.2.4",
+    "typescript": "6.0.3",
+    "vite": "8.0.16",
+    "vite-plugin-static-copy": "4.1.0"
+  }
+}

@@ -1,0 +1,75 @@
+# This file is the entry point to configure your own services.
+# Files in the packages/ subdirectory configure your dependencies.
+
+parameters:
+    # Defaults for env vars — prevents failures when .env omits newer variables.
+    env(CLICKHOUSE_HTTPS): 'false'
+    env(CLICKHOUSE_MODE): ''
+    env(CLICKHOUSE_CLUSTER_NAME): ''
+    env(CLICKHOUSE_CLOUD_KEY_ID): ''
+    env(CLICKHOUSE_CLOUD_KEY_SECRET): ''
+    env(CLICKHOUSE_CLOUD_ORG_ID): ''
+    env(CLICKHOUSE_CLOUD_SERVICE_ALLOWLIST): ''
+    env(CLICKHOUSE_CLOUD_USE_PRIVATE_DNS): 'false'
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    App\:
+        resource: '../src/*'
+        exclude: '../src/{DependencyInjection,Entity,Migrations,Tests,Kernel.php}'
+
+    App\Controller\:
+        resource: '../src/Controller'
+        tags: ['controller.service_arguments']
+
+    # Legacy resolver — kept for back-compat (`?string $cluster` controller arg).
+    App\Resolver\ClusterNameResolver:
+        tags:
+            - { name: controller.argument_value_resolver, priority: 150 }
+
+    # New resolver — `Target $target` controller arg, driven by TopologyProvider.
+    App\Resolver\TargetResolver:
+        tags:
+            - { name: controller.argument_value_resolver, priority: 150 }
+
+    App\Controller\HtmxController:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    App\Service\ClickHouseClient:
+        public: true
+        arguments:
+            - '%env(CLICKHOUSE_HOST)%'
+            - '%env(CLICKHOUSE_PORT)%'
+            - '%env(CLICKHOUSE_USERNAME)%'
+            - '%env(CLICKHOUSE_PASSWORD)%'
+            - '%env(CLICKHOUSE_DB_NAME)%'
+            - '%env(bool:CLICKHOUSE_HTTPS)%'
+
+    App\Topology\TopologyConfig:
+        arguments:
+            $modeOverride:            '%env(CLICKHOUSE_MODE)%'
+            $host:                    '%env(CLICKHOUSE_HOST)%'
+            $port:                    '%env(CLICKHOUSE_PORT)%'
+            $username:                '%env(CLICKHOUSE_USERNAME)%'
+            $password:                '%env(CLICKHOUSE_PASSWORD)%'
+            $database:                '%env(CLICKHOUSE_DB_NAME)%'
+            $https:                   '%env(bool:CLICKHOUSE_HTTPS)%'
+            $clusterNameOverride:     '%env(CLICKHOUSE_CLUSTER_NAME)%'
+            $cloudKeyId:              '%env(CLICKHOUSE_CLOUD_KEY_ID)%'
+            $cloudKeySecret:          '%env(CLICKHOUSE_CLOUD_KEY_SECRET)%'
+            $cloudOrgId:              '%env(CLICKHOUSE_CLOUD_ORG_ID)%'
+            $cloudServiceAllowlist:   '%env(CLICKHOUSE_CLOUD_SERVICE_ALLOWLIST)%'
+            $cloudUsePrivateDns:      '%env(bool:CLICKHOUSE_CLOUD_USE_PRIVATE_DNS)%'
+
+    App\Topology\TopologyProvider:
+        public: true
+
+    App\Topology\TopologyDetector:
+        public: true
+
+    App\ClickHouse\ConnectionManager:
+        public: true

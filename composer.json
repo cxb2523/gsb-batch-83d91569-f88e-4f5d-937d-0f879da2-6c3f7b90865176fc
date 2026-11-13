@@ -1,0 +1,74 @@
+{
+  "type": "project",
+  "license": "MIT",
+  "require": {
+    "php": "~8.5.0",
+    "ext-ctype": "*",
+    "ext-curl": "*",
+    "ext-iconv": "*",
+    "ext-json": "*",
+    "ext-pdo": "*",
+    "smi2/phpclickhouse": "1.26.417",
+    "symfony/console": "8.0.8",
+    "symfony/dotenv": "8.0.8",
+    "symfony/flex": "2.10.0",
+    "symfony/framework-bundle": "8.0.8",
+    "symfony/http-client": "8.0.8",
+    "symfony/http-foundation": "8.1.7",
+    "symfony/monolog-bundle": "4.0.2",
+    "symfony/twig-bundle": "8.0.8",
+    "symfony/var-dumper": "8.0.8",
+    "symfony/yaml": "8.0.12",
+    "twig/extra-bundle": "3.24.0",
+    "twig/twig": "3.27.1"
+  },
+  "require-dev": {
+    "roave/security-advisories": "dev-latest",
+    "symfony/debug-bundle": "8.0.8",
+    "symfony/maker-bundle": "1.67.0",
+    "symfony/stopwatch": "8.0.8",
+    "symfony/web-profiler-bundle": "8.0.13"
+  },
+  "config": {
+    "preferred-install": {
+      "*": "dist"
+    },
+    "sort-packages": true,
+    "allow-plugins": {
+      "symfony/flex": true
+    }
+  },
+  "autoload": {
+    "psr-4": {
+      "App\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "App\\Tests\\": "tests/"
+    }
+  },
+  "replace": {
+  },
+  "scripts": {
+    "auto-scripts": {
+      "cache:clear": "symfony-cmd",
+      "assets:install %PUBLIC_DIR%": "symfony-cmd"
+    },
+    "post-install-cmd": [
+      "@auto-scripts"
+    ],
+    "post-update-cmd": [
+      "@auto-scripts"
+    ]
+  },
+  "conflict": {
+    "symfony/symfony": "*"
+  },
+  "extra": {
+    "symfony": {
+      "allow-contrib": false,
+      "require": "~8.0.0"
+    }
+  }
+}
