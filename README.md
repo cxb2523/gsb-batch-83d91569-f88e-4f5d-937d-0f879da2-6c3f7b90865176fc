@@ -316,6 +316,52 @@ Hints are scoped too. A hint in a task spec applies everywhere. A hint given as 
   <img src="docs/assets/ui-tasks.png" alt="Task list with states, JEV calls, questions and cost" width="420">
 </p>
 
+## Flight collection (repeatable pipeline)
+
+`src/core/collect/` is a small collector that reads a *date range* of flights from a fixture-style flight site and keeps a per-page account of what happened. It is separate from the task runner: no JEV calls, no agent, deterministic output.
+
+Two interchangeable collection paths produce the same records:
+
+| path | how it gets the data |
+|---|---|
+| `api` | calls `/api/flights?from&to&date&page&sort` directly |
+| `browser` | drives `flights.html` (autocomplete, low-fare calendar, submit) and `results.html` ("Показать ещё"), and captures the JSON of the page's own requests from CDP network events |
+
+```bash
+# fixture site (prints its URLs and stays up)
+node fixtures/sites/server.ts
+
+# API path, three days, at most two pages per day
+node scripts/collect-flights.ts --base http://localhost:PORT --from ALA --to AYT \
+  --date-from 2026-10-13 --date-to 2026-10-15 --max-pages 2 --json out.json
+
+# browser path (launches its own headless Chrome; city names come from the page's autocomplete)
+node scripts/collect-flights.ts --base http://localhost:PORT --from ALA --to AYT \
+  --from-name Алматы --to-name Анталия --date-from 2026-10-13 --date-to 2026-10-14 --path browser
+```
+
+Every result row has the same fields — `date`, `price`, `airline`, `depart`, `arrive`, `stops`, `sourcePage` — and records are sorted by date and then price (stable), so repeated runs over the same fixture are byte-identical. The range is expanded one day at a time; each day is requested page by page until its `total` is covered or `maxPagesPerDay` is hit. The API path sorts with `--sort` (`best` by default); the browser path uses whatever the results page itself requests (its default "Лучший" tab), which is why the two paths match by default.
+
+Nothing is swallowed. Each page ends as exactly one outcome:
+
+| outcome | meaning |
+|---|---|
+| `success` | items returned |
+| `empty` | the site has nothing for that page/day |
+| `failed` | request error; `httpStatus` (when there was one) and the message are kept |
+| `timeout` | no response within `pageTimeoutMs` |
+| `page_limit` | marker (never requested) for a day stopped by the page cap |
+
+A failed, timed-out or truncated day keeps the records already collected and the other days still run. The result also carries a per-day summary (`pages`, `records`, `total`, `status`, `error`) and totals per outcome; `renderCollectReport` prints it as a table. Programmatically: `collectFlights(opts, { fetcher })` with `selectFetcher(opts, 'api' | 'browser', { page })`.
+
+### Tests
+
+- `test/core/collect.test.ts`: range expansion, payload validation, stable ordering, multi-day/multi-page runs, a failing day, timeouts, page-limit truncation, reproducibility.
+- `test/integration/collect-api.test.ts`: the real fixture HTTP server, including deterministic 503 and slow-day faults injected with `startFixtureServer({ faults })`.
+- `test/integration/collect-browser.test.ts`: the browser path in headless Chrome, asserting its records equal the API path's and that a failing day does not stop the rest.
+
+`startFixtureServer({ faults: [{ date, page, status, delayMs }] })` exists so failure tests use real HTTP instead of mocks.
+
 ## Development
 
 ```bash
@@ -324,6 +370,8 @@ npm run test:live        # live tests against JEV (needs a key)
 npm run eval             # decision-quality evals: accuracy and calibration per question template
 npm run typecheck
 node scripts/observe-fixture.ts flights.html   # print the perception output for a fixture page
+node scripts/collect-flights.ts --base http://localhost:PORT --from ALA --to AYT --date-from 2026-10-13 --date-to 2026-10-15
+                                                 # collect flights (see "Flight collection" above)
 ```
 
 The code is TypeScript and runs natively on Node's type stripping, so the daemon, MCP server and CLI need no build step. Fixture sites in `fixtures/sites/` imitate real-world difficulties: Russian labels, unlabeled inputs, consent walls, autocomplete, calendars, shadow DOM, cross-origin iframes, pagination.

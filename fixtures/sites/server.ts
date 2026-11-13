@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 
@@ -59,7 +59,18 @@ export function flightsFor(from: string, to: string, date: string): Flight[] {
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
 
-function handler(peerOrigin: () => string) {
+/**
+ * A deterministic fault injected into `/api/flights` so tests can exercise the collector's failure paths over
+ * real HTTP: a status code (2xx keeps the normal response), a delay, or both. Matching is exact on any field given.
+ */
+export interface FlightFault {
+  date?: string;
+  page?: number;
+  status?: number;
+  delayMs?: number;
+}
+
+function handler(peerOrigin: () => string, faults: FlightFault[]) {
   return async (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const send = (status: number, body: string, type = 'application/json') => {
@@ -94,6 +105,11 @@ function handler(peerOrigin: () => string) {
       let all = flightsFor(from, to, date);
       if (sort === 'cheap') all = [...all].sort((a, b) => a.price - b.price);
       if (sort === 'fast') all = [...all].sort((a, b) => a.durationMin - b.durationMin);
+      const fault = faults.find((f) => (f.date === undefined || f.date === date) && (f.page === undefined || f.page === page));
+      if (fault?.delayMs) await new Promise((r) => setTimeout(r, fault.delayMs));
+      if (fault?.status && (fault.status < 200 || fault.status >= 300)) {
+        return send(fault.status, JSON.stringify({ error: `injected fault for ${date} page ${page}` }));
+      }
       await new Promise((r) => setTimeout(r, 200));
       return send(200, JSON.stringify({ items: all.slice((page - 1) * 10, page * 10), total: all.length }));
     }
@@ -112,16 +128,22 @@ function handler(peerOrigin: () => string) {
 
 export interface FixtureServer { url(path: string): string; crossUrl(path: string): string; close(): Promise<void> }
 
+export interface FixtureServerOptions {
+  /** Deterministic `/api/flights` faults (status and/or delay) for tests that need a failing day. */
+  faults?: FlightFault[];
+}
+
 function listen(server: Server): Promise<number> {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port)));
 }
 
 /** Serves the fixture sites on two ports so iframes can be genuinely cross-origin. */
-export async function startFixtureServer(): Promise<FixtureServer> {
+export async function startFixtureServer(opts: FixtureServerOptions = {}): Promise<FixtureServer> {
   let portA = 0;
   let portB = 0;
-  const a = createServer(handler(() => `http://127.0.0.1:${portB}`));
-  const b = createServer(handler(() => `http://localhost:${portA}`));
+  const faults = opts.faults ?? [];
+  const a = createServer(handler(() => `http://127.0.0.1:${portB}`, faults));
+  const b = createServer(handler(() => `http://localhost:${portA}`, faults));
   portA = await listen(a);
   portB = await listen(b);
   return {
@@ -131,7 +153,9 @@ export async function startFixtureServer(): Promise<FixtureServer> {
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Started directly (`node fixtures/sites/server.ts`): serve on random ports and print the URLs.
+// pathToFileURL keeps the check working on Windows, where argv[1] is a backslashed path.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const s = await startFixtureServer();
   console.log(`fixtures: ${s.url('flights.html')}  cross-origin: ${s.crossUrl('')}`);
 }

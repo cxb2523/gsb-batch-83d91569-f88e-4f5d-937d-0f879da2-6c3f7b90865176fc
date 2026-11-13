@@ -33,7 +33,14 @@ export interface ChromiumOptions {
 function readActivePort(profileDir: string): { port: number; path: string } | null {
   const file = join(profileDir, 'DevToolsActivePort');
   if (!existsSync(file)) return null;
-  const [port, path] = readFileSync(file, 'utf8').trim().split('\n');
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    // Chrome writes this file as it starts (and on Windows the write can briefly lock it): not ready yet.
+    return null;
+  }
+  const [port, path] = text.trim().split('\n');
   if (!port || !path) return null;
   return { port: Number(port), path };
 }
