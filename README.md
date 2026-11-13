@@ -1,0 +1,297 @@
+# Screener.in Scraper — Stock Screens and Sector Tables in Python
+
+[![release](https://img.shields.io/github/v/release/2scraper/screener-scraper)](https://github.com/2scraper/screener-scraper/releases)
+[![tests](https://github.com/2scraper/screener-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/screener-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/screener-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/screener-scraper/actions/workflows/canary.yml)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![licence](https://img.shields.io/badge/licence-MIT-green)
+![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
+![account](https://img.shields.io/badge/runs%20without%20an%20account-yes-brightgreen)
+
+**Screener.in scraper** — an open-source (MIT) Python tool that reads screener.in stock screens and sector or industry listings, and writes one row per company — price, market cap, P/E, dividend yield, quarterly sales and profit, ROCE and every other column the table shows — to JSON or CSV. On 2026-09-25 plain `curl` from a residential connection, with no key, no proxy and no account, was served a sector page and its page 2, three screens and page 220 of the "All Stocks" screen in full. Use it to build a dataset of a screen's companies and their figures, or compare two exhaustive runs of the same listing with `diff_runs.py`.
+
+A scraper for **[screener.in](https://www.screener.in)** result tables — any
+stock screen (`/screens/{id}/{slug}/`) and any sector or industry listing
+(`/market/IN08/IN0801/IN080101/`) — to JSON and CSV. Playwright is the primary
+engine; Selenium, Puppeteer (pyppeteer) and the 2Captcha Scraper API do the
+same job with the same output. Part of the
+[2scraper](https://github.com/2scraper) family of single-site scrapers.
+
+No screen or sector is hardcoded: what a run covers is the URL you give it.
+
+## Quick start
+
+```bash
+git clone https://github.com/2scraper/screener-scraper && cd screener-scraper
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt -r requirements-playwright.txt
+./venv/bin/playwright install chromium
+
+./venv/bin/python playwright_scraper.py \
+  --url "https://www.screener.in/market/IN08/IN0801/IN080101/" \
+  --pages 1 --out it_software
+```
+
+That is page 1 of the sector: 25 rows, the site's own `total_results` and
+`pages_available` in `it_software.meta.json`, `coverage: window`. **Pages
+after the first are `?page=` URLs, which screener.in's robots.txt disallows
+for all user agents** — read [Legal](#legal) before asking for more; every
+engine prints the same warning when a run would. Asked for 50 pages, the
+scraper reads the site's own "Showing page 1 of 7" and never plans past the
+last page; measured 2026-09-25 on this sector: 164 rows against the site's
+own "164 results found", ranks 1–164 with no gap, `status: complete`,
+`coverage: exhaustive`, exit 0.
+
+## What the paid products buy you — and when you need none of them
+
+**From an ordinary connection you need no key, no proxy and no account.** On
+2026-09-25 plain `curl` from a residential connection — no browser, no
+JavaScript, no cookie — was served a sector page and its page 2, three
+screens of very different size, and page 220 of the 5,477-company "All
+Stocks" screen, in full. Fifteen back-to-back requests with no delay all
+answered HTTP 200. All three browser engines, run within a minute of each
+other, returned the same 75 companies with identical quarterly figures on the
+same three pages — only prices moved, with the market.
+
+The one gate this repo has evidence of is a **registration wall**: captures
+taken on 2026-08-23/24 through the Scraping Browser API and the Scraper API
+landed on screener.in's `/register/` page for `/screens/` URLs (and not for
+`/market/` ones). The scraper recognises that page, reports it as blocked
+(exit 3) with advice, and never parses it as an empty screen. It is not a
+captcha: no widget is on it for any solver. On 2026-09-28 the Scraping
+Browser API and the Scraper API were each served page 1 of a `/market/`
+sector in full — 25 rows, identical to a local run — so the wall is not
+every request through them; `/screens/` was not re-measured.
+
+What each 2Captcha product (one key, four separately billed products) buys on
+this site:
+
+| Product | What it buys here |
+|---|---|
+| **Proxies** ([2captcha.com/proxy](https://2captcha.com/proxy), also sold as 2prx.com) | Volume from many addresses, and an Indian exit. `--proxy`, `--proxy-file`, `--proxy-rotate per-page`, and per-worker exits under `--concurrency`. Measured 2026-09-28: page 1 through a European 2Captcha exit, 25 rows, from Playwright and from `http_scraper.py` alike. |
+| **Scraping Browser API** | No browser infrastructure of your own, a chosen exit country, and a persistent profile. `--cdp-endpoint`. Measured 2026-09-28: page 1 of a sector, 25 rows, with `Captcha.setAutoSolve` enabled on connect. Given the August captures, try a plain connection first for `/screens/`. |
+| **Fingerprints** | A complete device identity for the launched browser (`--fingerprint`, Playwright engine). Not needed for anything measured here. **A separate subscription:** on 2026-09-28 a key with a working solving balance got HTTP 403 from `/fingerprint/random`, and the run stops with exit 5 and that reason. Applying a real fingerprint is therefore still unverified. |
+| **Captcha solving** | Nothing on this site as measured — no captcha is configured on any page captured. It is wired in and bounded to one solve per page anyway, because a site can switch one on between deploys. Verified 2026-09-28 on 2Captcha's own reCAPTCHA v2 demo page: detected as v2 from the markup and at runtime, solved through API v2 (~6 s) and v1 (~38 s), and accepted by the page's server-side check. Before 0.1.1 the runtime detector never ran and an explicit v2 widget was read as v3. |
+
+## What it extracts
+
+One row per company, in the table's own order.
+
+| Column | What it is |
+|---|---|
+| `source`, `scraped_at` | `screener.in`, UTC timestamp |
+| `url` | The company's own screener.in page |
+| `sku` | The site's own company id, from the row's `data-row-company-id` |
+| `title` | The company name, as the table links it |
+| `price`, `currency` | CMP, and `INR` read from the price column's own unit ("Rs.") — never a default |
+| `category` | `--category`, or the listing's own heading ("IT - Software Companies") |
+| `page`, `position` | The site page the row came from, and its position on it |
+| `rank` | The site's own S.No. — global across pages (page 2 starts at 26) |
+| `ticker` | What the company URL carries: letters (`TCS`) or six digits (`532015`) |
+| `consolidated` | Whether the row links the consolidated or the standalone figures |
+| `market_cap_cr`, `pe`, `dividend_yield_pct`, `net_profit_qtr_cr`, `qtr_profit_var_pct`, `sales_qtr_cr`, `qtr_sales_var_pct`, `roce_pct` | The columns every page kind showed an anonymous visitor on 2026-09-25 |
+| `extra_metrics` | Every other column the page showed, keyed by the site's own name and unit, e.g. `{"Return on invested capital (%)": 88.05}`. JSON in the CSV cell. |
+
+A column is identified by its header's own metric name **and unit**, never by
+its position — a screen that adds a column moves every column after it. A
+header in a different unit goes to `extra_metrics` under its own name rather
+than into a typed column that promises a unit it does not have.
+
+See [`sample_output.json`](sample_output.json) — five rows cut from a real
+run.
+
+**Run metadata.** Every run that writes output also writes `<out>.meta.json`:
+`status` (complete / partial), `stop_reason`, `pages_failed` by number, the
+site's own `total_results` and `pages_available`, `coverage` (`exhaustive`
+when the run started at page 1 and reached the end, `tail` when it reached
+the end from a later start page, `window` when it stopped at `--pages`),
+`start_page`, and `rank_gaps` — site ranks missing from the merged rows, which
+is proof of a lost page rather than a guess. It also records `schema_version`, a
+`run_id`, the `engine`, and under `files` the size and SHA-256 of each data
+file it describes: the files are each written atomically but not as a set,
+so a crash between two writes can leave new data beside an older sidecar —
+`diff_runs.py` checks the digest and refuses such a pair.
+
+**Exit codes**, shared by every engine: `0` ok · `1` crash · `2` bad usage ·
+`3` blocked · `4` the site says the listing is empty · `5` the content was
+never obtained (a timeout, a dead proxy, a 404 or 5xx, an API error, a start
+page past the end, a page nobody could read) · `6` partial. A blocked or
+failed run never writes output — `--allow-empty` included, which only lets
+a listing the site reports as empty write an empty file.
+
+## Engines
+
+| Script | Engine | Measured 2026-09-25 |
+|---|---|---|
+| `playwright_scraper.py` | **Playwright** — primary | 3 pages / 75 rows; 7 of 7 pages / 164 rows; a 3-page screen under `--concurrency 2` (pages 1–2 are always sequential, so one page went through the worker pool), 64 of 64 |
+| `puppeteer_scraper.py` | pyppeteer | 3 pages / 75 rows — same companies and quarterly figures as Playwright |
+| `selenium_scraper.py` | Selenium + Chrome | 3 pages / 75 rows — same companies and quarterly figures as Playwright |
+| `scraper_api_client.py` | 2Captcha Scraper API, no local browser | 2026-09-28: page 1, 25 rows, identical to Playwright's; 6.1 s, 0.0005 per task |
+| `http_scraper.py` | **plain HTTP**, no browser, no key — optional | 2026-09-28: page 1, 25 rows identical to Playwright's; 1.2 s and 47 MB RSS against Playwright's 2.9 s and 150 MB (plus Chromium's own processes); 4.3 s through a 2Captcha proxy |
+
+**The plain-HTTP engine is the lightest way to run this scraper**, because
+the table is in the served HTML. It needs only `requirements.txt` (or
+`requirements.lock`), sends an honest User-Agent naming this project,
+retries a connection error, a 429 or a 5xx with backoff, honours
+`Retry-After`, and never retries a refusal from the same address. It has no
+`--concurrency` and no captcha solving. It is optional for now: the quick
+start, the Docker image and the canary still use Playwright.
+
+Install **one** engine per virtualenv: playwright and pyppeteer pin
+incompatible `pyee` versions, and pyppeteer and selenium collide on `urllib3`.
+
+```bash
+pip install -r requirements.txt -r requirements-playwright.txt   # or -puppeteer / -selenium
+```
+
+Known engine limits, stated rather than left to be discovered:
+
+- **Selenium cannot use an authenticated remote CDP endpoint** — chromedriver's
+  `debuggerAddress` has nowhere to put a password — and cannot authenticate a
+  proxy. It refuses the first and strips-and-warns on the second.
+- **pyppeteer is effectively unmaintained**, and its bundled 2018 Chromium does
+  not start on a current macOS; set `PYPPETEER_EXECUTABLE_PATH` (see
+  [TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
+- `--concurrency` and `--fingerprint` are implemented in the Playwright engine;
+  the other two accept the flags for parity and say that they ignore them.
+
+**For the exact versions CI tested**, install the matching lock instead —
+every version pinned and every download hash-checked, for Python 3.9 and up:
+
+```bash
+pip install --require-hashes -r requirements-playwright.lock   # core + the primary engine
+pip install --require-hashes -r requirements.lock              # core only (Scraper API client)
+```
+
+The `.txt` files stay as the loose, `>=` specification; the `.lock` files are
+what CI, the canary and the Docker image install. A weekly `pip-audit` run
+checks every lock against the advisory databases.
+
+**The pyppeteer engine carries a known-vulnerable urllib3.** pyppeteer
+requires `urllib3<2`, and seven published urllib3 advisories are fixed only in
+2.x — among them one where a cross-origin redirect can forward
+`Proxy-Authorization` to the new host (GHSA-qccp-gfcp-xxvc). In that engine's
+virtualenv `requests` uses the same urllib3, so the proxy preflight and the
+captcha API calls do too. The audit ignores exactly those seven, by ID; prefer
+Playwright if you run with proxy credentials.
+
+## Usage
+
+The first three examples request `?page=` URLs, which robots.txt disallows —
+see [Legal](#legal). They show what the flags do, not a recommendation.
+
+```bash
+# A stock screen, every page it has.
+python3 playwright_scraper.py --url "https://www.screener.in/screens/59/magic-formula/" --pages 50
+
+# A sector, three pages, CSV only.
+python3 playwright_scraper.py --url "https://www.screener.in/market/IN08/" --pages 3 --format csv
+
+# Start part-way: this fetches site pages 3, 4 and 5.
+python3 playwright_scraper.py --url "https://www.screener.in/market/IN08/?page=3" --pages 3
+
+# Through the Scraping Browser API (endpoint in .env, never on the command line).
+python3 playwright_scraper.py --url "..."          # with SCREENER_CDP_ENDPOINT set
+
+# Compare two exhaustive runs of the same listing.
+python3 diff_runs.py --old it_2026-09-24.json --new it_2026-09-25.json
+```
+
+Credentials live in `.env` (copy `.env.example`), never on a command line,
+where they are visible to `ps` and land in shell history. Precedence: explicit
+flag > exported environment variable > `.env`. `python3 env_config.py` says
+what was picked up without printing it.
+
+The Scraping Browser endpoint has the shape
+`ws://{login}-zone-scraping_browser-country-{cc}-pid-{profileId}:{password}@cb.2captcha.com:9222`;
+`country-` picks the exit and `pid-` is a profile allowing one live
+connection. Profile credentials expire, so take fresh ones from your 2Captcha
+dashboard rather than from any example.
+
+### All flags
+
+Shared by the three browser engines: `--url --pages --category --format --out
+--delay --retries --retry-delay --concurrency --proxy --proxy-file
+--proxy-rotate --proxy-shuffle --proxy-block-retries --twocaptcha-key
+--captcha-api --solve-captcha --min-score --cdp-endpoint --allow-empty
+--dump-html --headless/--headful --fingerprint --fp-tags --fp-country`. Run
+any script with `--help` for the details. `scraper_api_client.py` takes
+`--key`, `--cdp-url` and `--wait-text/--wait-element/--wait-state` instead of
+the browser flags. Two flags it shares by name mean something different
+there, because each attempt is a billed API task: its `--retries` counts
+EXTRA attempts (default 1; the browser engines count total attempts, default
+3), and `--retry-delay` defaults to 10s, flat, where the browser engines back
+off from 2s.
+
+There is deliberately **no `--limit`**: the page offers "Results per page 10
+/ 25 / 50", but `?limit=10` and `?limit=50` both returned 25 rows to an
+anonymous visitor on 2026-09-25. A flag that changes nothing is a setting that
+looks configurable and is not.
+
+## Traps that look like bugs
+
+- **Prices and ranks move between runs** during Indian market hours, and a
+  sector page is sorted by market capitalisation, so neighbours swap places.
+  Compare runs by `sku`, which `diff_runs.py` does.
+- **An out-of-range page is a real page.** `?page=8` of a 7-page listing
+  returns page 7's rows with HTTP 200. The scraper reads which page the site
+  says it served, so this ends the listing instead of duplicating it.
+- **A `window` run is a sample, not the listing.** `diff_runs.py` annotates
+  added/removed from a window run as entered-window / left-window, and refuses
+  outright to diff two different listings or sort orders.
+- **`ticker` can be a number** — that is the site's own URL for that company.
+
+## Verification
+
+- **Offline:** `python3 smoke_test.py` — no network, no key, no browser
+  needed. It reads `fixtures_generated.json`: real captures, trimmed,
+  scrubbed of the session's csrf token and of a screen author's name, and
+  each verified to parse identically to its untrimmed original. `pytest`
+  runs the same suite. CI runs it on Python 3.9 and 3.12, once per engine in
+  its own virtualenv, and builds the Docker image.
+- **Live:** `canary.yml` runs a real scrape of **page 1 only** weekly (Mondays),
+  **ungated** — this site needs no credential, so a canary that could pass
+  without one is not gated on one — and asserts ranks 1–25, INR and market
+  cap on every row, and that page 1 still states its page count. It was 3
+  pages until 0.1.1; `?page=` is disallowed by robots.txt, so pagination is
+  covered by the offline fixtures instead. Its HTML dumps are scrubbed of the
+  session's csrf token before they are uploaded as public artefacts. The
+  3-page version's first run, dispatched 2026-09-25 from a bare GitHub runner
+  (a datacentre address, no proxy, no key), passed: 75 rows, ranks 1–75,
+  `status: complete`. The canary is green only when it parsed real rows: a
+  block (exit 3), an empty listing, a failed load or a partial run fails it,
+  from a bare runner as well. A block from a datacentre address may be the
+  address rather than the site, and setting the `SCREENER_PROXY` secret
+  tells the two apart.
+
+## Legal
+
+Scrape responsibly. screener.in's [robots.txt](https://www.screener.in/robots.txt)
+on 2026-09-25 disallowed `/user/*`, `/*?q=`, `/*?sort=`, `/*?limit=`,
+`/*?page=` and `/company/source/quarter/*` for all user agents — which covers every page after the first of any
+listing. Read it, and the site's [Terms](https://www.screener.in/guides/terms/),
+before running multi-page jobs; whether and how you comply is your decision
+and your responsibility as the operator. Rate-limit your requests (`--delay`),
+collect only publicly available data, and note that the data is provided to
+screener.in by a third party (the footer credits C-MOTS Internet Technologies).
+This project is provided as-is, for research and legitimate use.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [TipRanks scraper](https://github.com/2scraper/tipranks-scraper) — Smart Score, analyst consensus and price targets for any…
+- [Binance scraper](https://github.com/2scraper/binance-scraper) — P2P adverts, copy-trading portfolios and announcements…
+- [Google Finance scraper](https://github.com/2scraper/google-finance-scraper) — Quotes, quarterly financials, analyst targets, OHLCV, market…
+- [OpenSea scraper](https://github.com/2scraper/opensea-scraper) — NFT items, collection rankings and activity feeds…
+- [Polymarket scraper](https://github.com/2scraper/polymarket-scraper) — Prediction-market prices, order books, volumes and on-chain…
+- [Better Business Bureau scraper](https://github.com/2scraper/bbb-scraper) — BBB search and category listings with no key or proxy, plus…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).

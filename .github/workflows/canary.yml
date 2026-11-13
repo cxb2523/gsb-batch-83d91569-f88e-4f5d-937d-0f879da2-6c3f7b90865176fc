@@ -1,0 +1,186 @@
+name: canary
+
+# tests.yml deliberately never touches screener.in, which leaves a real gap:
+# a change to the site itself only shows up when a user hits it, while the
+# offline badge stays green. This is the other half — one real run a week (Mondays)
+# against a known-good sector listing.
+#
+# UNGATED, on purpose: from an ordinary connection this site needs no key, no
+# proxy and no account (measured 2026-09-25), and a canary that CAN pass
+# without a credential must not be gated on one — gated, the badge would go
+# green on every run while testing nothing. The proxy secret is used when it is
+# set. Only real rows make this job green: exit 3, 4, 5 or 6 fails it, with
+# or without the proxy.
+#
+# --pages 1, and that is a POLICY decision, not a technical one. screener.in's
+# robots.txt disallows `/*?page=` for all user agents, so a scheduled 3-page run
+# was this project itself automating the one thing it tells users to check
+# before doing. Pagination is still covered: offline, by the fixtures in
+# smoke_test.py (the out-of-range ?page= answer, rank gaps, catalogue
+# mutation), and a user who does run multi-page jobs sees the same check in
+# the sidecar. What the live run keeps is the part only a live run can see —
+# the site's served table shape, units and ranks on page 1.
+#
+# The HTML dump is SCRUBBED before upload: a raw page carries the anonymous
+# session's csrf token, and this repository's artefacts are public.
+on:
+  schedule:
+    # Off the hour, so it is not competing with every other cron job for
+    # runner availability.
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    # `secrets` is not available in a job-level `if`, so presence is tested
+    # through job env and read in each step's `if`.
+    env:
+      HAS_PROXY: ${{ secrets.SCREENER_PROXY != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the Playwright engine
+        run: |
+          pip install --require-hashes -r requirements-playwright.lock
+          playwright install --with-deps chromium
+
+      - name: Scrape a real, known-good filtered listing
+        id: run
+        # The proxy goes through the ENVIRONMENT, never a commented-out
+        # --proxy line: env_config.py already reads SCREENER_PROXY, an unset
+        # secret arrives as an empty string which the loader treats as unset,
+        # so this one line is correct with and without it — and the credential
+        # never reaches a command line.
+        #
+        # set +e: GitHub Actions runs `run:` steps under `bash -e`, so without
+        # it a non-zero exit aborts the step before the exit code can be
+        # captured. continue-on-error does not change that; it stops the step
+        # failing the job, not the shell's errexit.
+        continue-on-error: true
+        env:
+          SCREENER_PROXY: ${{ secrets.SCREENER_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --url "https://www.screener.in/market/IN08/IN0801/IN080101/" \
+            --pages 1 --out canary_run --dump-html canary_run.html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        run: |
+          code="${{ steps.run.outputs.exit_code }}"
+          case "$code" in
+            0) echo "OK — rows parsed from a live run." ;;
+            3) # A blocked canary tested nothing, so it is never green. Every
+               # scheduled run from a bare GitHub runner was served between
+               # 2026-09-25 and 2026-10-15, so a block is news either way.
+               if [ "${{ env.HAS_PROXY }}" = "true" ]; then
+                 echo "::error::Blocked before parsing (exit 3) even through the configured proxy — this looks like a site-side change."
+               else
+                 echo "::error::Blocked before parsing (exit 3) from a bare GitHub runner, which is a datacentre address. Bare runners were served on every run from 2026-09-25 to 2026-10-15, so this is new: either screener.in started refusing datacentre addresses or the site changed. Setting the SCREENER_PROXY secret tells the two apart."
+               fi
+               exit 1 ;;
+            4) echo "::error::The site reported this sector as empty (exit 4) — it held 164 companies on 2026-09-25, so this is a site-side change." ; exit 1 ;;
+            5) echo "::error::The content was never obtained (exit 5): a load timeout, or a page this code could not read. No remote API is involved here, so this is not a credential expiring." ; exit 1 ;;
+            6) echo "::error::Partial run (exit 6) — see the sidecar's stop_reason. 'pagination_not_addressable' means the ?page= convention has stopped working." ; exit 1 ;;
+            *) echo "::error::Unexpected exit code $code (see the step above)." ; exit 1 ;;
+          esac
+
+      - name: Sanity-check the scraped data
+        # Exit 0 only means some listings were written; it says nothing about
+        # whether the columns are populated.
+        if: steps.run.outputs.exit_code == '0'
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          PAGES_REQUESTED = 1
+          # 25 rows per page for an anonymous visitor (?limit= is ignored),
+          # and this sector held 164 companies on 2026-09-25 — so page 1 is
+          # exactly 25. The floor sits just below it rather than on it.
+          MIN_ROWS = 20
+
+          rows = json.loads(Path("canary_run.json").read_text())
+          meta = json.loads(Path("canary_run.meta.json").read_text())
+          fail = []
+
+          if len(rows) < MIN_ROWS:
+              fail.append(f"only {len(rows)} rows, expected at least {MIN_ROWS}")
+          if meta.get("status") != "complete":
+              fail.append(f"run status is {meta.get('status')!r}, not 'complete'")
+          if meta.get("pages_completed", 0) < PAGES_REQUESTED:
+              fail.append(f"stopped after {meta.get('pages_completed')} of "
+                          f"{PAGES_REQUESTED} pages (stop_reason="
+                          f"{meta.get('stop_reason')!r})")
+          # pages_available is read from page 1's own "Showing page 1 of N",
+          # which is what pagination planning depends on.
+          if not (meta.get("pages_available") or 0) >= 2:
+              fail.append(f"pages_available is {meta.get('pages_available')!r} — "
+                          f"page 1 no longer states how many pages exist")
+          if len({r["sku"] for r in rows}) != len(rows):
+              fail.append("duplicate company ids across pages")
+          if len({(r["page"], r["position"]) for r in rows}) != len(rows):
+              fail.append("page+position is not unique")
+          # The site numbers its rows globally, so page 1 is ranks 1..25
+          # exactly. A shift or a gap is a lost row.
+          ranks = sorted(r["rank"] for r in rows if r.get("rank") is not None)
+          if ranks != list(range(1, len(rows) + 1)):
+              fail.append(f"ranks are not 1..{len(rows)} (gaps: {meta.get('rank_gaps')})")
+          priced = sum(1 for r in rows if r.get("price") is not None)
+          if rows and priced / len(rows) < 0.95:
+              fail.append(f"only {priced}/{len(rows)} rows have a price")
+          if any(r.get("currency") != "INR" for r in rows):
+              fail.append("a row's currency is not INR — the price header's "
+                          "unit changed")
+          if any(r.get("market_cap_cr") is None for r in rows):
+              fail.append("market_cap_cr is empty on some row — a column "
+                          "header's name or unit changed")
+          for line in fail:
+              print(f"::error::{line}")
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Scrub the HTML dumps before they become public artefacts
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob
+          from pathlib import Path
+          from make_fixtures import scrub, scrub_problems
+          for name in glob.glob("canary_run.html*") + glob.glob("canary_run_page*_debug.html"):
+              path = Path(name)
+              text = scrub(path.read_text(encoding="utf-8", errors="replace"))
+              if scrub_problems(text):
+                  # Not uploaded at all rather than uploaded half-scrubbed.
+                  path.unlink()
+                  print(f"::warning::{name} still looked credential-shaped after scrubbing; not uploaded")
+              else:
+                  path.write_text(text, encoding="utf-8")
+          EOF
+
+      - name: Upload run artefacts
+        # Always, not just on failure: a run that returns the WRONG number of
+        # listings with no error is exactly the regression that needs the
+        # actual bytes the parser saw.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14
