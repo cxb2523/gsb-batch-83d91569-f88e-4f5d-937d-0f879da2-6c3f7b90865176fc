@@ -1,0 +1,21 @@
+# avito-scraper — core dependencies
+#
+#   pip install -r requirements.txt
+#
+# Needed by everything, including the offline test suite, diff_runs.py and
+# env_config.py.
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# Then install exactly ONE browser engine — avito.ru cannot be fetched without
+# a browser (plain HTTP clients get HTTP 429 from its firewall; see README):
+#
+#   pip install -r requirements-playwright.txt && playwright install chromium
+#   pip install -r requirements-selenium.txt
+#   pip install -r requirements-puppeteer.txt
+#
+# One, not all three: playwright and pyppeteer declare mutually unsatisfiable
+# pins (pyee), and pyppeteer and selenium collide on urllib3. `pip check`
+# reports the conflict and pip may resolve it by downgrading something you
+# wanted. Use a virtualenv per engine if you need more than one — exactly what
+# CI's engine-smoke job does.
