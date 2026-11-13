@@ -1,0 +1,658 @@
+# Home Depot Scraper — Per-Store Prices, Stock and Ratings in Python
+
+**Home Depot scraper** — an open-source (MIT) Python tool that reads homedepot.com category listings and product pages and writes per-store prices, stock, brand, model, ratings and the site's category hierarchy to JSON or CSV. Measured on 2026-09-22, it needs a US residential exit — from a non-US address every URL answered 403 — and through that exit `curl` with browser headers got HTTP 200 on 9 of 10 trials while a local Playwright Chromium was refused. Use it to monitor one store's prices and stock, or compare two complete runs with `diff_runs.py`.
+
+Scrapes Home Depot category listings and product pages — prices, stock, brand,
+model, ratings and the site's own category hierarchy. JSON or CSV, one row
+schema for both modes, and a run-metadata sidecar that says whether the result
+is complete.
+
+Four transports: **plain HTTP** (free, and it works here), **Playwright**
+(primary browser engine), **Selenium**, **pyppeteer**, or a remote browser over
+CDP such as the **Scraping Browser API**.
+
+[![release](https://img.shields.io/github/v/release/2scraper/homedepot-scraper?sort=semver)](https://github.com/2scraper/homedepot-scraper/releases)
+[![tests](https://github.com/2scraper/homedepot-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/homedepot-scraper/actions/workflows/tests.yml)
+[![canary](https://github.com/2scraper/homedepot-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/homedepot-scraper/actions/workflows/canary.yml)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![licence](https://img.shields.io/badge/licence-MIT-lightgrey)](LICENSE)
+[![engines](https://img.shields.io/badge/engines-HTTP%20%7C%20Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#engines)
+[![needs a US exit](https://img.shields.io/badge/needs-a%20US%20residential%20exit-orange)](#the-one-thing-you-actually-need)
+
+---
+
+## The one thing you actually need
+
+**A US residential exit — and that alone is not enough.** homedepot.com refuses
+on three independent axes, and all three have to be satisfied at once.
+Everything below was measured on **2026-09-22**, from a residential address in
+Moscow and through a US residential exit.
+
+**Axis 1 — the address.** From a non-US address every URL answers 403,
+`/robots.txt` included.
+
+**Axis 2 — the request shape.** From a US address a bare user agent still gets
+403; the browser header set in `http_scraper.py` is what turns it into 200.
+
+| Client | Address | `/robots.txt` | A listing page |
+|---|---|---|---|
+| `curl`, bare user agent | Moscow | **403**, 381 b | **403**, 367 b |
+| `curl`, bare user agent | US | 200 | **403**, 371 b |
+| `curl`, full browser headers | Moscow | — | **403**, 367 b |
+| `curl`, full browser headers | US | 200 | **200**, 172 KB |
+
+**Axis 3 — the HTTP client itself**, which is the one nobody expects. Paired
+measurement, the **same six session-pinned exits**, same headers, same minute:
+
+| Client | content | interstitial | refused |
+|---|---:|---:|---:|
+| system `curl`, HTTP/2 | 4 | 2 | **0** |
+| `python-requests`, HTTP/1.1 | 0 | 0 | **6** |
+
+`requests` never once fetched a listing page. Neither did `httpx` nor
+`curl_cffi` on seven browser-impersonation profiles — both speak HTTP/2 and
+still got refused, so it is not simply "HTTP/1.1 is rejected". Forcing `curl`
+itself to HTTP/1.1 got the interstitial instead of content, so the version
+matters too. **Which part of the handshake is being scored has not been
+isolated, and this README does not claim to know.** `http_scraper.py` uses the
+client that was measured to work: `--http-client curl` is the default wherever
+curl is on PATH.
+
+**And a vanilla Playwright Chromium is refused outright.** 10 paired trials,
+each minting one fresh exit and putting both clients through *that same exit*:
+
+| Client | content | interstitial | refused (403) |
+|---|---:|---:|---:|
+| system `curl` | 3 | 6 | 1 |
+| local Playwright Chromium, headless | 0 | **0** | **10** |
+
+The automated browser was not merely unable to clear a challenge — **it was
+never offered one.** `curl` got 200 on 9 of 10 trials through the identical
+address. Headful made no difference. Akamai is scoring the client as automation
+and refusing it before the challenge stage, which is why the **Scraping Browser
+API** is the browser transport that works here and a local Chromium is not.
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/2scraper/homedepot-scraper
+cd homedepot-scraper
+pip install -r requirements.txt
+
+# then ONE engine, if you want a browser at all
+pip install -r requirements-playwright.txt && playwright install chromium
+# or  pip install -r requirements-selenium.txt      (needs a local Chrome)
+# or  pip install -r requirements-puppeteer.txt     (downloads its own Chromium)
+```
+
+The three engines' pins are mutually unsatisfiable (`pyee` <12 vs ≥13,
+`urllib3` <2.0 vs ≥2.6), so use a virtualenv per engine if you want more than
+one. `http_scraper.py` needs no engine at all.
+
+### Credentials go in `.env`, never on the command line
+
+`ps` reads argv, and argv lands in shell history and CI logs.
+
+```bash
+cp .env.example .env      # then fill in HOMEDEPOT_PROXY at minimum
+python3 env_config.py     # prints what was picked up, without printing secrets
+tools/install_hooks.sh    # refuse to commit or push a credential
+```
+
+**Install the hooks.** They are the only guard that runs while a secret is
+still private:
+
+| | |
+|---|---|
+| `pre-commit` | refuses a commit that stages anything credential-shaped |
+| `pre-push` | scans the commits about to be pushed |
+| `tools/scan_secrets.py --history` | every blob that ever existed — run this before making a repo public |
+
+A CI check cannot save you here. By the time CI runs, the objects are on a
+server, and **deleting the branch afterwards does not remove them**: a ref is
+a pointer, and the commit, tree and blob stay in the object store and are
+served by SHA. A pushed secret is a disclosed secret — rotate it, do not try
+to hide it.
+
+---
+
+## Usage
+
+```bash
+# A category listing, three pages, JSON and CSV. No browser, no paid rung.
+python3 http_scraper.py \
+  --url https://www.homedepot.com/b/Tools-Power-Tools-Saws-Miter-Saws/N-5yc1vZc2d7 \
+  --pages 3 --out miter
+
+# Spread it over a pool of exits, and let a refused page move to another one
+python3 http_scraper.py --url <same> --pages 3 \
+  --proxy-sessions 8 --proxy-shuffle --proxy-block-retries 5 --out miter
+
+# Through a real browser — the transport that clears Akamai's interstitial
+python3 playwright_scraper.py --url <same> --pages 3 --out miter
+
+# One product page: adds gtin13, colour, dimensions and the full description
+python3 playwright_scraper.py --mode product \
+  --url https://www.homedepot.com/p/.../321488310 --out saw
+
+# Find targets without crawling — the site publishes its whole taxonomy
+python3 catalog_walk.py categories --grep 'Saws' --limit 20
+python3 catalog_walk.py categories --out-file targets.txt
+
+# Which wall are my exits getting right now?
+./tools/edge_probe.sh 6
+```
+
+### Pagination
+
+`?Nao=<startIndex>`, 12 products a page — an **offset**, not a page number.
+`--pages 3` fetches `Nao=0`, `Nao=12`, `Nao=24`.
+
+A run stops when a page adds no new item id. It never stops on arithmetic over
+the page's own `totalProducts`, because that figure is live inventory: it moved
+144 → 143 between two requests four minutes apart.
+
+---
+
+## What you get
+
+One row per `itemId`, same field order in JSON and CSV.
+
+```
+source scraped_at url sku title image_url price currency category price_source
+original_price discount_pct brand model_number parent_id store_sku is_super_sku
+product_type gtin13 color availability store_id store_name store_postal_code
+store_quantity local_delivery_quantity rating review_count category_hierarchy
+badges unit_of_measure unit_price returnable page row_index
+```
+
+One real row, from `sample_output.json`:
+
+```json
+{
+  "source": "homedepot.com",
+  "url": "https://www.homedepot.com/p/DEWALT-...-DWS716/308351915",
+  "sku": "308351915",
+  "title": "15 Amp Corded 12 in. Compound Double Bevel Miter Saw",
+  "brand": "DEWALT",
+  "model_number": "DWS716",
+  "price": 349.0,
+  "currency": "USD",
+  "original_price": 429.0,
+  "discount_pct": 18.65,
+  "availability": "InStock",
+  "store_id": "121",
+  "store_name": "Cumberland",
+  "store_quantity": 6,
+  "local_delivery_quantity": 11,
+  "rating": 4.6375,
+  "review_count": 582,
+  "category_hierarchy": ["Tools", "Power Tools", "Saws", "Miter Saws"],
+  "returnable": "90-Day",
+  "price_source": "apollo-searchnav"
+}
+```
+
+`sample_output.json` and `sample_output.csv` are cut from a real run, not
+written by hand, and CI checks their columns against the `Product` schema.
+
+**`sku` is the item id** — the integer at the end of a `/p/` URL. Not the
+JSON-LD `sku` field, which is the *store* sku (1008223977 against item id
+321488310 on the same product); that one is kept in `store_sku`. The slug in a
+product URL is cosmetic: a wrong slug on a right id 301-redirects to the
+canonical address.
+
+**The price belongs to a store, and so does the stock.** Home Depot prices per
+location, and the Apollo field carries the store in its own name:
+
+```
+pricing({"isBrandPricingPolicyCompliant":false,"storeId":"121"})
+```
+
+Store 121 is Cumberland, GA 30339 — the one our US exits were assigned. Every
+row carries `store_id`, `store_name` and `store_postal_code`, and so does the
+run sidecar. A price without its store is not a fact.
+
+**`price_source`** says which of the two sources answered: `apollo-searchnav`
+(the `base-searchNav-<itemId>` node in `__APOLLO_STATE__`, the only product
+source on a listing page) or `jsonld+apollo` (a product page, where JSON-LD is
+authoritative on price and is the only place this site states a currency, and
+the Apollo node fills what it does not carry).
+
+There is no DOM price path and no tile overlay. A listing page renders its grid
+client-side and the served markup holds no tiles at all, so there is no second
+view to reconcile against and an overlay would be dead code that looks
+load-bearing.
+
+---
+
+## Traps that look like bugs
+
+**A category hub returns zero products.** `/b/Tools/N-5yc1vZc1xy` is a *hub*;
+`/b/Tools-Power-Tools-Saws-Miter-Saws/N-5yc1vZc2d7` is a *leaf* with the grid on
+it. A hub is not broken and not blocked — it never had a grid. It reports
+`hub`, is neither retried nor paid for, and points you at the sitemap that
+lists the leaves.
+
+**The hub and the home page DO carry products, and they are not the listing.**
+A hub's Apollo blob holds 24 `BaseProduct` nodes and the home page holds 22 —
+all recommendation carousels. A parser that reads every `BaseProduct` returns
+24 rows for a hub and 22 for the home page, every one of them real product data
+attached to the wrong question. Products are scoped to the `products(...)` ref
+list of the model whose `metadata.contentType` is `plppage`.
+
+**`availability` is null on a product page.** Measured, not an oversight: the
+JSON-LD offer has no `availability` key at all (its whole key set is `@type,
+hasMerchantReturnPolicy, price, priceCurrency, priceValidUntil, url`) and the
+PDP's Apollo node has no `fulfillment` — the stock figures are fetched after
+load. The listing path *does* publish them, so the column is real and is
+populated on category rows.
+
+**`store_quantity` is null on some in-stock rows.** Those products offer no
+in-store pickup at that store — 8 of 12 on one page had a `bopis` service.
+
+**`store_quantity` and `local_delivery_quantity` disagree, on purpose.** They
+are two pools, not two readings of one number: what is on the shelf for pickup,
+and what a local same-day delivery out of that store can draw on. Across 12
+products they ran 3 vs 23, 2 vs 14 and 6 vs 11, with pickup ≤ delivery on every
+row.
+
+**`totalProducts` in the sidecar disagrees with the row count.** It is live
+inventory and it moves; the rows are what was actually collected.
+
+**A short category stops early and that is correct.** One category returned 7
+rows and stopped because page 2 came back empty. Terminating on data rather
+than on a page count is what makes that the right answer instead of a partial
+one.
+
+---
+
+## About reCAPTCHA
+
+This site was expected to carry reCAPTCHA v3. **It does not, on any page this
+scraper touches.**
+
+Three sitekeys sit in the global config blob on every page — `siteBKey`,
+`siteCKey` and `RECAPTCHA_KEY_PR` — alongside a `"recaptchaEnterprise":"true"`
+feature flag. An anchor probe against `google.com/recaptcha/api2/anchor`, run
+with a deliberately bogus key as a control:
+
+| Key | `size=normal` | `size=invisible` |
+|---|---|---|
+| all three real keys | **39.4–39.8 KB anchor, no error** | 1,492 b |
+| bogus control | 1,495 b, `Invalid site key` | 1,495 b |
+
+A full anchor under `size=normal` means these are **reCAPTCHA v2 checkbox**
+keys — not v3, not v2-invisible. They belong to sign-in, checkout and
+pro-referral flows, and **no widget is rendered on a listing or a product
+page**.
+
+Measured over 10 browser iterations on 2026-09-23:
+
+| | |
+|---|---|
+| iterations with `Captcha.setAutoSolve` accepted | **10 / 10** |
+| Captcha CDP events observed | **0** |
+| iterations that met Akamai's interstitial | 1 |
+| interstitials that cleared to content | **1 of 1** |
+
+The one interstitial cleared with **zero** Captcha events. The interstitial is
+satisfied by a real browser executing its sensor JavaScript, not by a solve;
+the auto-solver sat armed and silent because there was no puzzle. The detector
+deliberately looks for a rendered widget and never for the sitekey strings —
+matching those would fire on every page the site serves and route a perfectly
+good 1.35 MB listing to the paid solver.
+
+---
+
+## Engines
+
+**Plain HTTP is primary here**, which is unusual in this family. `http_scraper.py`
+shells out to system `curl` (see *The one thing you actually need*), needs no
+browser, and rotates exits when a page is refused.
+
+**Playwright is the primary browser engine**, and over `--cdp-endpoint` it is
+the transport measured to clear Akamai's interstitial every time. Selenium and
+pyppeteer exist for parity: same flags (except Playwright's `--fingerprint`,
+below), same exit codes, same run metadata.
+
+|  | HTTP | Playwright | pyppeteer | Selenium | `--cdp-endpoint` |
+|---|---|---|---|---|---|
+| Live-verified here | **yes** | **yes** | no | no | **yes** |
+| Returns the full grid | yes | yes | — | — | yes |
+| Needs a browser installed | no | yes | yes | yes | no |
+| Authenticated remote CDP | n/a | yes | yes | **no** | — |
+| Authenticated proxy | yes | yes | yes | **no** | n/a |
+| Rotates exits on a refusal | yes | no | no | no | no |
+
+**Live-verified** means it has fetched and parsed a real page from this site.
+pyppeteer and Selenium have been exercised in their own virtualenvs — `pip
+check` clean, suite green, their documented guards asserted — but neither has
+been pointed at homedepot.com.
+
+Two limits are real and are stated here rather than left to be discovered:
+
+* **Selenium cannot use an authenticated remote CDP endpoint.** Playwright's
+  `connect_over_cdp` takes a full `ws://user:pass@host:port` and authenticates
+  on the WebSocket upgrade; chromedriver's `debuggerAddress` takes a bare
+  `host:port` with nowhere to put a password. `--cdp-endpoint` is refused
+  rather than silently ignored.
+* **Selenium's `--proxy-server` cannot authenticate at all.** The credential is
+  stripped and warned about; the warning names the bare address actually handed
+  to Chrome.
+
+**pyppeteer is effectively unmaintained** and its own README points at
+Playwright. It is kept for parity.
+
+**A Scraping Browser profile allows ONE live connection**, and an
+abnormally-ended one holds the lock for a very long time — measured
+2026-09-22, a `connect_over_cdp` that timed out kept its profile locked through
+25 minutes of continuous polling. `GET /json/version` answers `500
+profile_locked` plainly, **but that call itself takes the lock**, so use it as
+a one-off diagnostic and never as a pre-flight. If a profile is stuck, stop
+touching it and wait.
+
+### Two traffic savers behind a proxy
+
+* **Proxy pre-check.** Before a browser engine (`playwright_scraper.py`,
+  `puppeteer_scraper.py`, `selenium_scraper.py`) starts a local browser
+  behind `--proxy` / `--proxy-file`, it sends ONE `HEAD` for
+  `https://www.homedepot.com/robots.txt` through that proxy. A gateway `407`
+  (the credential was refused, or the traffic balance is exhausted) or `402`
+  (traffic/balance exhausted) ends the run there: exit `5`, a message naming
+  `HOMEDEPOT_PROXY` (never its value), and `<out>.latest_attempt.meta.json`
+  with `status: failed` and `stop_reason: proxy_auth_failed`. The data and
+  `<out>.meta.json` are left as they were, even with `--allow-empty`. It is
+  neither retried nor rotated: every exit on a refused credential or an
+  exhausted balance answers the same way. Any other answer (a `200`, the
+  site's own `403`) or a transport error is not a verdict on the proxy, and
+  the run goes on as before. `http_scraper.py` and `catalog_walk.py` need no
+  extra request: their first request already stops the run the same way on a
+  `407` or `402`, through curl or `requests`. Nothing is pre-checked with
+  `--cdp-endpoint` or with no proxy.
+* **Media blocking.** While a LOCAL browser goes through `--proxy` /
+  `--proxy-file`, images, video/audio and web fonts are aborted: no parser
+  here reads them (image URLs come from the page's own data, and the page
+  classifier reads asset hostnames from the markup, which is unchanged), and a
+  residential proxy bills per byte. Playwright and pyppeteer abort them by
+  resource type; Selenium blocks them by file extension
+  (`Network.setBlockedURLs`), so an image served without one still loads
+  there. Playwright turns its HTTP cache off while a route is installed, so
+  scripts are fetched again on every page of a multi-page browser run.
+  Nothing is blocked with `--cdp-endpoint` or with no proxy, and
+  `--load-media` keeps everything. The sidecars record
+  `transport_facts.media_blocked`.
+* **Measured 2026-10-20**, with no proxy, one miter-saw listing page through
+  Playwright with and without the blocking forced on: both runs got Akamai's
+  `403` (339 bytes) from this datacentre address, so a live comparison of the
+  rows was not possible. Against a local test page, every engine fetched the
+  page and its script and none of its images, video or font with blocking on,
+  and all of them without it.
+
+### A traffic budget behind a proxy
+
+Every transport counts what it sends through a LOCAL proxy (`--proxy` /
+`--proxy-file` / `HOMEDEPOT_PROXY`), and `--proxy-budget-mb` (default `10`;
+`0` = unlimited) caps a run. Once the running total passes it, no further page
+(or retry, or sitemap file) is requested, a browser aborts any request it
+still tries, the rows already read are kept, and the run ends with
+`stop_reason: proxy_budget_exceeded`: exit `6` with rows, `5` without. It
+never goes on silently. A proxied run ends with one line such as `Proxy
+traffic: 3.2 MB of 10 MB budget`, and both sidecars record `proxy_bytes`,
+`proxy_budget_bytes` and `proxy_budget_exceeded` (`null` / `null` / `false`
+when no local proxy was used). Nothing is metered or limited over
+`--cdp-endpoint` or with no proxy. `catalog_walk.py` honours the same flag and
+prints the same line; it writes no sidecar.
+
+| Transport | Counted from |
+|---|---|
+| `http_scraper.py`, curl | curl's own `size_request` + `size_upload` + `size_header` + `size_download` (`--write-out`), also when curl fails |
+| `http_scraper.py` / `catalog_walk.py`, requests | request line, headers and body sent; status line, headers and body as received on the wire (compressed) |
+| Playwright | `request.sizes()` of every finished or failed request |
+| pyppeteer | CDP `Network.loadingFinished.encodedDataLength` of every response that came over the network, plus each request's line, headers and body |
+| Selenium | the same CDP events, from Chrome's performance log |
+| the browser pre-check | its `HEAD` response, as for requests |
+
+The count is an estimate of the tunnelled payload, not the proxy's invoice:
+TLS records, the `CONNECT` exchange (except the response headers curl
+reports), WebSocket frames and Chrome's own background requests are not
+visible to it, so the bill is a few per cent higher. A `CONNECT` that
+`requests` sees refused carries no response to count. 1 MB = 1,000,000 bytes.
+
+### A 2Captcha fingerprint on a local browser (Playwright)
+
+```bash
+python3 playwright_scraper.py --fingerprint --fp-country us \
+  --url https://www.homedepot.com/b/Tools-Power-Tools-Saws-Miter-Saws/N-5yc1vZc2d7
+```
+
+`--fingerprint` fetches one profile from the
+[2Captcha Fingerprint API](https://2captcha.com/fingerprints/api) with
+`TWOCAPTCHA_KEY` and applies it to the Chromium this scraper launches: user
+agent together with its client hints (`Sec-CH-UA*`, `navigator.userAgentData`),
+locale and `Accept-Language`, timezone, screen and window size, device scale
+factor, `navigator.platform` / `hardwareConcurrency` / `deviceMemory` and the
+WebGL vendor and renderer strings. After the first page the scraper reads
+these back from the live page and records them, with any mismatch, under
+`transport_facts.fingerprint` in the run metadata.
+
+* **Local browser only.** The Scraping Browser API brings its own
+  fingerprint, so a typed `--cdp-endpoint` with `--fingerprint` exits 2, and a
+  `HOMEDEPOT_CDP_ENDPOINT` from `.env` is ignored for that run (with a notice).
+  Selenium and pyppeteer do not implement `--fingerprint` and refuse it (exit 2).
+* **A separate subscription.** A key without a fingerprint plan is answered
+  `403 ERROR_FINGERPRINT_PLAN_REQUIRED`; the run then exits 5 before any page
+  is fetched.
+* `--fp-tags` takes ONE tag (default `Windows`). `--fp-country` should match
+  the proxy's exit (`us` here). The response is cached in
+  `~/.cache/2captcha-fingerprints/` per set of flags, so the same flags give
+  the same identity (and no new charge); `--fp-refresh` fetches a new one.
+* What it does not change: the browser engine underneath is still the
+  installed Chromium, which may be a different version from the one the
+  profile names, and WebGL output is the real GPU's. It does not give a local
+  browser access to this site: a local Chromium is the transport this README
+  measured as refused, and no access difference has been measured with and
+  without a fingerprint. Use it for a consistent identity, not as a way past
+  Akamai.
+
+---
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Complete |
+| `1` | Crash |
+| `2` | Bad usage (including a URL that is not a homedepot.com host) |
+| `3` | Blocked — the site refused this scraper |
+| `4` | Zero products — including a hub category, which is a correct answer |
+| `5` | The content was never obtained — **our** plumbing, not the site |
+| `6` | Partial — some pages fetched, then stopped early (including `stop_reason: proxy_budget_exceeded`) |
+
+**`3` and `5` mean different things and the difference matters.** `5` covers a
+navigation timeout, a dropped connection or CDP socket, an empty document from
+a navigation that never completed, a `profile_locked` profile, a proxy
+credential that no longer authenticates or a proxy whose traffic balance is
+exhausted (HTTP 407 or 402 from the gateway — homedepot.com is never reached
+at all; `stop_reason: proxy_auth_failed`), a failed Scraper API call, and a page
+that lists products but parsed to none (a parser failure, not an empty
+category), and a run whose proxy budget (`--proxy-budget-mb`) ran out before
+any row (`stop_reason: proxy_budget_exceeded`). Reporting any of those as `3` sends you to the anti-bot problem
+when the answer is somewhere else entirely. If one of them happens AFTER some
+pages already gave rows, the rows are written and the run exits `6`.
+
+**A run that finds nothing writes nothing.** Last night's good output is not
+replaced with `[]`; `--allow-empty` is the opt-out.
+
+`<out>.meta.json` records `status`, `stop_reason`, `mode`, `source` and
+**which** pages failed by number. Separately, `<out>.latest_attempt.meta.json`
+is written on **every** run whatever the outcome — without it, a blocked run
+leaves yesterday's `status: complete` sidecar beside yesterday's data and a
+pipeline cannot tell that from a fresh success.
+
+---
+
+## Measured results
+
+`playwright_scraper.py` over the Scraping Browser API and `http_scraper.py`
+over curl, 2026-09-22 and 2026-09-23:
+
+| Run | Transport | Rows | Coverage |
+|---|---|---:|---|
+| Miter Saws, 3 pages | Playwright / CDP | 35 | sku, title, price, currency, brand, image, availability, rating, store, hierarchy, model: **35/35** |
+| Miter Saws, 3 pages | `http_scraper` / curl | 35 | identical — see below |
+| Freezerless Refrigerators, 2 pages | Playwright / CDP | 24 | price **24/24**, 11 distinct brands |
+| One product page | Playwright / CDP | 1 | price, currency, gtin13, model, colour, rating all present |
+
+**Transport parity.** The same category through the browser and through the
+curl-backed HTTP client produced 35 rows each, the **same sku set**, and **zero
+differing fields** — including `store_quantity`, `local_delivery_quantity` and
+`availability`.
+
+**10 browser iterations, 2026-09-23.** 10 of 10 completed without error, 176
+rows, **0 of 16 invariants violated**. Four repeats of one category returned an
+IDENTICAL sku set with zero drift in any stable field, and those 24 rows
+matched `sample_output.json` — which was cut from the *curl* path — on all 24
+skus with zero field and zero price differences.
+
+**Fingerprint, 2026-11-05.** `playwright_scraper.py --fingerprint --fp-country
+us --pages 1 --max-products 20 --solve-captcha never`, local headless Chromium
+156, no proxy, the Miter Saws category. The profile was a real US response
+from the Fingerprint API (the test account had no fingerprint plan that day,
+so it came from the cache, not a fresh fetch). Read back from the page: the
+profile's Chrome 150 user agent, `userAgentData` brands and platform,
+`en-US`, `America/New_York`, `Win32`, 32 cores, 32 GB, 2560×1440, client hints
+set, no mismatch. The page itself was Akamai's 403 to a non-US address, exit
+3, as for any local browser without a US exit.
+
+Discovery, over plain HTTP: `PLP_CORE_TAX-0.xml` alone holds **5,304** leaf
+category URLs; the product sitemap index spans 96 files.
+
+---
+
+## Comparing two runs
+
+```bash
+python3 diff_runs.py --old miter.2026-09-22.json --new miter.2026-09-23.json
+```
+
+Joins on `sku` and reports added, removed and changed rows. It refuses to
+compare two runs that are not both `complete`, because a partial run's
+un-fetched pages otherwise read as delisted products. A price difference that
+comes with a `price_source` difference is reported as `source_changed` rather
+than `changed`: that says something about our own two snapshots, not about the
+site.
+
+---
+
+## Testing
+
+```bash
+python3 smoke_test.py          # the offline checks, no network, no browser
+python3 -m pytest -q           # the same suite, as one pytest test
+python3 .github/ci_checks.py --all
+```
+
+The suite passes with no engine library installed; absent engines report a
+skip, and CI fails on an *unexpected* skip. `tests.yml` also runs one venv per
+engine and builds the Docker image.
+
+The **canary** (`canary.yml`) is one real run a week (cron `47 4 * * 1`,
+Mondays 04:47 UTC; GitHub may start it later) or on manual dispatch: three
+pages of the Miter Saws category through `HOMEDEPOT_PROXY` (a US residential
+2Captcha proxy, `http_scraper.py` over six session-pinned exits with
+`--proxy-block-retries 5`, so one refused exit does not decide the run) or, without it, `HOMEDEPOT_CDP_ENDPOINT` (country-us,
+Playwright over CDP). It is never skipped to green: with neither secret it
+fails and names them, and a refused proxy, a block, zero rows or a partial run
+is red too.
+
+---
+
+## Troubleshooting
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — it is organised by symptom, from
+"everything comes back exit 3" to "the row count is right but a column is
+empty".
+
+---
+
+## Do you need the paid products?
+
+**For the HTTP path: a US residential exit, yes. Everything else, no.** There
+is no captcha to solve here, and the free `http_scraper.py` returns the full
+grid from an unscored exit.
+
+What the 2Captcha products buy:
+
+* **[Proxies](https://2captcha.com/proxy)** — `HOMEDEPOT_PROXY`. The US exit
+  this site requires. Exits are scored individually and the rate moves (4 of 6
+  exits served content in one measurement, 1 of 3 an hour later, 3 of 6 later
+  still), so a pool beats a single address.
+* **Scraping Browser API** — `HOMEDEPOT_CDP_ENDPOINT`. **The only browser
+  transport measured to work here**, because a local Chromium is refused
+  outright. `country-us` picks the exit; `pid-` is a persistent profile.
+* **[Captcha solving](https://2captcha.com)** — `TWOCAPTCHA_KEY`. On this site
+  it has never had anything to do: no widget has appeared on a listing or a
+  product page. If one does, the browser engines buy at most one solve per
+  page, and only for a reCAPTCHA they can inject the token into
+  (reCAPTCHA Enterprise is not implemented here and is never paid for).
+* **[Fingerprints](https://2captcha.com/fingerprints/api)** — `--fingerprint`
+  (Playwright, local browser), billed as a separate subscription on the same
+  key. Not used over CDP, where the remote browser brings its own and stacking
+  a second creates a contradiction rather than better cover. See
+  [the fingerprint section](#a-2captcha-fingerprint-on-a-local-browser-playwright).
+
+---
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Indiegogo scraper](https://github.com/2scraper/indiegogo-scraper) — Project listings, campaign pages and reward tiers
+- [Kohl's scraper](https://github.com/2scraper/kohls-scraper) — Prices, price ranges, sale and clearance labels, ratings…
+- [Maison KOSÉ scraper](https://github.com/2scraper/kose-scraper) — Kosé's Japanese online store (maison.kose.co.jp)
+- [LG scraper](https://github.com/2scraper/lg-scraper) — Every model in an lg.com category
+- [Lidl US scraper](https://github.com/2scraper/lidl-scraper) — Grocery prices, unit prices and pack sizes from lidl.com…
+- [MediaMarkt scraper](https://github.com/2scraper/mediamarkt-scraper) — Category grids, search results and product pages from ten…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
+
+## Contributing, security, licence
+
+* [CONTRIBUTING.md](CONTRIBUTING.md) — how to report that Home Depot changed
+  its markup, and what a fix needs to include.
+* [SECURITY.md](SECURITY.md) — how to report a vulnerability. Note that "Home
+  Depot changed its markup" and "the scraper is blocked from a datacentre IP"
+  are not vulnerabilities.
+* [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — the failure modes, by symptom.
+* [CHANGELOG.md](CHANGELOG.md) — what changed, with the measurement behind it.
+* MIT — see [LICENSE](LICENSE).
+
+---
+
+## Legal
+
+This repo reads **public pages**. It does not log in, does not touch a cart or
+an order, and does not attempt to defeat the site's protections: Akamai's
+interstitial is waited out exactly as a browser would, and the only thing that
+would ever get solved is a captcha you pay 2Captcha to read — which, on this
+site, has never appeared.
+
+`robots.txt` is respected: the disallowed paths are listed in
+`robots.snapshot.txt` and none of them is on this scraper's route — `/b/` and
+`/p/` are both allowed, and `/s/` search, `/cart*`, `/checkout*` and the rest
+are not touched. Discovery goes through the sitemaps the site publishes for
+that purpose.
+
+Default `--delay` is 1 second between pages. Raise it for anything long, and do
+not point concurrency at one address.
+
+Respect the site's terms and the law where you operate. Scraping at volume
+from one address will get that address blocked, which is the system working as
+designed.

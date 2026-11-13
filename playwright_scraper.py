@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""homedepot.com scraper — Playwright engine (the primary browser engine).
+
+On this site the browser is the RELIABLE transport, not the expensive
+fallback. Akamai answers a fraction of requests with a behavioural
+interstitial (HTTP 200, ~2.5 KB, a JS sensor that scores the client and then
+reloads); a real browser clears it transparently and a plain HTTP client
+cannot. Measured 2026-09-22 — see README.
+
+    python3 playwright_scraper.py \
+        --url https://www.homedepot.com/b/Tools-Power-Tools-Saws-Miter-Saws/N-5yc1vZc2d7 \
+        --pages 3 --out miter
+
+With no `--cdp-endpoint` this launches a local Chromium and needs a US exit
+in `HOMEDEPOT_PROXY`. With one, it connects to the Scraping Browser API,
+which brings its own exit — do not set both.
+"""
+
+from __future__ import annotations
+
+import sys
+
+import browser_bridge
+import captcha_solver
+import fingerprint_client
+import proxy_meter
+import proxy_pool
+
+# Imported at MODULE level on purpose: the offline suite must be able to skip
+# this engine when Playwright is absent, and it can only tell that if the
+# import fails here rather than deep inside start().
+from playwright.sync_api import sync_playwright
+
+
+class PlaywrightDriver:
+    name = "playwright"
+
+    def __init__(self, args):
+        self.args = args
+        self._over_cdp = False
+        self._cdp = None
+        self.media_blocked = False
+        self.autosolve_armed = False
+        self.autosolve_events = []
+        self.autosolve_notes = []
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    def start(self):
+        self._pw = sync_playwright().start()
+        fp = None
+        if self.args.cdp_endpoint:
+            # Wrapped so a failure cannot print the endpoint, which carries a
+            # password. Playwright repeats it five times in one error — the
+            # message plus a four-line call log.
+            try:
+                self._browser = self._pw.chromium.connect_over_cdp(
+                    self.args.cdp_endpoint, timeout=self.args.timeout * 1000)
+            except Exception as exc:
+                raise browser_bridge.BridgeError(
+                    "could not connect over CDP: %s: %s"
+                    % (type(exc).__name__,
+                       browser_bridge.mask_text(str(exc)))) from None
+            contexts = self._browser.contexts
+            self._context = contexts[0] if contexts else self._browser.new_context()
+            self._over_cdp = True
+        else:
+            launch: dict = {"headless": self.args.headless}
+            pool = proxy_pool.from_args(self.args)
+            if pool:
+                # Through Playwright's own fields, never `--proxy-server=`,
+                # which would put the credential on the browser's command line
+                # where `ps` reads it.
+                launch["proxy"] = proxy_pool.to_playwright(pool.current)
+            self._browser = self._pw.chromium.launch(**launch)
+            # No hardcoded user agent: it drifts from whatever Chromium is
+            # installed, and claiming an older Chrome than the JS engine
+            # reports is itself a mismatch. A fingerprint, when asked for, is
+            # applied HERE only: over CDP the remote browser brings its own
+            # and stacking a second is a contradiction.
+            fp = self._fingerprint() if getattr(self.args, "fingerprint", False) else None
+            ctx = {"locale": "en-US"}
+            if fp:
+                ctx.update(fingerprint_client.playwright_context_kwargs(fp))
+            self._context = self._browser.new_context(**ctx)
+            if fp:
+                self._context.add_init_script(fingerprint_client.playwright_init_script(fp))
+            if proxy_pool.should_block_media(self.args, proxy_in_use=bool(pool)):
+                # Images, video and fonts are aborted behind a metered proxy:
+                # no parser reads them (image URLs come from the page data).
+                self._context.route("**/*", proxy_pool.playwright_media_route)
+                self.media_blocked = True
+            if pool:
+                # Counted for --proxy-budget-mb; registered after the media
+                # route, so it is asked first and aborts everything once the
+                # budget is spent.
+                proxy_meter.current().attach_playwright(self._context)
+        self._page = self._context.new_page()
+        if fp:
+            self._apply_ua_override(self._page, fp)
+        self._page.set_default_timeout(self.args.timeout * 1000)
+        if self._over_cdp:
+            self._arm_autosolve()
+
+    # --- 2Captcha fingerprint (local browser only) ---------------------------
+    # Fetched once per run, and each fetch is billed.
+    _fp = None
+    fingerprint_facts = None
+
+    def _fingerprint(self):
+        if self._fp is None:
+            # FingerprintError propagates: run() reports it and exits 5 before
+            # any page is fetched without the identity that was asked for.
+            self._fp = fingerprint_client.get_fingerprint(
+                self.args.twocaptcha_key, tags=self.args.fp_tags,
+                country=self.args.fp_country, refresh=self.args.fp_refresh)
+            self.fingerprint_facts = {
+                "id": self._fp.get("id"), "country": self._fp.get("country"),
+                "user_agent": fingerprint_client.fingerprint_user_agent(self._fp),
+                "not_in_response": fingerprint_client.missing_fields(self._fp),
+                "client_hints": False, "readback": None, "mismatches": None,
+            }
+            print("[i] fingerprint %s (%s): %s" % (
+                self._fp.get("id"), self._fp.get("country"),
+                (self.fingerprint_facts["user_agent"] or "")[:90]), file=sys.stderr)
+            if self.fingerprint_facts["not_in_response"]:
+                print("[!] fingerprint fields not in the response, left as the "
+                      "browser's own: %s" % ", ".join(self.fingerprint_facts["not_in_response"]),
+                      file=sys.stderr)
+        return self._fp
+
+    def _apply_ua_override(self, page, fp):
+        """User agent WITH client hints, so Sec-CH-UA* and userAgentData match
+        the User-Agent header. Per page: CDP emulation is per target."""
+        override = fingerprint_client.user_agent_override(fp)
+        if not override:
+            return
+        try:
+            self._context.new_cdp_session(page).send("Emulation.setUserAgentOverride", override)
+            self.fingerprint_facts["client_hints"] = True
+        except Exception as exc:  # noqa: BLE001
+            print("[!] could not set the fingerprint's client hints: %s"
+                  % str(exc).splitlines()[0][:120], file=sys.stderr)
+
+    def _read_back_fingerprint(self):
+        """Once, after the first page: what the live page reports, compared
+        with the fingerprint. Recorded in the run metadata."""
+        facts = self.fingerprint_facts
+        if not self._fp or facts is None or facts.get("readback") is not None:
+            return
+        try:
+            seen = self._page.evaluate(fingerprint_client.READBACK_JS)
+        except Exception as exc:  # noqa: BLE001
+            facts["readback"] = {"error": str(exc).splitlines()[0][:120]}
+            return
+        facts["readback"] = seen
+        facts["mismatches"] = fingerprint_client.readback_mismatches(self._fp, seen)
+        if facts["mismatches"]:
+            print("[!] the page does not report the fingerprint for: %s"
+                  % "; ".join(facts["mismatches"]), file=sys.stderr)
+
+    def _arm_autosolve(self):
+        """Rung 1a: ask the remote browser to clear challenges itself.
+
+        The Scraping Browser API exposes a `Captcha` CDP domain.
+        `Captcha.setAutoSolve` arms it and `Captcha.solveFinished` is the
+        success signal. Arming it costs nothing when there is nothing to
+        solve, and it runs BEFORE the local solver gets a turn — which is the
+        whole point of the ladder: the paid `captcha_solver.py` rung should
+        only ever see what the browser could not handle.
+
+        Every failure here is a WARNING. An endpoint that does not implement
+        the domain is a perfectly good endpoint for this site, where the wall
+        is an Akamai 403 and a JS interstitial rather than a captcha; refusing
+        to run would trade a working scrape for a missing feature.
+
+        Solve events are counted rather than just logged, so a run can report
+        whether the remote solver actually did anything — see
+        `autosolve_events`.
+        """
+        if self.args.solve_captcha == "never":
+            return
+        try:
+            self._cdp = self._context.new_cdp_session(self._page)
+        except Exception as exc:
+            print("[!] could not open a CDP session for auto-solve: %s"
+                  % browser_bridge.mask_text(str(exc))[:160], file=sys.stderr)
+            return
+        for event in ("Captcha.solveStarted", "Captcha.solveFinished",
+                      "Captcha.solveFailed", "Captcha.detected"):
+            try:
+                self._cdp.on(event, self._on_captcha_event(event))
+            except Exception:
+                pass
+        for method, params in (("Captcha.setAutoSolve", {"autoSolve": True}),
+                               ("Captcha.enable", {})):
+            try:
+                self._cdp.send(method, params)
+                self.autosolve_armed = True
+            except Exception as exc:
+                self.autosolve_notes.append(
+                    "%s unavailable: %s"
+                    % (method, str(exc).splitlines()[0][:100]))
+
+    def _on_captcha_event(self, name):
+        def handler(payload):
+            self.autosolve_events.append({"event": name,
+                                          "payload": str(payload)[:300]})
+            print("[captcha] %s %s" % (name, str(payload)[:160]), file=sys.stderr)
+        return handler
+
+    def navigate(self, url):
+        response = self._page.goto(url, wait_until="domcontentloaded",
+                                   timeout=self.args.timeout * 1000)
+        if self._fp is not None:
+            self._read_back_fingerprint()
+        return response.status if response else None
+
+    def content(self):
+        try:
+            return self._page.content()
+        except Exception:
+            return ""
+
+    def count(self, selector):
+        try:
+            return self._page.locator(selector).count()
+        except Exception:
+            return 0
+
+    def attr(self, selector, name):
+        try:
+            node = self._page.locator(selector).first
+            return node.get_attribute(name)
+        except Exception:
+            return None
+
+    # The paid captcha rung's two page operations. Playwright evaluates an
+    # arrow function directly, which is the dialect captcha_solver's JS is in.
+    def recaptcha_discovery(self):
+        return self._page.evaluate(captcha_solver.RECAPTCHA_DISCOVERY_JS)
+
+    def inject_captcha_token(self, token):
+        return bool(self._page.evaluate(captcha_solver.INJECT_TOKEN_JS, token))
+
+    def sleep(self, ms):
+        self._page.wait_for_timeout(ms)
+
+    def stop(self):
+        for closer in (self._page, self._context, self._browser):
+            try:
+                if closer is not None:
+                    closer.close()
+            except Exception:
+                pass
+        if self._pw is not None:
+            self._pw.stop()
+
+
+def main(argv=None) -> int:
+    parser = browser_bridge.build_parser(
+        "Scrape homedepot.com with Playwright (the primary browser engine).")
+    # Playwright only: the other two engines do not apply a fingerprint, and
+    # argparse refuses the flag there (exit 2) instead of ignoring it.
+    fingerprint_client.add_arguments(parser)
+    args = browser_bridge.parse_args(parser, argv)
+    return browser_bridge.run(args, PlaywrightDriver(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
