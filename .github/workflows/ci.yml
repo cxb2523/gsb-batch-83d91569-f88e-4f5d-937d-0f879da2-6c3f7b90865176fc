@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Type-check and build across the supported OS/Node matrix, plus a
+  # no-network smoke (the client must refuse to construct without a key).
+  # No live API calls here, so this stays fast and uses no credits.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ["18", "20", "22"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run check:types
+
+      - name: Build
+        run: npm run build
+
+      - name: No-key smoke (client must throw without an API key)
+        shell: bash
+        env:
+          OLOSTEP_API_KEY: ""
+        run: |
+          node --input-type=module -e "
+            import Olostep from './dist/index.js';
+            try {
+              new Olostep();
+              console.error('expected constructor to throw without an API key');
+              process.exit(1);
+            } catch {
+              console.log('ok: client refuses to construct without a key');
+            }
+          "
+
+  # Live integration tests against the production Olostep API. The whole
+  # Jest suite hits the real API, so it runs Ubuntu-only (1x credits per
+  # push) and is skipped on fork PRs, which cannot read the secret.
+  # Per-test retries (jest.retryTimes in CI) absorb transient API flakes.
+  live-tests:
+    needs: build
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Run live API tests
+        env:
+          OLOSTEP_API_KEY: ${{ secrets.OLOSTEP_API_KEY }}
+        run: |
+          if [ -z "$OLOSTEP_API_KEY" ]; then
+            echo "::warning::OLOSTEP_API_KEY not set - skipping live tests"
+            exit 0
+          fi
+          npm test

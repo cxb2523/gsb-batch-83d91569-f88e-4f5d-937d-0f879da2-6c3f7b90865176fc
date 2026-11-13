@@ -1,0 +1,61 @@
+{
+  "name": "olostep",
+  "version": "1.2.3",
+  "description": "Node.js SDK for the Olostep web data API: scrape, crawl, batch, map, search, AI answers, and scheduled monitors.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "prepublishOnly": "npm run build",
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rimraf dist",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings=0",
+    "check:types": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "test:release": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathIgnorePatterns /node_modules/ \"tests/(map-crawl|batch)\\\\.test\\\\.ts$\" \"tests/docs_commands/(batches|crawls|maps)\\\\.docs\\\\.test\\\\.ts$\"",
+    "test:jobs": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/map-crawl.test.ts tests/batch.test.ts tests/docs_commands/batches.docs.test.ts tests/docs_commands/crawls.docs.test.ts tests/docs_commands/maps.docs.test.ts"
+  },
+  "keywords": [
+    "olostep",
+    "sdk",
+    "scraping",
+    "web",
+    "crawler",
+    "crawl",
+    "search",
+    "monitors",
+    "ai-answers",
+    "api-client",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/olostep-api/olostep-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/olostep-api/olostep-js/issues"
+  },
+  "homepage": "https://www.olostep.com",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.11.5",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "eslint": "^8.56.0",
+    "jest": "^30.2.0",
+    "rimraf": "^5.0.5",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,105 @@
+# Publishes https://www.npmjs.com/package/olostep
+#
+# Release flow:
+#   1. Bump "version" in package.json (e.g. 1.1.0 -> 1.2.0) in a PR.
+#   2. Merge the PR to main.
+#   3. This workflow runs on the push to main, sees the new version is not yet
+#      on npm, runs the live test suite, publishes, and tags vX.Y.Z.
+#
+# Only the fast live tests (scrape, search, answers, etc.) gate the release.
+# Map, crawl and batch tests depend on how long those API jobs take, which
+# varies from run to run, so they run after publishing in a separate job
+# that reports failures without blocking the release.
+#   Merges that do not change the version publish nothing.
+#
+# Setup (one time): repo secrets NPM_TOKEN (npm automation token) and
+# OLOSTEP_API_KEY (used to gate the release on the live test suite).
+
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to push the release tag
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm ci
+
+      # Only publish when package.json has a version that is not on npm yet.
+      - name: Check whether this version needs publishing
+        id: check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "olostep@$VERSION" version >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "olostep@$VERSION is already on npm - nothing to publish"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "olostep@$VERSION is new - will publish"
+          fi
+
+      - name: Type-check
+        if: steps.check.outputs.publish == 'true'
+        run: npm run check:types
+
+      # Fast live API tests gate the release - a failure blocks publish.
+      # Map, crawl and batch tests run in the job-tests job below instead.
+      - name: Live API tests (release gate)
+        if: steps.check.outputs.publish == 'true'
+        env:
+          OLOSTEP_API_KEY: ${{ secrets.OLOSTEP_API_KEY }}
+        run: |
+          if [ -z "$OLOSTEP_API_KEY" ]; then
+            echo "::error::OLOSTEP_API_KEY not set - refusing to publish without the live test gate"
+            exit 1
+          fi
+          npm run test:release
+
+      - name: Publish to npm
+        if: steps.check.outputs.publish == 'true'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag the release
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          git tag "v${{ steps.check.outputs.version }}"
+          git push origin "v${{ steps.check.outputs.version }}"
+
+  # Map, crawl and batch live tests. They run after the release is published,
+  # so a failure here can't block it, but it still marks the job and the run
+  # as failed so slow or broken job endpoints are visible.
+  job-tests:
+    needs: publish
+    if: needs.publish.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: npm ci
+
+      - name: Live API tests (map, crawl, batch)
+        env:
+          OLOSTEP_API_KEY: ${{ secrets.OLOSTEP_API_KEY }}
+        run: npm run test:jobs
