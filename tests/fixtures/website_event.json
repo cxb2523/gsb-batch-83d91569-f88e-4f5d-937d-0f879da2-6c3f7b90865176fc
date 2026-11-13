@@ -1,0 +1,12 @@
+{
+  "id": "fixture_website_event_001",
+  "source_id": "vadoostan_website",
+  "source_type": "website",
+  "external_id": "synthetic-experience-001",
+  "content_type": "event_page",
+  "content_url": "https://example.invalid/events/synthetic-experience-001",
+  "raw_text": "تجربه نمونه: پیاده‌روی گروهی، پنجشنبه صبح، تهران. ظرفیت محدود است.",
+  "captured_at": "2026-09-09T15:30:00+03:30",
+  "published_at": null,
+  "author": "Vadoostan"
+}

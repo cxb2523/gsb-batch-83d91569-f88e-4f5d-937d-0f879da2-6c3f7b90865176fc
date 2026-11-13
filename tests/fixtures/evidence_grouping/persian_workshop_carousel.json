@@ -1,0 +1,13 @@
+{
+  "description": "Synthetic Persian poster carousel written for offline validation; not derived from runtime captures.",
+  "slides": [
+    {
+      "slide_index": 0,
+      "text": "کارگاه «نقش و خاک»\nساخت ظرف سفالی با دست\nویژه بزرگسالان"
+    },
+    {
+      "slide_index": 1,
+      "text": "تاریخ: جمعه ۲۱ شهریور\nساعت ۱۶ تا ۱۹\nآدرس: تهران، خیابان نمونه، پلاک ۱۲\nورودی: ۳۵۰ هزار تومان\nثبت‌نام: https://example.test/r/123"
+    }
+  ]
+}

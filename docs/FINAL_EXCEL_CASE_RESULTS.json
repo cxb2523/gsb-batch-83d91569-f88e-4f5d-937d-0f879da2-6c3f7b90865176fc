@@ -1,0 +1,812 @@
+{
+ "package_id": "GR-EXCEL-CLOSURE-20261029",
+ "statuses": [
+  "FIXED_VERIFIED",
+  "FIXED_AWAITING_LOCAL_MEDIA",
+  "SOURCE_AMBIGUITY_HANDLED",
+  "EVIDENCE_UNAVAILABLE",
+  "UNRESOLVED_BUG",
+  "out_of_scope"
+ ],
+ "evidence_tiers": {
+  "owner_real": "jabama-session-schema-v3.json, jabama-timeslot-relationships.json, latest review.json / workbook / manifest",
+  "caption_replay": "full discovery/normalization/canonicalization over captions in the supplied review.json (no media, publication time unknown)",
+  "projection_replay": "the supplied projection re-exported at its frozen reference (stored facts, not re-extraction)",
+  "synthetic": "sanitized fixtures and unit tests"
+ },
+ "cases": [
+  {
+   "id": "J01",
+   "status": "FIXED_VERIFIED",
+   "closure": "Validated Jabama timeslots are dated occurrences; horizon per timeslot; next session and remaining count.",
+   "tests": [
+    "test_jabama_timeslots.TimeslotScheduleTests",
+    "test_jabama_timeslots.LargeTimeslotExportTests"
+   ],
+   "evidence": "Owner relationship report: 88 parents / 295 timeslots, all checks pass (real). Parser on synthetic pages of the confirmed shape.",
+   "remaining_limitation": "Live pages parse only in the fresh acceptance crawl; stored Oct-29 observations still hold the older parse."
+  },
+  {
+   "id": "J02",
+   "status": "FIXED_VERIFIED",
+   "closure": "Child startAt/endAt is the interval; parent durationHours is never reused; a shorter slot inside its parent is not a conflict; a truly outside slot stays in review.",
+   "tests": [
+    "test_jabama_timeslots.TimeslotScheduleTests.test_shorter_timeslot_inside_parent_is_not_a_conflict",
+    "test_jabama_timeslots.TimeslotScheduleTests.test_outside_or_unmeasurable_parent_window_stays_in_review"
+   ],
+   "evidence": "Relationship report: 288 wheel slots shorter than parent, all within.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "J03",
+   "status": "SOURCE_AMBIGUITY_HANDLED",
+   "closure": "soldOut=true is shown as the source's flag, never a status and never a temporal effect; contradicted seat counts are dropped.",
+   "tests": [
+    "test_jabama_session_schema.SoldOutBoundaryTests",
+    "test_jabama_timeslots.TimeslotScheduleTests.test_sold_out_vs_upcoming_vs_actionable",
+    "test_jabama_timeslots.BookingPresentationTests"
+   ],
+   "evidence": "All 88 inspected parents soldOut=false; no true example.",
+   "remaining_limitation": "Meaning of soldOut=true unverified; gate name 'sold_out' remains unset."
+  },
+  {
+   "id": "J04",
+   "status": "SOURCE_AMBIGUITY_HANDLED",
+   "closure": "Whole sessions whose window contradicts the stated activity length keep their dates and go to Schedule Review with a Persian reason; no slots invented.",
+   "tests": [
+    "test_jabama_timeslots.SessionWindowTests"
+   ],
+   "evidence": "Latest projection: legacy-941, 50 sessions 08:00-17:00, duration ۲ ساعت.",
+   "remaining_limitation": "Exact attendance times for this page are not known from any evidence."
+  },
+  {
+   "id": "J05",
+   "status": "SOURCE_AMBIGUITY_HANDLED",
+   "closure": "Other Jabama pages use the same strict per-record validation; drift is isolated and explained.",
+   "tests": [
+    "test_jabama_timeslots.TimeslotParsingTests",
+    "test_jabama_session_schema"
+   ],
+   "evidence": "No saved HTML for these pages.",
+   "remaining_limitation": "Live payload shapes confirmed only by the fresh run."
+  },
+  {
+   "id": "F01",
+   "status": "FIXED_VERIFIED",
+   "closure": "Venue 'عمارت زیرخاکی' from 'توی عمارت زیرخاکی منتظر' in the dated clause.",
+   "tests": [
+    "test_final_excel_fields.PresenceVenueTests"
+   ],
+   "evidence": "Full-pipeline replay of the supplied caption: venue None -> عمارت زیرخاکی.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "F02",
+   "status": "FIXED_VERIFIED",
+   "closure": "Venue 'تیدا سنتر' from prose matching the address building 'مجتمع تجاری تیدا سنتر'; floor stays in address.",
+   "tests": [
+    "test_final_excel_fields.AddressBuildingVenueTests"
+   ],
+   "evidence": "Full-pipeline caption replay: venue None -> تیدا سنتر.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "F03",
+   "status": "FIXED_VERIFIED",
+   "closure": "Sekans and Chizmiz venues preserved; addresses differ and are never borrowed.",
+   "tests": [
+    "test_live_run_fields",
+    "test_final_excel_fields.PresenceVenueTests.test_recovered_venues_are_preserved_and_not_borrowed"
+   ],
+   "evidence": "Caption replay unchanged.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "F04",
+   "status": "FIXED_VERIFIED",
+   "closure": "'۲ ساعت' vs 'تجربه‌ای سه‌ساعته': duration left empty, both wordings kept and quoted in Persian; 10:00/13:00 sessions stay separate; no end time derived.",
+   "tests": [
+    "test_final_excel_fields.NarrativeDurationTests"
+   ],
+   "evidence": "Vadoostan fixture carrying the supplied description wording.",
+   "remaining_limitation": "The real pages are re-read only in the fresh run."
+  },
+  {
+   "id": "F05",
+   "status": "FIXED_VERIFIED",
+   "closure": "Program sections separated from About by another section join as separate exact slices; repeats once; other sections never copied.",
+   "tests": [
+    "test_jabama_program_sessions.JabamaProgramDescriptionTests"
+   ],
+   "evidence": "Synthetic Jabama layout; latest projection keeps program text on 7 of 9 Jabama pages.",
+   "remaining_limitation": "No real nonadjacent page was supplied."
+  },
+  {
+   "id": "F06",
+   "status": "FIXED_VERIFIED",
+   "closure": "Mana gallery/area/building, range relevance, closure wording and blank remaining count preserved.",
+   "tests": [
+    "test_location_grammars",
+    "test_xlsx_overflow"
+   ],
+   "evidence": "Caption replay unchanged; Cloud workbook replay row present.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "F07",
+   "status": "FIXED_VERIFIED",
+   "closure": "No city from a promotional hashtag or handle.",
+   "tests": [
+    "test_final_excel_fields.HashtagCityTests"
+   ],
+   "evidence": "Caption replay: Sekans city تهران (hashtag only) -> empty.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "T01",
+   "status": "FIXED_VERIFIED",
+   "closure": "'۸ آبان · ۱۸:۰۰' keeps 18:00.",
+   "tests": [
+    "test_live_run_temporal"
+   ],
+   "evidence": "Retained regression.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "T02",
+   "status": "FIXED_VERIFIED",
+   "closure": "'مدت زمان:' is not a date; separate occurrences.",
+   "tests": [
+    "test_live_run_temporal"
+   ],
+   "evidence": "Retained regression.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "T03",
+   "status": "FIXED_VERIFIED",
+   "closure": "No 05:00 for 'ساعت ۵'; ۸ شب -> 20:00, ۵ عصر -> 17:00.",
+   "tests": [
+    "test_live_run_temporal"
+   ],
+   "evidence": "Retained regression; latest projection shows ambiguous_meridiem.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "T04",
+   "status": "FIXED_VERIFIED",
+   "closure": "Barayand sessions separate; old relative posts never rolled forward.",
+   "tests": [
+    "test_live_run_temporal",
+    "test_event_recall"
+   ],
+   "evidence": "Retained regressions.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "T05",
+   "status": "SOURCE_AMBIGUITY_HANDLED",
+   "closure": "Simorgh clock and Rokhdad length conflicts stay visible; dates kept.",
+   "tests": [
+    "test_schedule_conflicts"
+   ],
+   "evidence": "Retained regression; conflict values now quoted.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "O01",
+   "status": "FIXED_VERIFIED",
+   "closure": "Implausible nonempty OCR continues the chain; cache keyed by image/slot/engine and quality policy; usable reading preferred.",
+   "tests": [
+    "test_ocr_fallback.QualityAwareFallbackTests",
+    "test_ocr_fallback.QualityAwareCacheTests"
+   ],
+   "evidence": "Policy checked on the real De98iwhkf3A OCR text shape (noisy_lines).",
+   "remaining_limitation": "Recovery depends on a second engine being installed locally."
+  },
+  {
+   "id": "O02",
+   "status": "FIXED_AWAITING_LOCAL_MEDIA",
+   "closure": "Generic recovery path in place; acceptance indexes stored readings for DewenndDR2X and DewdAUCCnsq by recorded IDs.",
+   "tests": [
+    "test_final_acceptance"
+   ],
+   "evidence": "Original images not supplied.",
+   "remaining_limitation": "No real-image accuracy claim."
+  },
+  {
+   "id": "O03",
+   "status": "EVIDENCE_UNAVAILABLE",
+   "closure": "Nine title exclusions audited per item in the fresh run (Event, non-event, or evidence gap) with funnel investigations and OCR readings.",
+   "tests": [
+    "test_final_acceptance"
+   ],
+   "evidence": "Only manifest counts/investigation reasons supplied; no item text.",
+   "remaining_limitation": "Not nine known Events; outcomes need the fresh run."
+  },
+  {
+   "id": "O04",
+   "status": "SOURCE_AMBIGUITY_HANDLED",
+   "closure": "Collections and unclassified items are reported, never forced into Events.",
+   "tests": [
+    "test_final_acceptance"
+   ],
+   "evidence": "Manifest funnel investigations.",
+   "remaining_limitation": "Recall for multi-activity collections unmeasured."
+  },
+  {
+   "id": "D01",
+   "status": "FIXED_VERIFIED",
+   "closure": "Pizza title variants do not produce a redundant Event.",
+   "tests": [
+    "test_same_post_ocr_grouping"
+   ],
+   "evidence": "Retained regression.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "C01",
+   "status": "FIXED_VERIFIED",
+   "closure": "Mixed image/video carousel capture and retries preserved.",
+   "tests": [
+    "test_carousel_recovery"
+   ],
+   "evidence": "Retained regressions.",
+   "remaining_limitation": "Historical Tehran capture error is undiagnosable."
+  },
+  {
+   "id": "X01",
+   "status": "FIXED_VERIFIED",
+   "closure": "Lossless _overflow for 50/100/324/1,500 sessions; review import and same-run idempotence.",
+   "tests": [
+    "test_xlsx_overflow",
+    "test_jabama_timeslots.LargeTimeslotExportTests"
+   ],
+   "evidence": "Cloud replay of the latest projection: 1 overflow reference intact.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "X02",
+   "status": "FIXED_VERIFIED",
+   "closure": "Approved design unchanged; validator checks header-only freeze and Vazir/Poppins.",
+   "tests": [
+    "test_final_acceptance"
+   ],
+   "evidence": "Cloud replay workbook: checks pass.",
+   "remaining_limitation": "Native visual rendering remains a local check."
+  },
+  {
+   "id": "X03",
+   "status": "FIXED_VERIFIED",
+   "closure": "Sheet = temporal relevance; آمادگی داده = completeness; capacity column = booking facts; conflicts quoted in Persian.",
+   "tests": [
+    "test_jabama_timeslots.BookingPresentationTests",
+    "test_final_excel_fields.NarrativeDurationTests"
+   ],
+   "evidence": "Cloud replay workbook.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "R01",
+   "status": "FIXED_VERIFIED",
+   "closure": "scripts/final_excel_acceptance.ps1: one crawl, one bundle.",
+   "tests": [
+    "test_final_acceptance"
+   ],
+   "evidence": "Executed end-to-end in Cloud under PowerShell 7.6 with -OfflineReplay.",
+   "remaining_limitation": "Windows PowerShell 5.1 and the live crawl run locally."
+  },
+  {
+   "id": "R02",
+   "status": "FIXED_VERIFIED",
+   "closure": "Latest 5 per source, nine enabled channels, disabled Davvvat website unchanged.",
+   "tests": [
+    "test_sources"
+   ],
+   "evidence": "Configuration unchanged.",
+   "remaining_limitation": null
+  },
+  {
+   "id": "R03",
+   "status": "out_of_scope",
+   "closure": "Google Sheets overflow, Telegram, new UI, database redesign, new vision services.",
+   "tests": [],
+   "evidence": "",
+   "remaining_limitation": null
+  }
+ ],
+ "historical_unresolved_19": [
+  {
+   "items": "DewenndDR2X",
+   "field": "OCR title/date/venue",
+   "mapping": "evidence_gap",
+   "case": "O02"
+  },
+  {
+   "items": "DewdAUCCnsq",
+   "field": "OCR details",
+   "mapping": "evidence_gap",
+   "case": "O02"
+  },
+  {
+   "items": "DeoiH5qRkBU (3 entries)",
+   "field": "duplicate identity",
+   "mapping": "fixed_keep_regression",
+   "case": "D01"
+  },
+  {
+   "items": "DehBOzsNFs9",
+   "field": "venue/city/duration",
+   "mapping": "fixed_keep_regression",
+   "case": "T04 / trailing-head venue"
+  },
+  {
+   "items": "DexCzYgxZ9H",
+   "field": "venue (عمارت عقاب)",
+   "mapping": "fixed_keep_regression",
+   "case": "address-agreed venue"
+  },
+  {
+   "items": "legacy-941",
+   "field": "area_text",
+   "mapping": "fixed_keep_regression",
+   "case": "approximate area (ستارخانه in latest)"
+  },
+  {
+   "items": "69063962, 48552768, 86400491, 48751310, legacy-941, 89740631, 01519540",
+   "field": "program description",
+   "mapping": "fixed_keep_regression",
+   "case": "F05"
+  },
+  {
+   "items": "9jE6eGjHFU78",
+   "field": "start_time/occurrences",
+   "mapping": "source_conflict",
+   "case": "T05"
+  },
+  {
+   "items": "rux9wcxtI258",
+   "field": "duration/end/occurrences",
+   "mapping": "source_conflict",
+   "case": "T05"
+  },
+  {
+   "items": "48751310, 01519540",
+   "field": "occurrences (timeslots)",
+   "mapping": "fixed_keep_regression",
+   "case": "J01 (fresh crawl needed for stored items)"
+  }
+ ],
+ "field_audit_latest_projection": {
+  "legend": {
+   "ABSENT_IN_INSPECTED_EVIDENCE": "caption text inspected; the fact is not stated there (images not inspected)",
+   "PARSER_LOSS_FIXED": "stated in the inspected text; recovered by this change",
+   "SOURCE_CONFLICT": "the source states different values",
+   "UNREADABLE_OR_UNCAPTURED": "OCR-only record; image pixels not available in Cloud",
+   "UNVERIFIED": "website detail page not supplied; only the stored description was available"
+  },
+  "records": [
+   {
+    "sheet": "events",
+    "locator": "Detok4qqQVa",
+    "title": "نمایشگاه انفرادی مانا",
+    "blank_fields": {
+     "address": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "city": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "events",
+    "locator": "DfCnNueOwV6",
+    "title": "رویداد سکانس چهارم",
+    "blank_fields": {
+     "area_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "location_context": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "events",
+    "locator": "DfDFpVoRbJz",
+    "title": "ایونت زیرخاکی",
+    "blank_fields": {
+     "venue_name": "PARSER_LOSS_FIXED",
+     "area_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "location_context": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "city": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_time": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "events",
+    "locator": "DfC_qdpxzz-",
+    "title": "رویداد فصل پنجم ویرا",
+    "blank_fields": {
+     "venue_name": "PARSER_LOSS_FIXED",
+     "area_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "location_context": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_time": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "events",
+    "locator": "DfCdYpmtECt",
+    "title": "ایونت چیزمیز",
+    "blank_fields": {
+     "area_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "location_context": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "city": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_time": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "events",
+    "locator": "nCdUVcZUspEr",
+    "title": "بردگیم ticket to ride Europe",
+    "blank_fields": {
+     "venue_name": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "city": "UNVERIFIED",
+     "price_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "7YqGsONYId6D",
+    "title": "سفالگری با چرخ",
+    "blank_fields": {
+     "venue_name": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "city": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "bVR7jp4Dx3dk",
+    "title": "گل‌آرایی: دسته گل پاییزی",
+    "blank_fields": {
+     "venue_name": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "city": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "UWgxlof7m2xU",
+    "title": "عطرسازی",
+    "blank_fields": {
+     "venue_name": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "city": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "Yqc1K4m7IwXF",
+    "title": "سفالگری با چرخ",
+    "blank_fields": {
+     "venue_name": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "city": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "08945247",
+    "title": "ورکشاپ ویژه هالووین در کارگاه هیلان",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "95037796",
+    "title": "رویداد هالووین",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "duration_text": "UNVERIFIED",
+     "price_text": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "events",
+    "locator": "De98iwhkf3A",
+    "title": "ورکشاپ ساخت جاعودی",
+    "blank_fields": {
+     "venue_name": "UNREADABLE_OR_UNCAPTURED",
+     "area_text": "UNREADABLE_OR_UNCAPTURED",
+     "location_context": "UNREADABLE_OR_UNCAPTURED",
+     "address": "UNREADABLE_OR_UNCAPTURED",
+     "city": "UNREADABLE_OR_UNCAPTURED",
+     "duration_text": "UNREADABLE_OR_UNCAPTURED",
+     "price_text": "UNREADABLE_OR_UNCAPTURED",
+     "organizer_name": "UNREADABLE_OR_UNCAPTURED",
+     "availability_text": "UNREADABLE_OR_UNCAPTURED",
+     "registration_url": "UNREADABLE_OR_UNCAPTURED",
+     "start_time": "UNREADABLE_OR_UNCAPTURED"
+    },
+    "notes": "OCR-only record"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "62170465",
+    "title": "استندآپ کمدی محمد معتضدی به همراه گروه چشمک",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "duration_text": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "De98iwhkf3A",
+    "title": "ورکشاپ چارم‌بگ سالووینی",
+    "blank_fields": {
+     "venue_name": "UNREADABLE_OR_UNCAPTURED",
+     "area_text": "UNREADABLE_OR_UNCAPTURED",
+     "location_context": "UNREADABLE_OR_UNCAPTURED",
+     "address": "UNREADABLE_OR_UNCAPTURED",
+     "city": "UNREADABLE_OR_UNCAPTURED",
+     "duration_text": "UNREADABLE_OR_UNCAPTURED",
+     "price_text": "UNREADABLE_OR_UNCAPTURED",
+     "organizer_name": "UNREADABLE_OR_UNCAPTURED",
+     "availability_text": "UNREADABLE_OR_UNCAPTURED",
+     "registration_url": "UNREADABLE_OR_UNCAPTURED",
+     "start_time": "UNREADABLE_OR_UNCAPTURED"
+    },
+    "notes": "OCR-only record"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "86400491",
+    "title": "تور بازدید خانه‌موزه هایده چنگیزیان",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED",
+     "start_date": "UNVERIFIED",
+     "start_time": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "DfEsAtKRWn7",
+    "title": "ایونت ساختمونا",
+    "blank_fields": {
+     "venue_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "area_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "location_context": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "city": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_date": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_time": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "De98iwhkf3A",
+    "title": "ایونت پیتزای سالووینی",
+    "blank_fields": {
+     "venue_name": "UNREADABLE_OR_UNCAPTURED",
+     "area_text": "UNREADABLE_OR_UNCAPTURED",
+     "location_context": "UNREADABLE_OR_UNCAPTURED",
+     "address": "UNREADABLE_OR_UNCAPTURED",
+     "city": "UNREADABLE_OR_UNCAPTURED",
+     "duration_text": "UNREADABLE_OR_UNCAPTURED",
+     "price_text": "UNREADABLE_OR_UNCAPTURED",
+     "organizer_name": "UNREADABLE_OR_UNCAPTURED",
+     "availability_text": "UNREADABLE_OR_UNCAPTURED",
+     "registration_url": "UNREADABLE_OR_UNCAPTURED",
+     "start_date": "UNREADABLE_OR_UNCAPTURED",
+     "start_time": "UNREADABLE_OR_UNCAPTURED"
+    },
+    "notes": "OCR-only record"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "48751310",
+    "title": "ورکشاپ سفالگری با دست در کارگاه زیتون تهران",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED",
+     "start_date": "UNVERIFIED",
+     "start_time": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "69063962",
+    "title": "نمایش/موسیقی «بودن پس از حذف»",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "legacy-941",
+    "title": "تجربه ساخت ماگ شخصی با سفال",
+    "blank_fields": {
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "88230976",
+    "title": "وورکشاپ یک روزه هنر سایه",
+    "blank_fields": {
+     "venue_name": "UNVERIFIED",
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "DdrlYE2PEMe",
+    "title": "ایونت فیلم و گفتگو با روانشناس",
+    "blank_fields": {
+     "venue_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "area_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "location_context": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "address": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "city": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "duration_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "price_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "organizer_name": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "availability_text": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "registration_url": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_date": "ABSENT_IN_INSPECTED_EVIDENCE",
+     "start_time": "ABSENT_IN_INSPECTED_EVIDENCE"
+    },
+    "notes": "caption text inspected; images not inspected"
+   },
+   {
+    "sheet": "schedule_review",
+    "locator": "01519540",
+    "title": "ورکشاپ سفالگری با چرخ سفال در کارگاه زیتون تهران",
+    "blank_fields": {
+     "area_text": "UNVERIFIED",
+     "location_context": "UNVERIFIED",
+     "address": "UNVERIFIED",
+     "availability_text": "UNVERIFIED",
+     "registration_url": "UNVERIFIED",
+     "start_date": "UNVERIFIED",
+     "start_time": "UNVERIFIED"
+    },
+    "notes": "website detail page not supplied"
+   }
+  ]
+ },
+ "acceptance_run_3e9237b1": {
+  "run_id": "3e9237b12e8746579b5c665184c94c7c",
+  "commit": "0318b8299781c16d5356889e444094be5adf4747",
+  "reference_at": "2026-10-29T21:15:21+03:30",
+  "result": "16 actionable, 4 schedule review, 6 expired; workbook valid; 10 missing-title exclusions",
+  "evidence_inspected": "40 bundled slide/frame images and every stored OCR reading in acceptance-report.json; captions were not in that bundle",
+  "exclusions": [
+   {
+    "item": "evenza.platform:DfCIk4Njdij",
+    "excluded": 3,
+    "status": "EVIDENCE_UNAVAILABLE",
+    "ground_truth": "Weekly-picks carousel: cover (۶-۸ آبان) and outro are promotional; slides 1-9 are nine genuine single activities, each with date header, title, clock and venue (New Groove ۶ آبان; آموزش گل‌آرایی, تداکس فشن ۷ آبان; تجربه‌ای از خاک ۷-۸ آبان; A little magic, Meraki Holloween, Yoga x Holloween, پرسه‌گردی تجریش تا ونک, تولد یکسالگی جو کافه ۸ آبان).",
+    "why_not_recovered": "Both local engines misread the stylized date header (آیان/آیسان/آبنان) and most Persian titles; 3x upscale and region crops did not fix the month word or Persian titles. Even exact transcriptions do not yield a defensible title: the title must be chosen among equally shaped short lines (Weekly Picks, category badge, name, venue), which would encode one publisher's template in source-neutral extraction."
+   },
+   {
+    "item": "jabama.events:DfC8atTke1c",
+    "excluded": 4,
+    "status": "SOURCE_AMBIGUITY_HANDLED",
+    "ground_truth": "One-day itinerary (پنجشنبه ۷ آبان) with five stops; the slide clocks are suggested itinerary slots, not the venues' schedules. Stop 2 (Pompeii exhibition, ۱-۱۲ آبان, گالری هما) and stop 3 (رویداد ایرانشهر, ۶-۸ آبان ۱۴-۲۲, خانه میر) carry their own dates; stops 1, 4, 5 have no independent date.",
+    "why_not_recovered": "Stored OCR of stops 2 and 3 is garbled (title words and quotes lost). Assigning itinerary clocks to the venues' activities would fabricate schedules."
+   },
+   {
+    "item": "tehran_by_tehran:DfE3vanOLGI",
+    "excluded": 1,
+    "status": "SOURCE_AMBIGUITY_HANDLED",
+    "ground_truth": "Mood Reel 'pov: Nights of Music in Tehran'; its only concrete show «بودن پس از حذف» is already an Event from the Jabama website (69063962).",
+    "why_not_recovered": "Not a separate dated Event; no loss."
+   },
+   {
+    "item": "tehran_by_tehran:DfC2146NWtl",
+    "excluded": 1,
+    "status": "EVIDENCE_UNAVAILABLE",
+    "ground_truth": "No frame was bundled (40-image budget used by earlier items); stored readings are illegible fragments.",
+    "why_not_recovered": "Cannot be judged without images or caption."
+   },
+   {
+    "item": "davvvat:DfFPSscke1e",
+    "excluded": 1,
+    "status": "EVIDENCE_UNAVAILABLE",
+    "ground_truth": "Not in the tracked case list, so no caption, OCR or image was bundled.",
+    "why_not_recovered": "Cannot be judged."
+   }
+  ],
+  "code_changes": "No extraction, grouping or title change (no evidence-supported generic rule). Acceptance bundle: captions and every title/evidence-excluded item are indexed, the media budget is shared round-robin, and the zip is written by Python with portable entry names; PowerShell 5.1 dependency probe without nested quotes.",
+  "another_live_crawl_required": false
+ }
+}

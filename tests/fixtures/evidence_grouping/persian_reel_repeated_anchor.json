@@ -1,0 +1,18 @@
+{
+  "description": "Sanitized synthetic Reel modelled on the shape of a reviewed public Instagram failure (caption Event plus noisy OCR frames repeating its title). Wording is written for offline tests; no runtime capture, OCR output, account data or media is included.",
+  "caption": "☕️ رویداد باریستا تویی\nیه روز کامل پشت بار قهوه، کنار باریستاهای حرفه‌ای\n۹ و ۱۰ مهرماه\nتوی شعبه‌ی لواسان کافه رئیس منتظرتونیم\nبرای ثبت‌نام به لینک بیو سر بزنید",
+  "frames": [
+    {"frame_timestamp_ms": 0, "text": "رویداد باریستا تویی\n3 am"},
+    {"frame_timestamp_ms": 1500, "text": "A eee\n1 /"},
+    {"frame_timestamp_ms": 3000, "text": "باریستا تویی"},
+    {"frame_timestamp_ms": 4500, "text": "ﮐﺎ ﻓ ﺭ"},
+    {"frame_timestamp_ms": 6000, "text": "رویداد باریستا تویی"},
+    {"frame_timestamp_ms": 7500, "text": "9/25"}
+  ],
+  "expected": {
+    "events": 1,
+    "title": "رویداد باریستا تویی",
+    "source_date_text": "۹ و ۱۰ مهرماه",
+    "venue_name": "شعبه‌ی لواسان کافه رئیس"
+  }
+}

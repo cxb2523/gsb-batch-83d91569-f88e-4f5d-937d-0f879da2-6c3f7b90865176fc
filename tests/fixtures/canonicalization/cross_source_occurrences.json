@@ -1,0 +1,25 @@
+{
+  "description": "Synthetic public-style text for Stage 8 offline discovery, normalization and occurrence matching. No runtime data.",
+  "records": [
+    {
+      "source_id": "davvvat_website",
+      "key": "website_one",
+      "text": "کارگاه «سفال مهتاب»\n۲ مهر ۱۴۰۵ ساعت ۱۸\nمکان: گالری آبی\nشهر: تهران\nآدرس: تهران، خیابان نمونه، پلاک ۱۲\nورودی ۳۰۰ تومان"
+    },
+    {
+      "source_id": "davvvat_instagram",
+      "key": "instagram_one",
+      "text": "کارگاه «سفال مهتاب»\n۲ مهر ۱۴۰۵ ساعت ۱۸\nمکان: گالری آبی\nشهر: تهران\nآدرس: تهران، خیابان نمونه، پلاک ۱۲\nورودی ۳۰۰ تومان"
+    },
+    {
+      "source_id": "jabama_events_website",
+      "key": "other_publisher",
+      "text": "کارگاه «سفال مهتاب»\n۲ مهر ۱۴۰۵ ساعت ۱۸\nمکان: گالری آبی\nشهر: تهران\nآدرس: تهران، خیابان نمونه، پلاک ۱۲\nورودی ۳۰۰ تومان"
+    },
+    {
+      "source_id": "davvvat_website",
+      "key": "later_session",
+      "text": "کارگاه «سفال مهتاب»\n۳ مهر ۱۴۰۵ ساعت ۱۸\nمکان: گالری آبی\nشهر: تهران\nآدرس: تهران، خیابان نمونه، پلاک ۱۲\nورودی ۳۰۰ تومان"
+    }
+  ]
+}

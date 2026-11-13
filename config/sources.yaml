@@ -1,0 +1,107 @@
+defaults:
+  timezone: Asia/Tehran
+  locale: fa-IR
+
+sources:
+  - id: davvvat_website
+    publisher_key: davvvat
+    name: Davvvat Website
+    type: website
+    url: https://davvvat.ir/
+    # Disabled by policy: davvvat.ir/robots.txt has "User-Agent: GatherRadar /
+    # Disallow: /" (re-checked 2026-09-27). Definition and adapter are kept; do
+    # not re-enable or bypass unless that robots rule is lifted. Davvvat
+    # Instagram is unaffected.
+    enabled: false
+    disabled_reason: robots
+    website:
+      adapter: davvvat
+      detail_path_prefixes: [/event/]
+      content_selector: .event-detail-right
+      drop_query_params: [from]
+
+  - id: davvvat_instagram
+    publisher_key: davvvat
+    name: Davvvat Instagram
+    type: instagram
+    url: https://www.instagram.com/davvvat/
+    username: davvvat
+    enabled: true
+
+  - id: vadoostan_website
+    publisher_key: vadoostan
+    name: Vadoostan Website
+    type: website
+    url: https://vadoostan.ir/app/experiences
+    enabled: true
+    website:
+      adapter: vadoostan
+      detail_path_prefixes: [/app/experiences/]
+      content_selector: main
+
+  - id: vadoostan_instagram
+    publisher_key: vadoostan
+    name: Vadoostan Instagram
+    type: instagram
+    url: https://www.instagram.com/vadoostan/
+    username: vadoostan
+    enabled: true
+
+  - id: jabama_events_website
+    publisher_key: jabama_events
+    name: Jabama Events Website
+    type: website
+    url: https://jabama.events/all?city=tehran
+    enabled: true
+    website:
+      adapter: jabama-events
+      detail_path_prefixes: [/events/]
+      content_selector: article
+    city_hint: Tehran
+
+  # The public Experiences tab (site navigation "تجربه‌ها"), static SSR. Its
+  # detail pages share the Jabama /events/ detail layout and adapter.
+  - id: jabama_experiences_website
+    publisher_key: jabama_events
+    name: Jabama Experiences Website
+    type: website
+    url: https://jabama.events/all?city=tehran&type=experiences
+    enabled: true
+    website:
+      adapter: jabama-events
+      detail_path_prefixes: [/events/]
+      content_selector: article
+    city_hint: Tehran
+
+  - id: jabama_events_instagram
+    publisher_key: jabama_events
+    name: Jabama Events Instagram
+    type: instagram
+    url: https://www.instagram.com/jabama.events/
+    username: jabama.events
+    enabled: true
+
+  - id: emrooz_events_instagram
+    publisher_key: emrooz_events
+    name: Emrooz Events Instagram
+    type: instagram
+    url: https://www.instagram.com/emrooz.events/
+    username: emrooz.events
+    enabled: true
+
+  - id: tehran_by_tehran_instagram
+    publisher_key: tehran_by_tehran
+    name: Tehran by Tehran Instagram
+    type: instagram
+    url: https://www.instagram.com/tehran_by_tehran/
+    username: tehran_by_tehran
+    enabled: true
+    city_hint: Tehran
+
+  - id: evenza_platform_instagram
+    publisher_key: evenza_platform
+    name: Evenza Platform Instagram
+    type: instagram
+    url: https://www.instagram.com/evenza.platform/
+    username: evenza.platform
+    enabled: true

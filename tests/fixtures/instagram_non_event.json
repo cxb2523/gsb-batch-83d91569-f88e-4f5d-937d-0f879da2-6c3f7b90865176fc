@@ -1,0 +1,12 @@
+{
+  "id": "fixture_instagram_non_event_001",
+  "source_id": "davvvat_instagram",
+  "source_type": "instagram",
+  "external_id": "SYNTHETIC002",
+  "content_type": "post",
+  "content_url": "https://www.instagram.com/p/SYNTHETIC002/",
+  "raw_text": "ممنون که هفته گذشته همراه ما بودید. عکس‌های بیشتری به‌زودی منتشر می‌کنیم.",
+  "captured_at": "2026-09-09T15:30:00+03:30",
+  "published_at": "2026-09-07T18:00:00+03:30",
+  "author": "davvvat"
+}

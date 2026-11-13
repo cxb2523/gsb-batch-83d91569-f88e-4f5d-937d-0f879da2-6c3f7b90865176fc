@@ -1,0 +1,24 @@
+{
+  "package_id": "GR-EXCEL-CLOSURE-20261029",
+  "note": "QA inventory for the owner's acceptance run. Public locators identify examples to look up in the fresh run; they are never used by extraction. Expectations apply only when the item is among the latest five per source.",
+  "cases": [
+    {"id": "J01", "locators": ["/events/01519540", "/events/48751310"], "expect": {"occurrences_min": 1, "no_reason": "source_timeslots_unverified"}, "summary": "Validated Jabama timeslots become dated sessions; next session and remaining count shown."},
+    {"id": "J04", "locators": ["/events/legacy-941"], "expect": {"reason": "session_window_conflict"}, "summary": "08:00-17:00 parent windows vs a 2-hour activity stay in Schedule Review; no invented slots."},
+    {"id": "J05", "locators": ["/events/86400491", "/events/89740631", "/events/69063962", "/events/62170465", "/events/88230976"], "expect": {}, "summary": "Other Jabama pages: supported schema parsed; drift isolated and explained."},
+    {"id": "F01", "locators": ["/p/DfDFpVoRbJz/"], "expect": {"venue_name": "عمارت زیرخاکی"}, "summary": "Venue from 'توی عمارت زیرخاکی' in the dated clause."},
+    {"id": "F02", "locators": ["/p/DfC_qdpxzz-/"], "expect": {"venue_name": "تیدا سنتر"}, "summary": "Venue from 'در تیدا سنتر' matching the address building."},
+    {"id": "F03", "locators": ["/p/DfCnNueOwV6/", "/p/DfCdYpmtECt/"], "expect": {"venue_present": true}, "summary": "Recovered Sekans / Chizmiz venues preserved."},
+    {"id": "F04", "locators": ["/experiences/7YqGsONYId6D", "/experiences/Yqc1K4m7IwXF"], "expect": {"duration_text": null, "reason": "duration_conflict"}, "summary": "۲ ساعت vs سه‌ساعته: both kept, neither chosen."},
+    {"id": "F06", "locators": ["/p/Detok4qqQVa/"], "expect": {"venue_name": "گالری ایت/کیوب", "area_text": "اقدسیه", "location_context": "مجتمع آواپلت", "remaining_session_count": null}, "summary": "Mana range, closure wording, blank remaining count."},
+    {"id": "F07", "locators": ["/p/DfCnNueOwV6/"], "expect": {"city": null}, "summary": "No city from a promotional hashtag alone."},
+    {"id": "T01", "locators": ["/events/95037796"], "expect": {"start_time": "18:00:00"}, "summary": "۸ آبان · ۱۸:۰۰ keeps 18:00."},
+    {"id": "T02", "locators": ["/events/08945247"], "expect": {"occurrences_min": 2}, "summary": "Duration label is not a date; separate sessions."},
+    {"id": "T03", "locators": ["/p/De98iwhkf3A/"], "expect": {"no_start_time": "05:00:00"}, "summary": "No invented 05:00 for 'ساعت ۵'."},
+    {"id": "T04", "locators": ["/p/DeykDRGRMfj/", "/p/DehBOzsNFs9/"], "expect": {}, "summary": "Barayand sessions separate; old Oktober post stays expired."},
+    {"id": "T05", "locators": ["/experiences/9jE6eGjHFU78", "/experiences/rux9wcxtI258"], "expect": {}, "summary": "Simorgh clock / Rokhdad length conflicts stay visible."},
+    {"id": "O02", "locators": ["/p/DewenndDR2X/", "/p/DewdAUCCnsq/"], "expect": {}, "media": true, "summary": "Historical OCR losses; stored assets inventoried if still local."},
+    {"id": "O03", "locators": ["/p/DfCIk4Njdij/", "/p/DfC8atTke1c/", "/p/De98iwhkf3A/", "/p/DfE3vanOLGI/", "/p/DfC2146NWtl/"], "expect": {}, "media": true, "summary": "Title exclusions in ca3548cb: audit each fresh outcome; not nine known Events."},
+    {"id": "O04", "locators": [], "sources": ["emrooz_events_instagram", "vadoostan_instagram"], "expect": {}, "summary": "Collections and unclassified observations: explain, never force."},
+    {"id": "D01", "locators": ["/p/DeoiH5qRkBU/"], "expect": {}, "media": true, "summary": "Pizza title variants: no redundant Event."}
+  ]
+}

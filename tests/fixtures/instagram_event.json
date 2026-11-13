@@ -1,0 +1,12 @@
+{
+  "id": "fixture_instagram_event_001",
+  "source_id": "davvvat_instagram",
+  "source_type": "instagram",
+  "external_id": "SYNTHETIC001",
+  "content_type": "post",
+  "content_url": "https://www.instagram.com/p/SYNTHETIC001/",
+  "raw_text": "رویداد نمونه: کارگاه طراحی شهری، جمعه ساعت ۱۷، تهران. ثبت‌نام از طریق لینک رویداد.",
+  "captured_at": "2026-09-09T15:30:00+03:30",
+  "published_at": "2026-09-08T18:00:00+03:30",
+  "author": "davvvat"
+}
