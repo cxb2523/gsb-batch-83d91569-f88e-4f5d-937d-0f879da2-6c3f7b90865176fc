@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import type { ChatCompletionFunctionTool } from "openai/resources/chat/completions";
+import { summarizeFetches, withFetchLog, type FetchRecord, type SourceStatus } from "../openf1";
 import { getTeamRadio, getWeather } from "./conditions";
 import type { F1Tool, F1ToolResult } from "./define";
 import { getGaps, getLapTimes, getPositions, getRaceControl, getStints, getTimingTower } from "./race";
@@ -36,7 +37,18 @@ export async function runF1Tool(name: string, args: unknown, ctx: { signal?: Abo
   if (!tool) throw new RangeError(`Unknown F1 tool: ${name}`);
   const parsed = tool.input.safeParse(args ?? {});
   if (!parsed.success) throw new RangeError(`Invalid arguments for ${name}: ${z.prettifyError(parsed.error)}`);
-  return tool.run(parsed.data, ctx);
+  // Record how every OpenF1 request went and attach the summary as `source`, so callers can
+  // tell a fresh cache hit from a stale fallback, and an empty answer from a failed fetch.
+  const fetches: FetchRecord[] = [];
+  try {
+    const result = await withFetchLog(fetches, () => tool.run(parsed.data, ctx));
+    return { ...result, source: summarizeFetches(fetches) };
+  } catch (error) {
+    // A failed call still says why (e.g. OpenF1 kept returning 429): the route sends this back.
+    if (error instanceof Error)
+      (error as Error & { source?: SourceStatus }).source ??= summarizeFetches(fetches);
+    throw error;
+  }
 }
 
 /** Tool specs for Chat Completions. Arguments are validated again by runF1Tool. */

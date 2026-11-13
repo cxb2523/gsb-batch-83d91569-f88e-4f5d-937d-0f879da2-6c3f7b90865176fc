@@ -47,6 +47,8 @@ Each URL is its own page under `src/app/(radio)/`. The layout holds what stays m
 
 The tools (`src/lib/f1/tools`) call OpenF1 through one rate-limited client with a disk cache under `data/openf1`. Finished sessions are cached forever, and a stale copy is served if OpenF1 is down. `npm run snapshot:f1` fills that cache ahead of time; `npm run snapshot:f1 -- --year 2025 --light` adds last season's races (results, standings and stints only).
 
+Every tool result (and every `/api/f1/[tool]` response, including error responses) carries a `source` status saying how its data was obtained: `cache` (fresh cached copy, no request sent), `fetched` (live fetch), `empty` (OpenF1 answered 404 or an empty list — a normal "no data"), `stale` (the network failed and an old copy was served, flagged `stale: true` with its age in `fetchedAt`), or `failed` (no cache and the request failed, with `reason`). The charts and dashboards use it to tell "no data for this" apart from "couldn't load this". `npm run test:f1-status` exercises the five states against a stubbed fetch.
+
 Driver, team colour and circuit data for the visuals is committed under `src/assets/f1`. Refresh it for a new season with `npx tsx scripts/snapshot-f1-assets.ts`.
 
 ## Deploying

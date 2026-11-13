@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import type { SourceStatus } from "../openf1";
 import { resolveSession, sessionLabel, type Session, type SessionType } from "../resolve";
 
 // One F1 tool: a zod input schema (validated on every call; the model's arguments are untrusted)
@@ -11,6 +12,8 @@ export interface F1ToolResult {
   session?: string;
   rows: Record<string, unknown>[];
   note?: string;
+  /** How the data was obtained (cache, live fetch, stale fallback, …); attached by runF1Tool. */
+  source?: SourceStatus;
   [extra: string]: unknown;
 }
 

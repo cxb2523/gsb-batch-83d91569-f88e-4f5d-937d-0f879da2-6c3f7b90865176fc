@@ -2,7 +2,7 @@
 
 import { TeamCar } from "./team-car";
 import { TeamLogo } from "../f1-team-logos";
-import { Ask, AskChart, Head, Missing, Settle } from "./ask";
+import { Ask, AskChart, Head, Missing, Settle, SourceNote } from "./ask";
 import { Avatar } from "./avatar";
 import { shortTeam, useF1, type DriverStanding, type Progression, type Standings, type TeamStanding } from "./data";
 import { seasonOf, TeamProgress } from "./rows";
@@ -22,6 +22,7 @@ export function TeamsPage() {
     <div className="f1d">
       <header>
         <h1 className="f1d-page-title">Teams</h1>
+        <SourceNote sources={[teams?.source, drivers?.source]} />
       </header>
 
       <section className="f1d-section" aria-label="Teams">

@@ -229,6 +229,12 @@
   font-size: 15px;
 }
 
+.f1d-source-note {
+  margin: 4px 0 0;
+  color: var(--d-muted);
+  font-size: 13px;
+}
+
 /* ── Home: next race ──────────────────────────────────────────────────── */
 
 .f1d-hero {

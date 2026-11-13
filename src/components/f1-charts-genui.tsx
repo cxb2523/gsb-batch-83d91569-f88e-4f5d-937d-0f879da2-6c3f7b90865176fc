@@ -27,7 +27,14 @@ import "./loading-board.css";
 import { withBase } from "../lib/base-path";
 
 type Row = Record<string, unknown>;
-type ToolResult = { session?: string; rows?: Row[]; note?: string; [k: string]: unknown };
+/** How the server obtained the rows: fresh cache, a live fetch, a stale fallback, or a failure. */
+type SourceStatus = {
+  state: "cache" | "fetched" | "empty" | "stale" | "failed";
+  fetchedAt?: number;
+  stale?: boolean;
+  reason?: string;
+};
+type ToolResult = { session?: string; rows?: Row[]; note?: string; source?: SourceStatus; [k: string]: unknown };
 
 /* ---------------------------------------------------------------- fetching */
 
@@ -54,12 +61,13 @@ function callTool(tool: string, args: Row): Promise<ToolResult> {
   return hit;
 }
 
-type Load<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "empty" };
+type Load<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "empty" } | { state: "error" };
 
 /** Runs `load` once its key has held still for 250ms, unless raw data was given. Charts render
     while the answer streams, so their arguments can change as they arrive; waiting for them to
-    hold still avoids fetching with half-written values. An empty or failed result is "empty",
-    since OpenF1 has gaps and a missing session should show a quiet panel, not an error. */
+    hold still avoids fetching with half-written values. An empty result (OpenF1 has gaps, and a
+    missing session should show a quiet panel, not an error) is "empty"; a failed fetch is
+    "error", so the two are never shown as the same thing. */
 function useChartData<T>(key: string, load: () => Promise<T | null>, raw?: T | null): Load<T> {
   const [result, setResult] = useState<Load<T>>({ state: "loading" });
   useEffect(() => {
@@ -69,7 +77,7 @@ function useChartData<T>(key: string, load: () => Promise<T | null>, raw?: T | n
     const timer = setTimeout(() => {
       load()
         .then((value) => live && setResult(value == null ? { state: "empty" } : { state: "ready", value }))
-        .catch(() => live && setResult({ state: "empty" }));
+        .catch(() => live && setResult({ state: "error" }));
     }, 250);
     return () => {
       live = false;
@@ -87,15 +95,18 @@ function useChartData<T>(key: string, load: () => Promise<T | null>, raw?: T | n
 const TITLE_H = 32;
 
 /** While loading: the chart's panel at its final height with its title, so nothing shifts. When
-    nothing came back: one quiet line in the same panel. */
+    nothing came back: one quiet line in the same panel — a genuinely empty answer and a failed
+    fetch get different words. */
 function Pending({ load, title, height, children }: { load: Load<unknown>; title?: string; height: number; children: () => ReactNode }) {
   if (load.state === "ready") return <>{children()}</>;
   height -= title ? 0 : TITLE_H;
   return (
-    <figure className={`f1-chart f1-chart-pending${load.state === "empty" ? " is-empty" : ""}`} style={{ minHeight: height }}>
+    <figure className={`f1-chart f1-chart-pending${load.state === "empty" || load.state === "error" ? " is-empty" : ""}`} style={{ minHeight: height }}>
       {title && <figcaption className="f1-chart-title">{title}</figcaption>}
       {load.state === "empty" ? (
         <p className="f1-chart-empty">No data for this chart.</p>
+      ) : load.state === "error" ? (
+        <p className="f1-chart-empty">Couldn&apos;t load this chart — the data source may be rate-limiting. Try again in a moment.</p>
       ) : (
         // The loading board (.f1-settle in loading-board.css), laid behind the title, so a loading
         // chart and a loading dashboard always look and move the same.

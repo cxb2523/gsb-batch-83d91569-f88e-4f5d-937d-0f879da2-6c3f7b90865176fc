@@ -1,7 +1,7 @@
 "use client";
 
 import { ChampionshipProgress, RankedBars } from "../f1-charts-special/f1-charts-special";
-import { AskChart, Head, Settle } from "./ask";
+import { AskChart, Head, Settle, SourceNote } from "./ask";
 import { surname, useF1, type DriverStanding, type Progression, type Standings, type TeamStanding } from "./data";
 import { DriverRows, seasonOf, TeamProgress, TeamRows } from "./rows";
 
@@ -38,6 +38,7 @@ export function StandingsPage() {
         <p className="f1d-lede" style={{ minHeight: 24 }}>
           {after ? `After round ${after[2]}` : " "}
         </p>
+        <SourceNote sources={[drivers?.source, teams?.source]} />
       </header>
 
       <section className="f1d-section" aria-label="Drivers' championship">

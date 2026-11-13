@@ -25,6 +25,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ too
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const status = message.startsWith("Unknown F1 tool") ? 404 : error instanceof RangeError ? 400 : 502;
-    return Response.json({ error: message }, { status });
+    // runF1Tool attaches the fetch provenance to its errors too, so a failed call still says
+    // whether OpenF1 was unreachable, rate limited, or simply had no data.
+    const source = (error as { source?: unknown } | null)?.source;
+    return Response.json(source ? { error: message, source } : { error: message }, { status });
   }
 }

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -8,7 +9,8 @@ import { dirname, resolve } from "node:path";
 // which is what lets `npm run snapshot:f1` make the tools work offline.
 
 export const OPENF1_BASE = "https://api.openf1.org/v1";
-const CACHE_DIR = resolve(process.cwd(), "data/openf1");
+// OPENF1_CACHE_DIR overrides the cache root (tests use a temp dir); the layout is unchanged.
+const CACHE_DIR = resolve(process.env.OPENF1_CACHE_DIR ?? resolve(process.cwd(), "data/openf1"));
 
 // The free tier allows 3 requests per second and 30 per minute. A sliding window keeps us under
 // both while still letting a single question's few requests go out in a burst.
@@ -52,10 +54,13 @@ export function openf1Url(endpoint: string, params: Params = {}) {
   return `${OPENF1_BASE}/${endpoint}${query ? `?${query}` : ""}`;
 }
 
+function endpointOf(url: string) {
+  return new URL(url).pathname.split("/").pop() ?? "misc";
+}
+
 function cachePath(url: string) {
-  const endpoint = new URL(url).pathname.split("/").pop() ?? "misc";
   const hash = createHash("sha1").update(url).digest("hex").slice(0, 16);
-  return resolve(CACHE_DIR, endpoint, `${hash}.json`);
+  return resolve(CACHE_DIR, endpointOf(url), `${hash}.json`);
 }
 
 type CacheEntry = { url: string; fetchedAt: number; final: boolean; data: unknown[] };
@@ -70,6 +75,75 @@ async function readCache(path: string): Promise<CacheEntry | null> {
 
 const inflight = new Map<string, Promise<unknown[]>>();
 const memory = new Map<string, CacheEntry>();
+
+// ── Fetch provenance ─────────────────────────────────────────────────────
+// Every openf1() call reports how its data was obtained, so a tool result can say whether it
+// came from a fresh cache, a live fetch, an empty answer, a stale fallback or a failure — the
+// difference between "this session has no data" and "OpenF1 couldn't be reached just now".
+
+export type FetchState = "cache" | "fetched" | "empty" | "stale" | "failed";
+
+export interface FetchRecord {
+  state: FetchState;
+  url: string;
+  endpoint: string;
+  /** When the served data was originally fetched (absent for "failed"). */
+  fetchedAt?: number;
+  /** The served copy may be out of date (a stale fallback after a network failure). */
+  stale?: boolean;
+  /** Why the request failed (state "failed"). */
+  reason?: string;
+}
+
+/** How a tool result's data was obtained, summarised from its FetchRecords. */
+export interface SourceStatus {
+  /** failed > stale > fetched > cache; "empty" when every request came back empty (a normal 404). */
+  state: FetchState;
+  /** Oldest served copy (ms epoch); for "stale", how old the fallback data is. */
+  fetchedAt?: number;
+  /** True when part of the result is a stale fallback that may be out of date. */
+  stale?: boolean;
+  /** Why fetching failed (state "failed"). */
+  reason?: string;
+  /** One entry per distinct request the tool made. */
+  requests: FetchRecord[];
+}
+
+const fetchLog = new AsyncLocalStorage<FetchRecord[]>();
+
+/** Run `fn` with every OpenF1 fetch it makes recorded into `log` (see summarizeFetches). */
+export function withFetchLog<T>(log: FetchRecord[], fn: () => T): T {
+  return fetchLog.run(log, fn);
+}
+
+function recordFetch(record: FetchRecord) {
+  fetchLog.getStore()?.push(record);
+}
+
+/** Collapse a tool's fetch records into the `source` status attached to its result. */
+export function summarizeFetches(fetches: FetchRecord[]): SourceStatus {
+  // A URL shared by concurrent callers can record once per caller; keep one entry per state+url.
+  const seen = new Set<string>();
+  const requests = fetches.filter((r) => {
+    const key = `${r.state} ${r.url}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const times = requests.map((r) => r.fetchedAt).filter((t): t is number => t !== undefined);
+  const fetchedAt = times.length ? Math.min(...times) : undefined;
+  const failed = requests.find((r) => r.state === "failed");
+  if (failed) return { state: "failed", reason: failed.reason, fetchedAt, requests };
+  const stale = requests.filter((r) => r.state === "stale");
+  if (stale.length) {
+    const staleTimes = stale.map((r) => r.fetchedAt).filter((t): t is number => t !== undefined);
+    return { state: "stale", stale: true, fetchedAt: staleTimes.length ? Math.min(...staleTimes) : undefined, requests };
+  }
+  // "Empty" only when nothing served any data: an empty endpoint next to served rows is normal.
+  if (requests.length && requests.every((r) => r.state === "empty")) return { state: "empty", fetchedAt, requests };
+  if (requests.some((r) => r.state === "fetched")) return { state: "fetched", fetchedAt, requests };
+  return { state: "cache", fetchedAt, requests };
+}
 
 export interface FetchOptions {
   /** The data can no longer change (a finished session). Cached forever. */
@@ -96,9 +170,17 @@ export async function openf1<T = Record<string, unknown>>(
   if (cached) memory.set(url, cached);
   const fresh =
     cached && (cached.final || options.offline || Date.now() - cached.fetchedAt < ttlMs);
-  if (fresh && cached) return cached.data as T[];
-  if (options.offline) throw new OpenF1Error(`Not in the local snapshot: ${url}`);
+  if (fresh && cached) {
+    recordFetch({ state: "cache", url, endpoint, fetchedAt: cached.fetchedAt });
+    return cached.data as T[];
+  }
+  if (options.offline) {
+    recordFetch({ state: "failed", url, endpoint, reason: `Not in the local snapshot: ${url}` });
+    throw new OpenF1Error(`Not in the local snapshot: ${url}`);
+  }
 
+  // Concurrent callers of the same URL share one network request; the request itself records
+  // the outcome, so it is logged exactly once no matter how many callers await it.
   const pending = inflight.get(url);
   if (pending) return pending as Promise<T[]>;
   const request = (async () => {
@@ -113,9 +195,16 @@ export async function openf1<T = Record<string, unknown>>(
         await writeFile(tmp, JSON.stringify(entry));
         await rename(tmp, path);
       } catch {}
+      // A 404 or an empty array is a normal "no data", not a failure.
+      recordFetch({ state: data.length ? "fetched" : "empty", url, endpoint, fetchedAt: entry.fetchedAt });
       return data;
     } catch (error) {
-      if (cached) return cached.data; // stale beats nothing
+      if (cached) {
+        // Stale beats nothing — but say so: this copy may be out of date.
+        recordFetch({ state: "stale", url, endpoint, fetchedAt: cached.fetchedAt, stale: true });
+        return cached.data;
+      }
+      recordFetch({ state: "failed", url, endpoint, reason: error instanceof Error ? error.message : String(error) });
       throw error;
     } finally {
       inflight.delete(url);
@@ -126,7 +215,8 @@ export async function openf1<T = Record<string, unknown>>(
 }
 
 async function fetchWithRetry(url: string, signal?: AbortSignal): Promise<unknown[]> {
-  let backoff = 4000;
+  // OPENF1_BACKOFF_MS shortens the retry pause in tests; production keeps 4s, doubling per retry.
+  let backoff = Math.max(50, Number(process.env.OPENF1_BACKOFF_MS ?? 4000));
   for (let attempt = 0; ; attempt++) {
     await takeSlot();
     signal?.throwIfAborted();

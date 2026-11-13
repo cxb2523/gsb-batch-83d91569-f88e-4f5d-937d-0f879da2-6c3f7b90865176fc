@@ -3,6 +3,7 @@
 import { createContext, useContext, type ButtonHTMLAttributes, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import "../loading-board.css";
 import "./dashboards.css";
+import type { SourceStatus } from "./data";
 
 /*
  * Everything on a dashboard asks Team Radio about itself: a click starts a new chat with a
@@ -99,5 +100,20 @@ export function Missing({ height, what }: { height: number; what: string }) {
     <div className="f1d-missing" style={{ height }}>
       Couldn&apos;t load {what}. Ask Team Radio below instead.
     </div>
+  );
+}
+
+/** A quiet line when the numbers on the page are a saved copy, not live data: the server marks
+    stale fallbacks (`source.state === "stale"`) so they are never read as fresh. */
+export function SourceNote({ sources }: { sources: Array<SourceStatus | null | undefined> }) {
+  const stale = sources.find((s) => s?.state === "stale");
+  if (!stale) return null;
+  const when = stale.fetchedAt
+    ? new Date(stale.fetchedAt).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+    : null;
+  return (
+    <p className="f1d-source-note" role="status">
+      Live data is unavailable — showing a saved copy{when ? ` from ${when}` : ""} that may be out of date.
+    </p>
   );
 }

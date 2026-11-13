@@ -24,7 +24,17 @@ export type ScheduleRow = {
   sprint: boolean;
   sessions?: { name: string; start: string; finished: boolean }[];
 };
-export type Schedule = { session: string; rows: ScheduleRow[]; next: { round: number; name: string; raceStart: string | null } | null; summary: string };
+
+/** How the server obtained a tool result: fresh cache, a live fetch, a stale fallback, or a
+    failure. "stale" carries `stale: true` and the age of the copy in `fetchedAt`. */
+export type SourceStatus = {
+  state: "cache" | "fetched" | "empty" | "stale" | "failed";
+  fetchedAt?: number;
+  stale?: boolean;
+  reason?: string;
+};
+
+export type Schedule = { session: string; rows: ScheduleRow[]; next: { round: number; name: string; raceStart: string | null } | null; summary: string; source?: SourceStatus };
 
 export type DriverStanding = {
   position: number;
@@ -37,10 +47,10 @@ export type DriverStanding = {
   positionChange: number | null;
 };
 export type TeamStanding = { position: number; team: string; teamColour: string | null; points: number; gained: number | null; positionChange: number | null };
-export type Standings<T> = { session: string; rows: T[]; summary?: string };
+export type Standings<T> = { session: string; rows: T[]; summary?: string; source?: SourceStatus };
 
 /** One row per round: { round, race, circuit, ANT: 302, … } (team names as keys for teams). */
-export type Progression = { session: string; rows: Record<string, string | number>[] };
+export type Progression = { session: string; rows: Record<string, string | number>[]; source?: SourceStatus };
 
 export type ResultRow = {
   position: number | null;
@@ -59,7 +69,7 @@ export type ResultRow = {
   fastestLap: string | null;
   fastestLapSeconds: number | null;
 };
-export type Results = { session: string; rows: ResultRow[] };
+export type Results = { session: string; rows: ResultRow[]; source?: SourceStatus };
 
 const cache = new Map<string, Promise<unknown>>();
 

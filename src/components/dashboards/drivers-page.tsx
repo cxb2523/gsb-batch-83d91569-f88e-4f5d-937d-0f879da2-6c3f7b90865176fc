@@ -3,7 +3,7 @@
 import { TeamChip } from "../f1-assets";
 import { Sparkline } from "../f1-charts-special/f1-charts-special";
 import { findDriver } from "../f1-genui";
-import { Ask, Head, Missing, Settle } from "./ask";
+import { Ask, Head, Missing, Settle, SourceNote } from "./ask";
 import { Avatar } from "./avatar";
 import { shortTeam, surname, useF1, type DriverStanding, type Progression, type Standings } from "./data";
 import { pointsByRound, seasonOf } from "./rows";
@@ -31,6 +31,7 @@ export function DriversPage() {
     <div className="f1d">
       <header>
         <h1 className="f1d-page-title">Drivers</h1>
+        <SourceNote sources={[drivers?.source]} />
       </header>
 
       <section className="f1d-section" aria-label="The grid">

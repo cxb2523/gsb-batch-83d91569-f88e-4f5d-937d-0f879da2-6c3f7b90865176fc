@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { CircuitMap, CountryFlag } from "../f1-assets";
 import { ChampionshipProgress, RankedBars, StatCallout } from "../f1-charts-special/f1-charts-special";
 import { findCircuit } from "../f1-genui";
-import { Ask, AskChart, Head, Missing, Settle } from "./ask";
+import { Ask, AskChart, Head, Missing, Settle, SourceNote } from "./ask";
 import { Avatar } from "./avatar";
 import { TeamCar } from "./team-car";
 import { FinishLine } from "../finish-line";
@@ -34,6 +34,7 @@ export function HomeDashboard() {
   return (
     <div className="f1d">
       <h1 className="f1d-sr-only">OpenUI x F1 dashboard</h1>
+      <SourceNote sources={[schedule?.source, drivers?.source, teams?.source, lastRace?.source]} />
       <NextRace schedule={schedule} next={next} year={year} />
       <Overview schedule={schedule} drivers={drivers} teams={teams} year={year} />
       <TitleFight drivers={drivers} teams={teams} progression={progression} year={year} />
@@ -312,11 +313,21 @@ function LastRace({ results }: { results: Results | null | undefined }) {
         <Settle height={420} />
       </section>
     );
-  if (results === null || !results.rows.length)
+  if (results === null)
     return (
       <section className="f1d-section">
         <Head title="Last race" />
         <Missing height={420} what="the last race" />
+      </section>
+    );
+  // An empty answer is not a failure: the season simply hasn't produced a classified race yet.
+  if (!results.rows.length)
+    return (
+      <section className="f1d-section">
+        <Head title="Last race" />
+        <div className="f1d-missing" style={{ height: 120 }}>
+          No race results yet this season.
+        </div>
       </section>
     );
   const [label] = results.session.split(" · ");
