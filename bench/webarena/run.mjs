@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+// run.mjs — run arms of the tandem benchmark over a plan (see README.md).
+//
+// Per task: reset the site (env-ctrl) → fresh tandem Chrome → HAR recorder (all tabs) → one
+// isolated `claude -p` (only tandem's MCP + Write; --restricted; arm instructions/profile appended)
+// → stop recorder → metrics.json. Output per task, as WebArena-Verified expects:
+//   <out>/<arm>/<task_id>/{agent_response.json, network.har}  + transcript.jsonl, metrics.json
+// Arms C/D carry a site profile across tasks: after each task the agent's ./profile-draft.md is
+// promoted to the arm's profile — a SIMULATED human approval (logged), since -p has no human.
+//
+// Arms are INTERLEAVED per task (task 1: A,B,C,D; task 2: A,B,C,D…): every arm sees the same machine
+// load over time — running arms one after another let an external load bias one arm (2026-10-20).
+// Each task records os.loadavg() so contamination can be checked afterwards.
+//
+// Usage: run.mjs --plan plan.json --arms A,B,C,D --out <dir> [--model sonnet] [--port 9444]
+//          [--reset-cmd ./reset-shopping-admin.sh | --no-reset] [--envctrl http://localhost:7781]
+//          [--app-url http://localhost:7780/admin] [--header "X-M2-Admin-Auto-Login: admin:admin1234"]
+//          [--budget 3] [--timeout 900] [--limit N] [--until HH:MM] [--resume] [--no-reset] [--headful]
+
+import { spawn, execFileSync } from 'node:child_process';
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { loadavg } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { ARMS } from './arms.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TANDEM = resolve(HERE, '../../plugins/tandem');
+
+const argv = process.argv.slice(2);
+const opt = (k, d) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : d; };
+const has = (k) => argv.includes(`--${k}`);
+const plan = JSON.parse(readFileSync(opt('plan'), 'utf8'));
+const armKeys = (opt('arms') || opt('arm') || '').split(',').filter(Boolean);
+if (!armKeys.length || armKeys.some((k) => !ARMS[k]) || !opt('out')) { process.stderr.write('usage: run.mjs --plan plan.json --arms A,B,C,D --out <dir> […]\n'); process.exit(2); }
+// Claude Code treats every file under ~/.claude as SENSITIVE: in -p a Write there is denied, so the
+// agent's agent_response.json and profile-draft.md silently never existed (a whole run scored 0 and
+// arms C/D ran without memory, 2026-10-21). Refuse such an --out up front.
+if (resolve(opt('out')).startsWith(resolve(process.env.HOME || '', '.claude'))) {
+  process.stderr.write('run.mjs: --out must not be under ~/.claude (Claude Code denies writes there in -p). Use e.g. ~/dev/tandem-bench/results\n');
+  process.exit(2);
+}
+const model = opt('model', 'sonnet'); const port = opt('port', '9444');
+const envctrl = opt('envctrl', 'http://localhost:7781'); const header = opt('header', '');
+const appUrl = opt('app-url', 'http://localhost:7780/admin');
+const budget = opt('budget', '3'); const timeoutS = +opt('timeout', '900');
+const limit = +opt('limit', String(plan.length));
+
+// Headless by default: the runner restarts Chrome on every task, and a window popping up every few
+// minutes steals the focus of whoever is working on the machine. --headful to watch it.
+const armEnv = (out) => ({ ...process.env, TANDEM_DATA_DIR: join(out, 'tandem-data'), TANDEM_CDP_PORT: port, TANDEM_CDP_WAIT: '60',
+  TANDEM_CHROME_ARGS: has('headful') ? (process.env.TANDEM_CHROME_ARGS || '') : '--headless=new' });
+const daemon = (env, cmd) => execFileSync(join(TANDEM, 'scripts/chrome-daemon.sh'), [cmd], { env, encoding: 'utf8' });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// --reset-cmd: shell command that restores a clean site (e.g. reset-shopping-admin.sh recreates the
+// container — the published image's env-ctrl has no /reset). Then wait for env-ctrl AND the app.
+async function resetSite() {
+  if (has('no-reset')) return;
+  if (!opt('reset-cmd')) throw new Error('--reset-cmd is required (or --no-reset)');
+  execFileSync('sh', ['-c', opt('reset-cmd')], { stdio: 'inherit' });
+  for (let i = 0; i < 150; i++) {
+    // /status (success:true), not /health: the documented /health answers 404 "Not found" (verified 2026-10-20).
+    try {
+      const st = await fetch(`${envctrl}/status`, { signal: AbortSignal.timeout(5000) });
+      const app = await fetch(appUrl, { headers: header ? { [header.split(/:\s*/)[0]]: header.split(/:\s*/).slice(1).join(':') } : {}, redirect: 'manual', signal: AbortSignal.timeout(60000) });
+      if (st.ok && (await st.json()).success && app.status < 500) return;
+    } catch { /* booting */ }
+    await sleep(2000);
+  }
+  throw new Error('env-ctrl status timeout after reset');
+}
+
+function startRecorder(env, harPath) {
+  const args = [join(TANDEM, 'scripts/cdp-record.mjs'), '--out', harPath, '--reveal'];
+  if (header) args.push('--extra-header', header);
+  const rec = spawn('node', args, { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  return new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('recorder did not start')), 15000);
+    rec.stderr.on('data', (d) => { if (String(d).includes('recording')) { clearTimeout(t); res(rec); } });
+    rec.on('exit', (c) => rej(new Error(`recorder exited ${c}`)));
+  });
+}
+
+// Bytes/calls per tool from the stream-json transcript: what the observation strategy costs.
+function analyze(transcriptPath) {
+  const names = new Map(); const perTool = {}; let final = null; let mcpFailed = [];
+  for (const line of readFileSync(transcriptPath, 'utf8').split('\n')) {
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.type === 'result') final = m;
+    if (m.type === 'system' && m.subtype === 'init') mcpFailed = (m.mcp_servers || []).filter((s) => s.status !== 'connected').map((s) => `${s.name}:${s.status}`);
+    for (const c of m.message?.content || []) {
+      if (c.type === 'tool_use') { names.set(c.id, c.name); (perTool[c.name] ||= { calls: 0, resultBytes: 0 }).calls++; }
+      if (c.type === 'tool_result') {
+        const n = names.get(c.tool_use_id) || '?';
+        const text = typeof c.content === 'string' ? c.content : (c.content || []).map((x) => x.text || '').join('');
+        (perTool[n] ||= { calls: 0, resultBytes: 0 }).resultBytes += Buffer.byteLength(text);
+      }
+    }
+  }
+  return {
+    costUsd: final?.total_cost_usd ?? null, turns: final?.num_turns ?? null, durationMs: final?.duration_ms ?? null,
+    isError: final?.is_error ?? true, usage: final?.usage ?? null, perTool,
+    mcpFailed,
+    permissionDenials: (final?.permission_denials || []).map((d) => `${d.tool_name} ${d.tool_input?.file_path || ''}`.trim()),
+    observationBytes: Object.entries(perTool).filter(([k]) => k.startsWith('mcp__tandem__')).reduce((s, [, v]) => s + v.resultBytes, 0),
+  };
+}
+
+function runClaude(arm, env, dir, systemPrompt, intent, startUrl) {
+  writeFileSync(join(dir, 'system-prompt.txt'), systemPrompt);
+  const mcp = { mcpServers: { tandem: { command: join(TANDEM, 'scripts/mcp-launch.sh'), env: { TANDEM_DATA_DIR: env.TANDEM_DATA_DIR, TANDEM_CDP_PORT: port } } } };
+  writeFileSync(join(dir, 'mcp.json'), JSON.stringify(mcp));
+  const args = ['-p', '--model', model, '--restricted', '--strict-mcp-config', '--mcp-config', join(dir, 'mcp.json'),
+    '--tools', 'Write', '--allowedTools', 'mcp__tandem', 'Write', '--permission-mode', 'acceptEdits',
+    '--append-system-prompt', systemPrompt,
+    '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--max-budget-usd', budget];
+  if (arm.disallowed.length) args.push('--disallowedTools', ...arm.disallowed);
+  // Prompt on stdin: --allowedTools/--disallowedTools are variadic and would swallow a trailing argument.
+  const userPrompt = `Task: ${intent}\nStart by navigating to: ${startUrl}`;
+  const out = createWriteStream(join(dir, 'transcript.jsonl'));
+  const p = spawn('claude', args, { cwd: dir, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  p.stdin.end(userPrompt);
+  p.stdout.pipe(out); p.stderr.pipe(createWriteStream(join(dir, 'claude.stderr')));
+  return new Promise((res) => {
+    const t = setTimeout(() => { p.kill('SIGTERM'); }, timeoutS * 1000);
+    p.on('exit', (code) => { clearTimeout(t); out.end(() => res(code)); });
+  });
+}
+
+// --until HH:MM: start no new task row after that time (the current row finishes): a shutdown never
+// cuts a task in half, and the rows done are balanced across arms. Resume later with --resume.
+const until = opt('until') ? (() => { const [h, m] = opt('until').split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); if (d <= new Date()) d.setDate(d.getDate() + 1); return d; })() : null;   // already past today → tomorrow
+// --resume skips tasks already measured — but retries those that ended in a harness error.
+// A task counts as done only if it ran to completion: no harness error, claude exited 0 and its result
+// record is not an error — a run cut by sleep or a closed lid is retried, not scored as a failure.
+const done = (dir) => {
+  try {
+    const m = JSON.parse(readFileSync(join(dir, 'metrics.json'), 'utf8'));
+    return !m.harnessError && m.isError === false && (m.log || []).includes('claude exit 0');
+  } catch { return false; }
+};
+
+for (const task of plan.slice(0, limit)) {
+  if (until && new Date() >= until) { process.stdout.write(`--until ${opt('until')} reached: stopping before task ${task.task_id} (resume with --resume)\n`); break; }
+  for (const armKey of armKeys) {
+    const arm = ARMS[armKey]; const OUT = resolve(opt('out'), armKey); const env = armEnv(OUT);
+    mkdirSync(OUT, { recursive: true });
+    const profilePath = join(OUT, 'profile.md');
+    const dir = join(OUT, String(task.task_id));
+    if (has('resume') && done(dir)) continue;
+    // A rerun (--resume) starts from an EMPTY run dir: a leftover agent_response.json is scored as if new,
+    // and the agent cannot replace it (Write refuses an unread existing file; arm A has no Read).
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const started = Date.now(); const log = []; const loadBefore = loadavg();
+    try {
+      await resetSite();
+      daemon(env, 'stop'); daemon(env, 'start');
+      const rec = await startRecorder(env, join(dir, 'network.har'));
+      const profile = arm.profile && existsSync(profilePath) ? readFileSync(profilePath, 'utf8') : null;
+      const site = new URL(task.start_urls[0]).origin;
+      const code = await runClaude(arm, env, dir, arm.prompt(site, profile), task.intent, task.start_urls[0]);
+      // The recorder may have exited already (Chrome closed under it): don't wait for an 'exit' already emitted.
+      if (rec.exitCode === null && rec.signalCode === null) { rec.kill('SIGTERM'); await new Promise((r) => rec.on('exit', r)); }
+      daemon(env, 'stop');
+      log.push(`claude exit ${code}`);
+      if (!existsSync(join(dir, 'agent_response.json'))) {
+        writeFileSync(join(dir, 'agent_response.json'), JSON.stringify({ task_type: 'retrieve', status: 'UNKNOWN_ERROR', retrieved_data: null, error_details: 'harness: agent wrote no agent_response.json' }));
+        log.push('no agent_response.json → UNKNOWN_ERROR written by harness');
+      }
+      const draft = join(dir, 'profile-draft.md');
+      if (arm.profile && existsSync(draft) && statSync(draft).size <= 10000) {
+        copyFileSync(draft, profilePath);
+        log.push('profile-draft promoted (SIMULATED human approval)');
+      }
+      const m = { task_id: task.task_id, template: task.template, instance: task.instance, arm: armKey, model, profileIn: !!profile,
+        wallMs: Date.now() - started, loadBefore, loadAfter: loadavg(), log, ...analyze(join(dir, 'transcript.jsonl')) };
+      // A denied tool call is the harness's fault, not the agent's: flag it so it is not scored, and --resume reruns it.
+      if (m.permissionDenials.length) m.harnessError = `permission denied: ${m.permissionDenials.join('; ')}`;
+      // Same for an MCP that never connected (seen under load: CONNECT_TIMEOUT → the agent answers without a browser).
+      if (m.mcpFailed.length) m.harnessError = `MCP not connected: ${m.mcpFailed.join(', ')}`;
+      writeFileSync(join(dir, 'metrics.json'), JSON.stringify(m, null, 2) + '\n');
+      process.stdout.write(`[${armKey}] task ${task.task_id} (tpl ${task.template} #${task.instance}) $${m.costUsd ?? '?'} obs=${m.observationBytes}B turns=${m.turns} load=${loadBefore[0].toFixed(1)}\n`);
+    } catch (e) {
+      try { daemon(env, 'stop'); } catch { /* already down */ }
+      writeFileSync(join(dir, 'metrics.json'), JSON.stringify({ task_id: task.task_id, template: task.template, instance: task.instance, arm: armKey, harnessError: e.message, loadBefore, log }, null, 2) + '\n');
+      process.stdout.write(`[${armKey}] task ${task.task_id} HARNESS ERROR: ${e.message}\n`);
+    }
+  }
+}

@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+// guard-sites.mjs — PreToolUse gate: writing a site profile needs the HUMAN's confirmation.
+//
+// Profiles (sites/<host>.md) are injected into every later session. Memory-poisoning work
+// (PMPA, arXiv 2609.13889, tested on Claude Code) shows that once a persistent memory is
+// poisoned, prompt-level defenses barely help (cross-session attack success stayed ~97%).
+// The skill's "show the draft to the human first" rule IS a prompt-level defense, so the
+// write itself is gated here, outside the model: the hook answers "ask" and Claude Code shows
+// a permission prompt. Interactive bypassPermissions approves an `ask` by itself (verified
+// 2026-10-21), so that mode gets its own answer below.
+//
+// Covers Write/Edit/MultiEdit by path. Bash is covered heuristically (a command that mentions
+// the store and looks like it writes): defense in depth, not a sandbox. Not covered at all: other
+// MCP servers' file tools (e.g. a filesystem MCP) and the fingerprint store (*.fingerprints.json —
+// never injected into context; poisoning it only fakes drift/match).
+// Silent (no output) = no opinion → normal permission flow.
+
+import { readFileSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { dataDir } from './paths.mjs';
+import { isMain } from './is-main.mjs';
+
+// Resolve symlinks of the deepest existing ancestor (the file itself may not exist yet).
+function real(p) {
+  let cur = resolve(p); const tail = [];
+  for (;;) {
+    try { return join(realpathSync(cur), ...tail.reverse()); } catch { /* not there yet */ }
+    const up = dirname(cur);
+    if (up === cur) return resolve(p);
+    tail.push(basename(cur)); cur = up;
+  }
+}
+
+export function isProfilePath(filePath, sitesDir) {
+  if (typeof filePath !== 'string' || !filePath) return false;
+  // macOS (APFS) and Windows are case-insensitive: ~/.claude/Tandem/sites IS the store there.
+  const fold = (p) => (process.platform === 'darwin' || process.platform === 'win32' ? p.toLowerCase() : p);
+  const f = fold(real(filePath.replace(/^~(?=[\\/])/, homedir())));
+  const s = fold(real(sitesDir));
+  // path.relative, not startsWith(s + '/'): Windows paths use '\\' (the gate never fired there).
+  const rel = relative(s, f);
+  return !!rel && !rel.startsWith('..') && !isAbsolute(rel) && f.toLowerCase().endsWith('.md');
+}
+
+// Read-only engine invocations that mention the store are fine (list/show/path, recipe compile…).
+// fingerprint.mjs writes only *.fingerprints.json, which this gate leaves out (header): a reader here.
+// Judged per pipeline segment: `node fingerprint.mjs check …; md5 -q sites/*.fingerprints.json` asked for
+// approval (benchmark 2026-10-30) because the whole command had "node" in it.
+const READER = /^\s*((node|bash|sh)\s+)?(\S*\/)?(map\.sh\s+(list|show|path|index)|recipe\.mjs\s+(validate|compile)|fingerprint\.mjs\s+(check|capture)|cat|less|head|tail|grep|rg|wc|ls|md5|md5sum|shasum|sha256sum|stat|file|diff|jq|cd|echo|printf)(\s|$)/;
+const WRITES = /(>|>>|\btee\b|\bsponge\b|\btruncate\b|\bcp\b|\bmv\b|\bsed\s+-i|\bperl\s+-i|\bdd\b|\bpython3?\b|\bnode\b|\bruby\b|\binstall\b|\brm\b|\bln\b|\bcurl\b|\bwget\b|\brsync\b|\btar\b|\bunzip\b|\bpatch\b)/;
+
+// The sites dir spelled out, OR the data dir plus the word "sites" anywhere: that is how an agent
+// usually writes a file — `cd ~/.claude/tandem && … > sites/x.md`, `S=$HOME/.claude/tandem; … > $S/sites/x.md`
+// (both slipped through in 0.9.2, external audit). A bare data-dir mention (output/, intercept) stays silent.
+function forms(dir) {
+  const home = homedir();
+  return [dir, dir.replace(/\\/g, '/'), dir.replace(home, '~'), dir.replace(home, '$HOME')];   // Git Bash on Windows writes C:/… or /c/…
+}
+function mentionsStore(text, sitesDir) {
+  if ([...forms(sitesDir), 'tandem/sites', 'tandem\\sites'].some((f) => text.includes(f))) return true;
+  return /\bsites\b/.test(text) && [...forms(dirname(sitesDir)), '.claude/tandem', '.claude\\tandem'].some((f) => text.includes(f));
+}
+
+export function bashTouchesProfiles(command, sitesDir) {
+  if (typeof command !== 'string') return false;
+  // Redirections to /dev/null or stderr→stdout are not writes to the store.
+  command = command.replace(/\d?>{1,2}\s*\/dev\/null|\d?>&\d/g, '');
+  if (!mentionsStore(command, sitesDir)) return false;
+  // A redirection makes any segment a write (`echo x > sites/b.md`); `&>` splits into a `> file` segment.
+  return command.split(/\|\||&&|[;|&\n]/).some((seg) => !(READER.test(seg) && !seg.includes('>')) && WRITES.test(seg));
+}
+
+// The MCP's own tools write files too: `filename` on evaluate/snapshot/screenshot/… lands wherever the
+// MCP's roots allow — with Claude Code started from $HOME that includes the store (verified with the
+// real MCP 0.0.83: evaluate+filename wrote sites/<host>.md). A RELATIVE filename resolves against the
+// MCP's working directory, NOT output/ (verified: cwd/sub/rel-test.md; an external audit wrote
+// ~/.claude/tandem/sites/rel.md with `.claude/tandem/sites/rel.md` from $HOME). The MCP's cwd isn't
+// known here for sure, so every plausible base is checked: the session cwd, this process's, output/.
+// run_code_unsafe runs Node-side Playwright code: heuristic, like Bash.
+export function mcpTouchesProfiles(toolInput, sitesDir, { cwd, outputDir = join(dirname(sitesDir), 'output') } = {}) {
+  const ti = toolInput || {};
+  if (typeof ti.filename === 'string' && ti.filename) {
+    const f = ti.filename.replace(/^~(?=[\\/])/, homedir());
+    const bases = [...new Set([cwd, process.cwd(), outputDir].filter(Boolean))];
+    if (bases.some((b) => isProfilePath(resolve(b, f), sitesDir))) return true;
+  }
+  return typeof ti.code === 'string' && mentionsStore(ti.code, sitesDir);
+}
+
+export function decide(input, sitesDir = join(dataDir(), 'sites')) {
+  const tool = input?.tool_name || '';
+  const ti = input?.tool_input || {};
+  let hit = false;
+  if (/^(Write|Edit|MultiEdit)$/.test(tool)) hit = isProfilePath(ti.file_path, sitesDir);
+  else if (tool === 'Bash') hit = bashTouchesProfiles(ti.command, sitesDir);
+  else if (/__browser_/.test(tool)) hit = mcpTouchesProfiles(ti, sitesDir, { cwd: input?.cwd });
+  if (!hit) return null;
+  // An interactive session in bypassPermissions approves a hook's `ask` by itself, with no prompt
+  // (verified 2026-10-21: decision source "config"/"mode", 40 ms after the hook). Bypass is the human's
+  // choice to skip approvals, and tandem:map must keep working there: the write goes through, with a
+  // visible notice to review it (injection still wraps profiles as data and flags instruction-like
+  // lines). TANDEM_PROFILE_GATE=strict denies instead.
+  // PreToolUse: nothing is written yet — and for Bash it is a guess from the command's text.
+  const what = ti.file_path ? `writing ${ti.file_path}` : 'running a command that looks like it writes a site profile';
+  if (input?.permission_mode === 'bypassPermissions' && process.env.TANDEM_PROFILE_GATE !== 'strict') {
+    return {
+      systemMessage: `tandem: ${what}, WITHOUT approval (bypass mode). Review the result — site profiles are injected into future sessions.`,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        permissionDecisionReason: 'tandem:map — bypass mode: profile write allowed, the human is notified to review it.',
+      },
+    };
+  }
+  if (input?.permission_mode === 'bypassPermissions') {
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason:
+          'tandem:map — TANDEM_PROFILE_GATE=strict: writing a site profile needs the human\'s approval, and '
+          + 'bypass-permissions mode would approve it without asking. Show the human the exact content and ask '
+          + 'them to leave bypass mode (shift+tab) to approve it, or to save it themselves.',
+      },
+    };
+  }
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'ask',
+      permissionDecisionReason:
+        'tandem:map — this writes a site profile that will be injected into future sessions. '
+        + 'Approve only if you reviewed this exact content (it was drafted from web pages, which can carry injected instructions).',
+    },
+  };
+}
+
+const isCli = isMain(import.meta.url);
+if (isCli) {
+  let input = null;
+  try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { process.exit(0); }
+  const out = decide(input);
+  if (out) process.stdout.write(JSON.stringify(out));
+  process.exit(0);
+}

@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# e2e.sh — end-to-end with a REAL Chrome (needs a Chrome/Chromium binary; no Playwright, no display
+# with TANDEM_CHROME_ARGS="--headless=new"). Exercises what smoke.sh can't: daemon start/ownership/
+# stop, the HAR recorder and the intercept daemon over several tabs, cookies, pdf/png.
+# Isolated: temp TANDEM_DATA_DIR, port 9333 (override TANDEM_E2E_PORT), fixture site on 8766.
+# Usage: tests/e2e.sh   (exit 0 = green)
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+PASS=0; FAIL=0
+ok()  { printf '  \033[32m✓\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
+bad() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); [ -z "${GITHUB_ACTIONS:-}" ] || echo "::error title=e2e.sh::$1"; }
+check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+
+TMP="$(mktemp -d)"
+export TANDEM_DATA_DIR="$TMP/data" TANDEM_CDP_PORT="${TANDEM_E2E_PORT:-9333}"
+# A cold Chrome on a CI runner can need more than the default 15 s (3rd CI run: start failed, Chrome
+# answered moments later). Generous here: the test is about behavior, not start-up speed.
+export TANDEM_CDP_WAIT="${TANDEM_CDP_WAIT:-60}"
+SITE_PORT=8766; SITE="http://127.0.0.1:$SITE_PORT"
+node "$HERE/fixtures/site.mjs" "$SITE_PORT" & SITE_PID=$!
+cleanup() {
+  "$ROOT/bin/tandem-intercept" stop >/dev/null 2>&1
+  "$ROOT/scripts/chrome-daemon.sh" stop >/dev/null 2>&1
+  kill "$SITE_PID" 2>/dev/null
+  rm -rf -- "$TMP"
+}
+trap cleanup EXIT
+
+# CDP driver without Playwright: navigate the first tab / evaluate JS in it.
+cdp() { node --input-type=module -e "
+import { connect, listPages } from '$ROOT/scripts/cdp.mjs';
+const [pg] = await listPages(); const c = await connect(pg.webSocketDebuggerUrl);
+await c.call('Page.enable');
+$1
+c.close();"; }
+navigate() { cdp "await c.call('Page.navigate', { url: '$1' }); await new Promise((r) => setTimeout(r, 1200));"; }
+
+echo "tandem e2e — data dir: $TANDEM_DATA_DIR · port $TANDEM_CDP_PORT"
+echo "[1] daemon"
+check "start" "'$ROOT/scripts/chrome-daemon.sh' start >/dev/null"
+check "status: our Chrome" "'$ROOT/scripts/chrome-daemon.sh' status | grep -q '✅ active'"
+check "Chrome runs without the back/forward cache (R08)" "ps axww -o command= | grep -- '$TANDEM_DATA_DIR' | grep -q -- --disable-back-forward-cache"
+check "data dir is 0700" "[ \"\$(ls -ld '$TANDEM_DATA_DIR' | cut -c1-10)\" = drwx------ ]"
+check "start again is idempotent" "'$ROOT/scripts/chrome-daemon.sh' start | grep -q 'already running'"
+
+echo "[2] recorder + intercept (all tabs)"
+"$ROOT/bin/tandem-intercept" start >/dev/null
+node "$ROOT/scripts/cdp-record.mjs" --out "$TMP/out.har" 2>"$TMP/rec.err" & REC=$!
+for _ in $(seq 1 40); do grep -q recording "$TMP/rec.err" 2>/dev/null && break; sleep 0.25; done
+navigate "$SITE/"
+cdp "await c.call('Runtime.evaluate', { expression: \"document.querySelector('input').value='bob'; document.querySelector('form').submit()\" }); await new Promise((r) => setTimeout(r, 1200));"
+# New tab the way a human opens one: a click (with user gesture) on a target=_blank link. A page-
+# initiated navigation; a script window.open without a gesture would be popup-blocked.
+navigate "$SITE/"
+cdp "await c.call('Runtime.evaluate', { expression: \"document.querySelector('a[target=_blank]').click()\", userGesture: true }); await new Promise((r) => setTimeout(r, 1500));"
+kill -TERM "$REC"; wait "$REC" 2>/dev/null
+"$ROOT/bin/tandem-intercept" stop >/dev/null
+har() { node -e "const h=JSON.parse(require('fs').readFileSync('$TMP/out.har','utf8')).log.entries;process.exit(($1)?0:1)"; }
+check "HAR: POST hop is a 302 with redirectURL" "har \"h.some(e=>e.request.method==='POST'&&e.response.status===302&&/done\\\\?saved=bob/.test(e.response.redirectURL))\""
+check "HAR: form body captured"                 "har \"h.some(e=>e.request.postData&&e.request.postData.text==='name=bob')\""
+check "HAR: Set-Cookie of the 302 (name kept, value redacted)" "har \"h.some(e=>e.response.status===302&&e.response.cookies.some(c=>c.name==='sid'&&c.value==='[redacted]'))\""
+check "HAR: JSON body of the XHR"               "har \"h.some(e=>e.request.url.endsWith('/api')&&/\\\"ok\\\":true/.test(e.response.content.text||''))\""
+check "HAR: the new tab was captured"           "har \"h.some(e=>e.request.url.endsWith('/newtab'))\""
+check "HAR file is 0600" "[ \"\$(ls -l '$TMP/out.har' | cut -c1-10)\" = -rw------- ]"
+check "intercept: redirect hop logged"          "'$ROOT/bin/tandem-intercept' show --method POST | grep -q '302.*→.*done'"
+check "intercept: new tab logged"               "'$ROOT/bin/tandem-intercept' show --url newtab | grep -q newtab"
+check "intercept: no daemon left"               "'$ROOT/bin/tandem-intercept' status | grep -q 'not running'"
+check "intercept log is 0600" "[ \"\$(ls -l '$TANDEM_DATA_DIR/intercept.ndjson' | cut -c1-10)\" = -rw------- ]"
+
+echo "[3] cookies + pdf"
+check "cookies: sid listed, value redacted" "'$ROOT/bin/tandem-cookies' --domain 127.0.0.1 | grep -q 'sid .*••'"
+check "cookies: json needs --reveal"        "! '$ROOT/bin/tandem-cookies' --format json >/dev/null 2>&1"
+PDF="$("$ROOT/bin/tandem-pdf")"
+check "pdf: produced a PDF"  "case '$PDF' in pdf:*) head -c4 '${PDF#pdf:}' | grep -q '%PDF';; *) false;; esac"
+PNG="$("$ROOT/bin/tandem-pdf" --png)"
+# Magic bytes via node: grep does not reliably match inside a binary header (\x89PNG\r\n…).
+check "png: produced a PNG"  "case '$PNG' in png:*) node -e \"process.exit(require('fs').readFileSync('${PNG#png:}').subarray(1,4).toString()==='PNG'?0:1)\";; *) false;; esac"
+# A tab that SHOWS a PDF: the original document, not a print of Chrome's viewer frame.
+navigate "$SITE/doc.pdf"
+curl -s "$SITE/doc.pdf" -o "$TMP/served.pdf"
+SRC="$("$ROOT/bin/tandem-pdf" --url "$SITE/doc.pdf")"
+check "pdf tab: saved as the original (pdf-source:)" "case '$SRC' in pdf-source:*) true;; *) false;; esac"
+check "pdf tab: byte for byte what the server sent" "cmp -s '${SRC#pdf-source:}' '$TMP/served.pdf'"
+if command -v pdftotext >/dev/null; then
+  check "pdf tab --text: its text" "\"$ROOT/bin/tandem-pdf\" --url '$SITE/doc.pdf' --text | sed -n 's/^text://p' | xargs grep -q 'Hello tandem'"
+fi
+navigate "$SITE/nostore.pdf"
+NS="$("$ROOT/bin/tandem-pdf" --url "$SITE/nostore.pdf")"
+check "pdf tab not in the cache (no-store): fetched again, same bytes" "cmp -s '${NS#pdf-source:}' '$TMP/served.pdf'"
+navigate "$SITE/pdf-form"
+cdp "await c.call('Runtime.evaluate', { expression: \"document.body.innerHTML='<form method=post action=/gen-pdf><button>go</button></form>'; document.forms[0].submit()\" }); await new Promise((r) => setTimeout(r, 1500));"
+N0="$(find "$TANDEM_DATA_DIR/output" -type f | wc -l)"
+# shellcheck disable=SC2034  # POST_OUT is read inside check's eval string
+POST_OUT="$("$ROOT/bin/tandem-pdf" --url "$SITE/gen-pdf" 2>&1)"; POST_RC=$?
+check "PDF from a POST: refused (rc≠0), says why" "[ $POST_RC -ne 0 ] && printf '%s' \"\$POST_OUT\" | grep -q 'came from a form POST'"
+check "PDF from a POST: nothing saved" "[ \"\$(find '$TANDEM_DATA_DIR/output' -type f | wc -l)\" = '$N0' ]"
+check "--url with no such tab: clear error" "\"$ROOT/bin/tandem-pdf\" --url '$SITE/nope' 2>&1 | grep -q 'no tab on'"
+navigate "$SITE/"   # leave the PDF viewer: [3b] needs the tab on its page right after its own navigate
+
+echo "[3b] sandbox guard (calls that would hang on a page that cannot run scripts)"
+guard() {  # $1 = tool, $2 = tool_input JSON → prints the autostart hook's output
+  printf '{"tool_name":"mcp__plugin_tandem_tandem__%s","session_id":"e2e","permission_mode":"default","tool_input":%s}' "$1" "$2" \
+    | TANDEM_AUTOSTART=1 node "$ROOT/scripts/autostart.mjs"
+}
+remember() { node --input-type=module -e "import { rememberPageUrl } from '$ROOT/scripts/sandbox-guard.mjs'; rememberPageUrl(process.env.TANDEM_DATA_DIR, 'e2e', '$1');"; }
+navigate "$SITE/sandboxed"; remember "$SITE/sandboxed"
+check "sandboxed page: evaluate denied"            "guard browser_evaluate '{\"function\":\"() => 1\"}' | grep -q 'cannot run scripts'"
+check "sandboxed page: click denied"               "guard browser_click '{\"target\":\"e1\"}' | grep -q '\"deny\"'"
+check "sandboxed page: snapshot allowed"           "! guard browser_snapshot '{}' | grep -q '\"deny\"'"
+check "sandboxed page: type without submit allowed" "! guard browser_type '{\"target\":\"e1\",\"text\":\"x\"}' | grep -q '\"deny\"'"
+check "sandboxed page: type with submit denied"    "guard browser_type '{\"target\":\"e1\",\"text\":\"x\",\"submit\":true}' | grep -q '\"deny\"'"
+check "TANDEM_SANDBOX_GUARD=0 turns it off"        "! TANDEM_SANDBOX_GUARD=0 guard browser_evaluate '{\"function\":\"() => 1\"}' | grep -q '\"deny\"'"
+navigate "$SITE/"; remember "$SITE/"
+check "normal page: evaluate allowed"              "! guard browser_evaluate '{\"function\":\"() => 1\"}' | grep -q '\"deny\"'"
+# a stale URL (the tab moved on, no PostToolUse seen) that no tab is on, with several tabs: can't tell → allow
+remember "$SITE/sandboxed"
+check "stale URL, no tab on it: allowed"           "! guard browser_evaluate '{\"function\":\"() => 1\"}' | grep -q '\"deny\"'"
+# multi-session: every call leaves the hook tagged with its agent (the launcher's router routes on it)
+check "tag: main session → agent main"            "TANDEM_MULTISESSION=1 guard browser_snapshot '{}' | grep -q '\"updatedInput\":{\"agent\":\"main\"}'"
+check "tag: subagent → its agent_id"               "printf '%s' '{\"tool_name\":\"mcp__plugin_tandem_tandem__browser_snapshot\",\"agent_id\":\"a0e815c57e8d30939\",\"permission_mode\":\"default\",\"tool_input\":{}}' | TANDEM_MULTISESSION=1 TANDEM_AUTOSTART=1 node '$ROOT/scripts/autostart.mjs' | grep -q '\"agent\":\"a0e815c57e8d30939\"'"
+check "tag: TANDEM_MULTISESSION=0 → none"          "! TANDEM_MULTISESSION=0 guard browser_snapshot '{}' | grep -q updatedInput"
+
+echo "[3c] focus emulation (the real MCP clicks on a background tab)"
+check "focus-e2e.mjs green" "node '$HERE/focus-e2e.mjs' '$SITE'"
+
+echo "[3d] tab drift (someone else moves the agent's tab, the real MCP reports it)"
+check "drift-e2e.mjs green" "node '$HERE/drift-e2e.mjs' '$SITE'"
+
+echo "[3e] PDF capture (the real MCP: POST, GET and download PDFs reaching the agent's tab)"
+check "pdf-capture-e2e.mjs green" "node '$HERE/pdf-capture-e2e.mjs' '$SITE'"
+
+echo "[3f] CDP relay (real MCP children, one per agent: each sees only its own tabs)"
+check "relay-e2e.mjs green" "node '$HERE/relay-e2e.mjs'"
+
+echo "[3g] handing a tab over (browser_tab_adopt, multi-session)"
+if [ "${TANDEM_MULTISESSION:-1}" != 0 ]; then
+  check "adopt-e2e.mjs green" "node '$HERE/adopt-e2e.mjs'"
+else
+  echo "  - skipped: TANDEM_MULTISESSION=0 (no relay, no adoption)"
+fi
+
+echo "[3h] life cycle: idle agents, end of session, a dead session's leftovers (multi-session)"
+if [ "${TANDEM_MULTISESSION:-1}" != 0 ]; then
+  check "lifecycle-e2e.mjs green" "node '$HERE/lifecycle-e2e.mjs'"
+else
+  echo "  - skipped: TANDEM_MULTISESSION=0 (no relay)"
+fi
+
+echo "[3i] tab groups: each agent's tabs in a group of its own, readable titles (multi-session, 0.12/0.13)"
+if [ "${TANDEM_MULTISESSION:-1}" != 0 ]; then
+  check "groups-e2e.mjs green" "node '$HERE/groups-e2e.mjs'"
+else
+  echo "  - skipped: TANDEM_MULTISESSION=0 (no relay)"
+fi
+
+echo "[4] stop"
+check "stop" "'$ROOT/scripts/chrome-daemon.sh' stop | grep -q stopped"
+check "no Chrome left on our profile" "! pgrep -f -- '--user-data-dir=$TANDEM_DATA_DIR/chrome-profile' >/dev/null"
+# Leftovers of a Chrome that ran under ANOTHER hostname (the Mac's hostname follows the network):
+# start must still come up. (Headless starts even without the cleanup; the guard is for headful.)
+P="$TANDEM_DATA_DIR/chrome-profile"   # the exact leftovers seen in the bench: Lock + Cookie + Socket
+ln -sfn otro-host.example.net-12345 "$P/SingletonLock"; ln -sfn 12887404067409121093 "$P/SingletonCookie"
+mkdir -p "$TMP/sock"; node -e "require('net').createServer().listen(process.argv[1],function(){process.exit(0)})" "$TMP/sock/SingletonSocket"
+ln -sfn "$TMP/sock/SingletonSocket" "$P/SingletonSocket"   # a REAL socket file nobody listens on
+check "start with a stale lock from another hostname" "'$ROOT/scripts/chrome-daemon.sh' start >/dev/null"
+"$ROOT/scripts/chrome-daemon.sh" stop >/dev/null
+# Chrome down + a tool whose filename lands in the store: the gate asks AND Chrome is already up for the
+# approved call (0.9.2 asked first and exited — the approved call then hit ECONNREFUSED).
+GATE_IN="{\"tool_name\":\"mcp__plugin_tandem_tandem__browser_evaluate\",\"permission_mode\":\"default\",\"tool_input\":{\"function\":\"() => 1\",\"filename\":\"$TANDEM_DATA_DIR/sites/x.md\"}}"
+check "autostart: gate asks AND Chrome was started first" \
+  "printf '%s' '$GATE_IN' | TANDEM_MULTISESSION=1 TANDEM_AUTOSTART=1 node '$ROOT/scripts/autostart.mjs' | grep '\"ask\"' | grep -q '\"agent\":\"main\"' && curl -s --max-time 2 http://127.0.0.1:$TANDEM_CDP_PORT/json/version >/dev/null"
+"$ROOT/scripts/chrome-daemon.sh" stop >/dev/null
+# Autostart: no first page, or the agent's own window would be the second one. With TANDEM_MULTISESSION=0 the
+# first page stays. A human who then asks for the browser gets a window, and only one.
+pages() { curl -s --max-time 2 "http://127.0.0.1:$TANDEM_CDP_PORT/json/list" | grep -c '"type": "page"'; }
+AUTO_PAGES=0; [ "${TANDEM_MULTISESSION:-}" != 0 ] || AUTO_PAGES=1
+"$ROOT/scripts/chrome-daemon.sh" start --no-window >/dev/null
+check "start --no-window: $AUTO_PAGES page(s)" "[ \"\$(pages)\" = $AUTO_PAGES ]"
+"$ROOT/scripts/chrome-daemon.sh" start >/dev/null
+check "then start: one page for the human" "[ \"\$(pages)\" = 1 ]"
+"$ROOT/scripts/chrome-daemon.sh" start >/dev/null
+check "start again: still one" "[ \"\$(pages)\" = 1 ]"
+if [ "${TANDEM_MULTISESSION:-}" != 0 ]; then
+  check "the human's window is marked for the relay" "[ -s '$TANDEM_DATA_DIR/startup-page' ]"
+fi
+"$ROOT/scripts/chrome-daemon.sh" stop >/dev/null
+check "stop clears the mark" "[ ! -e '$TANDEM_DATA_DIR/startup-page' ]"
+if [ "${TANDEM_MULTISESSION:-}" != 0 ]; then
+  "$ROOT/scripts/chrome-daemon.sh" start >/dev/null
+  check "start from cold: one page for the human, marked" "[ \"\$(pages)\" = 1 ] && [ -s '$TANDEM_DATA_DIR/startup-page' ]"
+  "$ROOT/scripts/chrome-daemon.sh" stop >/dev/null
+  # TANDEM_START_WINDOW (0.12.1, David's patch): the human's window opened without taking the focus.
+  state_of_mark() { node --input-type=module -e "
+import { readFileSync } from 'node:fs'; import { connect, browserWsUrl } from '$ROOT/scripts/cdp.mjs';
+const c = await connect(await browserWsUrl());
+const { bounds } = await c.call('Browser.getWindowBounds', await c.call('Browser.getWindowForTarget', { targetId: readFileSync('$TANDEM_DATA_DIR/startup-page', 'utf8').trim() }));
+console.log(bounds.windowState); c.close();"; }
+  for mode in background minimized; do
+    "$ROOT/scripts/chrome-daemon.sh" start --no-window >/dev/null
+    TANDEM_START_WINDOW=$mode "$ROOT/scripts/chrome-daemon.sh" start >/dev/null 2>"$TMP/sw.err"
+    check "TANDEM_START_WINDOW=$mode: one page for the human, marked, no warning" "[ \"\$(pages)\" = 1 ] && [ -s '$TANDEM_DATA_DIR/startup-page' ] && [ ! -s '$TMP/sw.err' ]"
+    want=normal; [ $mode = minimized ] && want=minimized
+    check "TANDEM_START_WINDOW=$mode: its window is $want" "[ \"\$(state_of_mark)\" = $want ]"
+    "$ROOT/scripts/chrome-daemon.sh" stop >/dev/null
+  done
+fi
+
+
+echo "[5] external browser mode (TANDEM_BROWSER=external) — after tandem's own Chrome is gone"
+CHROME="$(bash -c ". '$ROOT/scripts/lib.sh'; printf '%s' \"\$CHROME_BIN\"")"
+OTHER="$TMP/other-profile"
+# Used inside the strings that check() evals (not visible to the linter).
+# shellcheck disable=SC2034
+START_CMD="'$CHROME' ${TANDEM_CHROME_ARGS:-} --remote-debugging-port=$TANDEM_CDP_PORT --user-data-dir='$OTHER' about:blank >/dev/null 2>&1 &"
+# shellcheck disable=SC2034
+STOP_CMD="pkill -f -- '[-]-user-data-dir=$OTHER'"   # [-]: the pattern must not match the `sh -c` running it (dash on Linux)
+ext() { TANDEM_BROWSER=external TANDEM_DATA_DIR="$TMP/ext-data" "$ROOT/scripts/chrome-daemon.sh" "$@"; }
+cdp_up() { curl -s --max-time 2 "http://127.0.0.1:$TANDEM_CDP_PORT/json/version" >/dev/null; }
+check "external, nothing answering → start fails clearly" "! ext start >/dev/null 2>&1"
+check "external + START_CMD → started and ready" "TANDEM_BROWSER_START_CMD=\"\$START_CMD\" ext start | grep -q 'external browser ready'"
+check "status says external mode" "ext status | grep -q 'mode:     external'"
+check "stop without STOP_CMD leaves it running" "ext stop | grep -q 'not stopping' && cdp_up"
+cdp_gone() { local _; for _ in $(seq 1 20); do cdp_up || return 0; sleep 0.25; done; return 1; }
+check "stop with STOP_CMD stops it" "TANDEM_BROWSER_STOP_CMD=\"\$STOP_CMD\" ext stop | grep -q 'stopped' && cdp_gone"
+pkill -f -- "--user-data-dir=$OTHER" 2>/dev/null
+echo ""
+# CI: job logs need auth to download, annotations are public — ship the Chrome log tail as one.
+if [ "$FAIL" -gt 0 ] && [ -n "${GITHUB_ACTIONS:-}" ]; then
+  LOG="$TANDEM_DATA_DIR/logs/chrome.log"
+  [ -f "$LOG" ] && echo "::error title=e2e chrome.log::$(tail -c 3000 "$LOG" | tr -d '\r' | awk '{gsub(/%/,"%25"); printf "%s%%0A", $0}')"
+fi
+echo "e2e: $PASS ok, $FAIL failures"
+[ "$FAIL" -eq 0 ]
