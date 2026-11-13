@@ -1,0 +1,281 @@
+name: canary
+
+# tests.yml (deliberately) never touches indiegogo.com — see its own header
+# for why. That leaves a real gap: a markup change on the site itself only
+# shows up when a user hits it and files an issue, while the offline badge
+# stays green throughout. This workflow is the other half — a real run, on a
+# real page, on a schedule — so a site-side break is caught here first.
+#
+# THIS CANARY RUNS WITH OR WITHOUT A SECRET, AND THE DIFFERENCE MATTERS.
+# ------------------------------------------------------------------------
+# indiegogo.com answers a datacentre address with an HTTP 403 Cloudflare
+# managed challenge on every HTML route — measured 2026-09-17, eight routes
+# out of eight, from a Hetzner exit, `robots.txt` and the site's own JSON API
+# included. A plain `requests` call NEVER gets through.
+#
+# A real BROWSER is a different matter, and this is the measurement that
+# decides how this workflow behaves: from that same datacentre address, a
+# local headless Chromium driven by Playwright returned a full page of
+# results on 4 of 4 runs, with no key, no proxy and no CDP endpoint. Two of
+# four met the challenge first and cleared it on the next navigation by
+# themselves — 0 solves attempted, and the 2Captcha balance was unchanged to
+# five decimal places before and after.
+#
+# A bare GitHub runner behaves the same way: the scheduled runs of
+# 2026-10-06 to 2026-10-14 all fetched 72 rows across 3/3 pages from a runner
+# with no secret configured. So this canary needs NO secret, and every
+# outcome that is not real rows is RED:
+#
+#   * If INDIEGOGO_CDP_ENDPOINT or INDIEGOGO_PROXY is configured, the run
+#     goes through it.
+#   * If neither is configured, the run uses a bare runner and a local
+#     Playwright browser — the configuration the README's central claim
+#     ("no key, no proxy") is about. A block there (exit 3) is a FAILURE,
+#     not a skip: that claim is exactly what this job exists to test, and a
+#     canary that goes green without reaching the site tests nothing.
+#
+# Exit 3, 4, 5 and 6, and fewer rows than the floor, all turn this red.
+#
+# Secrets reach the scraper through the ENVIRONMENT, never a command line —
+# `ps` reads argv. env_config.py reads exactly these variable names, and an
+# unset secret arrives as an empty string that the loader treats as unset,
+# so the same two lines are correct with and without them.
+on:
+  schedule:
+    # Once a week (Mondays), off the hour, so it is not competing with everyone else's
+    # on-the-hour cron jobs for runner availability.
+    - cron: "7 10 * * 1"
+  workflow_dispatch:
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    env:
+      # `secrets` is not available in a job-level `if`, so presence is tested
+      # here, once, and read from each step's `if` and shell below. These are
+      # the strings "true"/"false", never the secret itself.
+      HAVE_CDP: ${{ secrets.INDIEGOGO_CDP_ENDPOINT != '' }}
+      HAVE_PROXY: ${{ secrets.INDIEGOGO_PROXY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Say which path this run is taking
+        run: |
+          if [ "$HAVE_CDP" = "true" ]; then
+            echo "::notice::Running through the Scraping Browser API (INDIEGOGO_CDP_ENDPOINT is set) — the repo's documented default path. A block here is a real failure."
+          elif [ "$HAVE_PROXY" = "true" ]; then
+            echo "::notice::Running through INDIEGOGO_PROXY. A block here is a real failure."
+          else
+            echo "::notice::Running from a bare runner with a local Playwright browser and no secret -- the README's no-key, no-proxy path. Anything but real rows fails this job."
+          fi
+
+      - name: Scrape a real, known-good search listing
+        id: run
+        # 3 pages, not 1: with one page pagination is never exercised. On
+        # this site that matters more than usual, because pages 2+ are NOT
+        # fetched by URL — they are a 0-based `pageIndex` in a POST body to
+        # an endpoint behind the same Cloudflare challenge, reachable only
+        # with the cleared session's cookies. A one-page canary would leave
+        # the entire pagination path untested, and `?page=2` on this site
+        # silently returns page 1, so the failure would look like success.
+        #
+        # set +e: GitHub Actions runs `run:` steps as `bash -e`, so without
+        # this a non-zero scraper exit aborts the script on THAT line and the
+        # `echo "exit_code=$?"` below never runs. continue-on-error only stops
+        # the step from failing the job; it does not touch the shell's errexit.
+        continue-on-error: true
+        env:
+          # Through the environment, never argv (see the header). Unset
+          # secrets arrive as "" and env_config.py treats that as unset, so
+          # these lines are correct in both configurations.
+          INDIEGOGO_CDP_ENDPOINT: ${{ secrets.INDIEGOGO_CDP_ENDPOINT }}
+          INDIEGOGO_PROXY: ${{ secrets.INDIEGOGO_PROXY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --mode search --pages 3 --format both \
+            --out canary_run --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the exit code
+        id: verdict
+        env:
+          CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          code="$CODE"
+          case "$code" in
+            0)   echo "OK — rows parsed from a live run." ;;
+            3)   if [ "$HAVE_CDP" = "true" ] || [ "$HAVE_PROXY" = "true" ]; then
+                   echo "::error::Blocked before parsing (exit 3) while running through a configured exit (cdp=$HAVE_CDP proxy=$HAVE_PROXY). Check the zone or proxy credentials first, then BOT_CHALLENGE_MARKERS in product_parser.py against the HTML dump in the artifacts."
+                 else
+                   # Not a skip. The README says a plain local browser reads
+                   # this site with no key and no proxy, and bare runners have
+                   # been served every day this was checked; a block here is
+                   # that claim failing, which is what this job is for.
+                   echo "::error::Blocked before parsing (exit 3) from a bare runner with no secret. The README's central claim is that a local browser needs no key and no proxy here, so this is that claim failing. Check BOT_CHALLENGE_MARKERS against the HTML dump in the artifacts (a marker that now also matches GOOD pages reads every page as blocked), then re-run once: a single runner address can be challenged on a given day. If it persists, configure INDIEGOGO_PROXY or INDIEGOGO_CDP_ENDPOINT and update the README."
+                 fi ;;
+            4)   echo "::error::Exit 4: the site answered this unfiltered search with its own 'nothing matched' (search-count:0), on a query it normally reports 10,000 matches for. Check the HTML dump in the artifacts and detect_page_state() in product_parser.py." ;;
+            5)   echo "::error::Exit 5: the content was never obtained. Either the navigation itself failed (a load timeout, a dead proxy, or with a secret configured (cdp=$HAVE_CDP proxy=$HAVE_PROXY) the endpoint or its credentials), or the page was served and parsed to nothing (stop_reason=parser_found_nothing): most likely the inlined results payload (App.Components.Search.SearchProjectsResults) moved or was renamed -- check extract_inline_search_result() against the HTML dump in the artifacts. The run log names which." ;;
+            6)   echo "::error::Partial run (exit 6) — some pages were gathered and then the run stopped early. canary_run.meta.json names which pages failed. On this site the usual cause is the searchProjectsForCards POST being refused mid-run (the session's Cloudflare clearance expiring under it), which shows up as stop_reason=page_failed." ;;
+            2)   echo "::error::Bad usage (exit 2) — the workflow's own arguments are wrong, not the site." ;;
+            *)   echo "::error::Unexpected exit code $code (see the step above for the traceback)." ;;
+          esac
+          test "$code" = "0"
+
+      - name: Sanity-check the scraped data
+        # Exit 0 only means "some rows were written". It says nothing about
+        # whether the page actually rendered: a snapshot taken too early still
+        # writes rows, just with fields empty. Every floor below is set from a
+        # measured figure and deliberately under it, so this fails on a
+        # collapse rather than on normal variation.
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          PAGES_REQUESTED = 3
+          PAGE_SIZE = 24
+          # Measured 2026-09-17 against three live 3-page runs: 24 rows per
+          # page, 72 per run, with sku/title/url/price/currency/category/
+          # platform/creator/backers_count/followers_count/campaign_end all
+          # 72/72. The floor below is two pages' worth, so a short final page
+          # cannot trip it, and it is well under the measured 72.
+          MIN_ROWS = 2 * PAGE_SIZE
+
+          rows = json.loads(Path("canary_run.json").read_text())
+          meta = json.loads(Path("canary_run.meta.json").read_text())
+          fail = []
+
+          if len(rows) < MIN_ROWS:
+              fail.append(f"only {len(rows)} rows, expected at least {MIN_ROWS} "
+                          f"across {PAGES_REQUESTED} pages")
+
+          priced = sum(1 for r in rows if r.get("price") is not None)
+
+          # Fields measured at 100% on three separate live runs. Any of them
+          # collapsing means an anchor moved. Kept under 1.0 where the SITE
+          # legitimately varies: `goal` is absent on about 18% of campaigns
+          # (an "Express crowdfunding" campaign has none by design), so it is
+          # deliberately NOT in this list -- asserting it would make the
+          # canary flap on a normal mix of campaigns.
+          for field, floor in (("sku", 1.0), ("url", 1.0), ("title", 1.0),
+                               ("price", 0.98), ("currency", 0.95),
+                               ("category", 0.98), ("platform", 1.0),
+                               ("creator", 0.98), ("backers_count", 0.95),
+                               ("campaign_end", 0.95), ("sort", 1.0)):
+              got = sum(1 for r in rows if r.get(field) not in (None, ""))
+              if rows and got / len(rows) < floor:
+                  fail.append(f"{field} present on only {got}/{len(rows)} rows "
+                              f"(floor {floor:.0%})")
+
+          # Every row's currency must be a real ISO 4217 code or null -- never
+          # a raw symbol leaking through, and never a defaulted "USD". A
+          # symbol here means currency_from_symbol() stopped resolving.
+          # isalpha() as well as isupper(): "HK$" is three characters and
+          # "HK$".isupper() is True, because "$" is uncased -- so a leaked
+          # symbol slipped straight through the first version of this check.
+          # Found by deliberately injecting one rather than by reading it.
+          bad_cur = {r.get("currency") for r in rows
+                     if r.get("currency") is not None
+                     and not (isinstance(r["currency"], str)
+                              and len(r["currency"]) == 3
+                              and r["currency"].isalpha()
+                              and r["currency"].isupper())}
+          if bad_cur:
+              fail.append(f"non-ISO currency value(s) in the output: {sorted(bad_cur)[:5]}")
+
+          # The API's not-applicable sentinel must never reach a row.
+          zeros = sum(1 for r in rows if r.get("funded_in_seconds") == 0)
+          if zeros:
+              fail.append(f"{zeros} row(s) carry funded_in_seconds=0, the "
+                          f"API's not-applicable sentinel, instead of null")
+
+          # A goal at or below zero, or a percentage computed from one, means
+          # pct_funded's guards stopped guarding.
+          # Zero itself is a legitimate figure: a campaign that has raised
+          # 10,000 against a goal of 900,000,000 rounds to 0.0 at two
+          # decimals, and a campaign with nothing raised is 0% funded. What
+          # must never happen is a NEGATIVE percentage, or a percentage
+          # computed from a goal that is absent or not positive.
+          bad_pct = [r.get("sku") for r in rows
+                     if r.get("pct_funded") is not None
+                     and (r["pct_funded"] < 0
+                          or r.get("goal") is None or r["goal"] <= 0)]
+          if bad_pct:
+              fail.append(f"{len(bad_pct)} row(s) report a negative pct_funded "
+                          f"or one without a positive goal: {bad_pct[:3]}")
+
+          # A page number never threaded into the parser produces (page,
+          # position) collisions across pages that look, from the row count
+          # alone, like a perfectly healthy run.
+          pairs = [(r.get("page"), r.get("position")) for r in rows]
+          dupes = {p for p in pairs if pairs.count(p) > 1}
+          if dupes:
+              fail.append(f"{len(dupes)} (page, position) pair(s) repeated "
+                          f"across the run: {list(dupes)[:3]} — the page "
+                          f"number is not being threaded into the parser, or "
+                          f"the same page was fetched twice")
+
+          # Pages must not overlap: pageIndex is 0-based, and an off-by-one
+          # there would re-fetch a page and double its rows rather than fail.
+          if len({r.get("sku") for r in rows}) != len(rows):
+              fail.append("duplicate sku(s) across pages — check the 0-based "
+                          "pageIndex arithmetic in page_flow.plan_page_indices")
+
+          if meta.get("pages_completed", 0) < PAGES_REQUESTED:
+              fail.append(f"pagination stopped after {meta.get('pages_completed')} "
+                          f"of {PAGES_REQUESTED} pages (stop_reason="
+                          f"{meta.get('stop_reason')!r})")
+          if meta.get("status") != "complete":
+              fail.append(f"run status is {meta.get('status')!r}, not 'complete'")
+          if meta.get("mode") != "search":
+              fail.append(f"run mode is {meta.get('mode')!r}, not 'search'")
+          if meta.get("source") != "indiegogo.com":
+              fail.append(f"run source is {meta.get('source')!r}, not 'indiegogo.com'")
+          # The site's own arithmetic has to reach the sidecar, or the
+          # "complete is not exhaustive" distinction quietly stops being
+          # recorded.
+          for key in ("total_results", "pages_available", "capped_by_site",
+                      "reachable_max", "sort"):
+              if meta.get(key) is None:
+                  fail.append(f"sidecar is missing {key} — the site's own "
+                              f"result arithmetic is no longer being recorded")
+
+          for line in fail:
+              print(f"::error::{line}")
+          platforms = {}
+          for r in rows:
+              platforms[r.get("platform")] = platforms.get(r.get("platform"), 0) + 1
+          print(f"[canary] {len(rows)} rows, {priced} with a funding total, "
+                f"status={meta.get('status')}, "
+                f"pages={meta.get('pages_completed')}/{PAGES_REQUESTED}, "
+                f"capped={meta.get('capped_by_site')}, platforms={platforms}")
+          sys.exit(1 if fail else 0)
+          EOF
+
+      - name: Upload run artifacts (output, HTML snapshot, debug dumps)
+        # Always, not just on failure: a run that returns the WRONG numbers
+        # with no error is exactly the regression that needs the actual bytes
+        # the parser saw, not a pass/fail badge.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-run-${{ github.run_id }}
+          path: |
+            canary_run.json
+            canary_run.csv
+            canary_run.meta.json
+            canary_run.html*
+            canary_run_page*_debug.*
+          if-no-files-found: ignore
+          retention-days: 14

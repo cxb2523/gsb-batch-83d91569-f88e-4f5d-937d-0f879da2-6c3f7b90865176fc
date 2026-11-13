@@ -1,0 +1,137 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps do not.
+        Replace them with `***`.
+
+        A few things answer most reports faster than we can:
+
+        - **Exit 3 (blocked)?** Every indiegogo.com page is behind a
+          Cloudflare managed challenge. A real browser usually clears it by
+          itself; if it did not, say whether the run was headless, which
+          address it came from (datacentre or residential), and whether a
+          `--twocaptcha-key` was set. Check `product_parser.BOT_CHALLENGE_MARKERS`
+          against what the page actually returned (`--dump-html`).
+        - **Exit 4?** The site itself answered "nothing matched"
+          (`search-count:0`) — check the search URL's own filters first.
+        - **Exit 5?** The page was never obtained (navigation failure, dead
+          proxy, remote API error), or a served page parsed to nothing. The
+          log line before the exit says which.
+        - **`--mode campaign` / `--mode rewards` gave a 404?** Some search
+          results are campaigns hosted on gamefound.com (`platform` column);
+          their URLs answer 404 on indiegogo.com. That is the site, not the
+          parser.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which --mode
+      options:
+        - search
+        - campaign
+        - rewards
+        - not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is a
+        challenge page, 4 is "the site answered and nothing matched", 5 is
+        "the content was never obtained", 6 is a partial run. The table is
+        in the README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py \
+          --mode search --pages 3 --out projects
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        24 rows per page, as the README says a search page yields.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true
