@@ -921,6 +921,23 @@ export class CamofoxClient {
     );
   }
 
+  async downloadResource(
+    tabId: string,
+    params: {
+      userId: string;
+      url: string;
+    }
+  ): Promise<any> {
+    return this.requestJson(
+      `/tabs/${encodeURIComponent(tabId)}/download`,
+      {
+        method: "POST",
+        body: JSON.stringify(params)
+      },
+      z.unknown()
+    );
+  }
+
   async batchDownload(
     tabId: string,
     params: {
