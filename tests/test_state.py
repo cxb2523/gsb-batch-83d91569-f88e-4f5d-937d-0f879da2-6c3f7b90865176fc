@@ -83,3 +83,24 @@ def test_load_corrupt_and_non_dict_state_returns_none(tmp_path: Path):
     non_dict = tmp_path / "list_state.json"
     non_dict.write_text('["unexpected", "list"]', encoding="utf-8")
     assert load_state(non_dict) is None
+
+
+def test_state_persists_snapshot_provenance(tmp_path: Path):
+    """Saved state must retain the real snapshot source and estimate flag."""
+    from buildsite.models import ContributionSnapshot
+    from buildsite.progression import calculate_property_state
+
+    snap = ContributionSnapshot(
+        user_id=7, login="prov", total_contributions=90, active_days=10,
+        source="rest", is_estimate=True,
+    )
+    state = calculate_property_state(snap)
+    assert state.source == "rest"
+    assert state.is_estimate is True
+
+    state_file = tmp_path / "buildsite_state.json"
+    save_state(state, state_file)
+    loaded = load_state(state_file)
+    assert loaded is not None
+    assert loaded.source == "rest"
+    assert loaded.is_estimate is True

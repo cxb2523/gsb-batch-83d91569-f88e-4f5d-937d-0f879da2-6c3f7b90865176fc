@@ -300,5 +300,7 @@ def calculate_property_state(
         unlocked_features=unique_unlocked,
         last_updated=datetime.now(timezone.utc).isoformat(),
         last_contribution_count=total_c,
-        hash_signature=hash_sig
+        hash_signature=hash_sig,
+        source=snapshot.source,
+        is_estimate=snapshot.is_estimate
     )

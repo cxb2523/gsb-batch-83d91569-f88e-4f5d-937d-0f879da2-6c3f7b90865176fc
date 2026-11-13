@@ -93,7 +93,9 @@ def load_state(state_file_path: Path) -> Optional[PropertyState]:
         variation=data.get("variation"),
         last_updated=str(data.get("last_updated", "") or ""),
         last_contribution_count=_safe_int(data.get("last_contribution_count", 0)),
-        hash_signature=str(data.get("hash_signature", "") or "")
+        hash_signature=str(data.get("hash_signature", "") or ""),
+        source=str(data.get("source", "") or ""),
+        is_estimate=bool(data.get("is_estimate", False))
     )
 
 
@@ -116,6 +118,8 @@ def save_state(state: PropertyState, state_file_path: Path) -> None:
         "last_updated": state.last_updated,
         "last_contribution_count": state.last_contribution_count,
         "hash_signature": state.hash_signature,
+        "source": state.source,
+        "is_estimate": state.is_estimate,
     }
 
     # Write to temporary file then replace atomically

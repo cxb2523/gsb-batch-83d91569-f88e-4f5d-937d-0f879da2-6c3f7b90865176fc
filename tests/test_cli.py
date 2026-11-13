@@ -61,3 +61,73 @@ def test_cli_demo_command(tmp_path: Path, monkeypatch):
     with patch("sys.argv", ["buildsite", "status", "--output-dir", str(out_dir)]):
         stat_code = main()
         assert stat_code == 0
+
+
+def test_generate_returns_nonzero_when_all_channels_fail(tmp_path: Path, caplog):
+    """generate must fail loudly (non-zero) instead of building from bogus data."""
+    import argparse
+    import logging
+
+    from buildsite.cli import cmd_generate
+    from buildsite.github_api import GitHubAPIError
+    from buildsite.models import UserConfig
+
+    args = argparse.Namespace(
+        config=None,
+        user="ghost-architect",
+        token=None,
+        output_dir=str(tmp_path / "out"),
+        demo=False,
+        force=False,
+    )
+
+    with patch("buildsite.cli.load_config", return_value=UserConfig(username="ghost-architect")), \
+         patch("buildsite.cli.fetch_contributions_public_calendar", side_effect=GitHubAPIError("no total")), \
+         patch("buildsite.cli.fetch_contributions_graphql", side_effect=GitHubAPIError("graphql down")), \
+         patch("buildsite.cli.fetch_contributions_rest_fallback", side_effect=GitHubAPIError("rest down")):
+        with caplog.at_level(logging.ERROR, logger="buildsite"):
+            exit_code = cmd_generate(args)
+
+    assert exit_code != 0
+    assert "All contribution retrieval methods failed" in caplog.text
+    assert not (tmp_path / "out" / "buildsite_state.json").exists()
+
+
+def test_generate_logs_selected_source_and_marks_rest_as_estimate(tmp_path: Path, caplog):
+    """generate logs the adopted channel and labels REST results as estimates."""
+    import argparse
+    import logging
+
+    from buildsite.cli import cmd_generate
+    from buildsite.github_api import GitHubAPIError
+    from buildsite.models import ContributionSnapshot, UserConfig
+
+    repo_assets = Path(__file__).resolve().parent.parent / "assets"
+    args = argparse.Namespace(
+        config=None,
+        user="estimate-user",
+        token=None,
+        output_dir=str(tmp_path / "out"),
+        demo=False,
+        force=True,
+    )
+    estimate = ContributionSnapshot(
+        user_id=555,
+        login="estimate-user",
+        total_contributions=85,
+        active_days=3,
+        source="rest",
+        is_estimate=True,
+    )
+
+    with patch("buildsite.cli.load_config", return_value=UserConfig(username="estimate-user")), \
+         patch("buildsite.cli.find_assets_directory", return_value=repo_assets), \
+         patch("buildsite.cli.fetch_contributions_public_calendar", side_effect=GitHubAPIError("no total")), \
+         patch("buildsite.cli.fetch_contributions_graphql", side_effect=GitHubAPIError("graphql down")), \
+         patch("buildsite.cli.fetch_contributions_rest_fallback", return_value=estimate):
+        with caplog.at_level(logging.INFO, logger="buildsite"):
+            exit_code = cmd_generate(args)
+
+    assert exit_code == 0
+    assert "Contribution source: rest" in caplog.text
+    assert "ESTIMATED" in caplog.text

@@ -212,7 +212,11 @@ class ContributionSnapshot:
     calendar_days: List[ContributionDay] = field(default_factory=list)
     years: List[int] = field(default_factory=list)
     collected_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    source: str = "graphql"         # "graphql", "rest", "cache", or "demo"
+    # "graphql", "public_calendar", "rest", "demo", or "cache"
+    source: str = "graphql"
+    # True when counts are derived heuristically (e.g. REST fallback) and must
+    # never be presented as exact verified contribution totals.
+    is_estimate: bool = False
 
 
 @dataclass
@@ -233,6 +237,11 @@ class PropertyState:
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_contribution_count: int = 0
     hash_signature: str = ""
+    # Provenance of the snapshot this state was derived from:
+    # "graphql", "public_calendar", "rest", or "demo".
+    source: str = ""
+    # True when the derived contribution count is a heuristic estimate.
+    is_estimate: bool = False
 
 
 @dataclass

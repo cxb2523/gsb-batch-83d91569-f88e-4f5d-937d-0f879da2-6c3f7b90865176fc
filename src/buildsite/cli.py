@@ -18,7 +18,6 @@ from buildsite.composer import composite_property, find_assets_directory
 from buildsite.config import ConfigValidationError, load_config
 from buildsite.github_api import (
     GitHubAPIError,
-    RateLimitExceededError,
     UserNotFoundError,
     fetch_contributions_graphql,
     fetch_contributions_public_calendar,
@@ -141,40 +140,70 @@ def fetch_snapshot_with_fallbacks(
     token: Optional[str] = None,
     allow_demo: bool = False
 ) -> ContributionSnapshot:
-    """Fetch snapshot via GraphQL, public calendar scraper, REST fallback, or demo."""
+    """Fetch snapshot via GraphQL (token), public calendar, GraphQL (no token), REST.
+
+    ``UserNotFoundError`` is never swallowed: an unknown user aborts the chain
+    immediately. Every other failure is recorded and the next channel is tried.
+    If all channels fail, a :class:`GitHubAPIError` describing each attempt is
+    raised so the CLI can exit non-zero.
+    """
     if allow_demo:
+        logger.info("Contribution source: demo (simulated data).")
         return get_demo_contributions(327, username=username or "demo-user")
 
-    # 1. Attempt GraphQL first if token provided
+    failures: list[str] = []
+
+    def _record(stage: str, exc: Exception) -> None:
+        failures.append(f"{stage}: {exc}")
+        logger.warning("%s failed (%s); trying next source...", stage, exc)
+
+    # 1. GraphQL with token (most authoritative; exact verified totals)
     if token:
         try:
-            return fetch_contributions_graphql(username, token=token)
+            snapshot = fetch_contributions_graphql(username, token=token)
+            logger.info("Contribution source: graphql (authenticated).")
+            return snapshot
         except UserNotFoundError:
             raise
         except Exception as exc:
-            logger.warning("GraphQL query with token failed (%s); trying public calendar...", exc)
+            _record("GraphQL (authenticated)", exc)
 
-    # 2. Query GitHub public contributions calendar (returns exact verified count without auth)
+    # 2. Public contribution calendar (exact count, no auth required)
     try:
-        return fetch_contributions_public_calendar(username)
+        snapshot = fetch_contributions_public_calendar(username)
+        logger.info("Contribution source: public_calendar.")
+        return snapshot
     except UserNotFoundError:
         raise
-    except Exception as cal_exc:
-        logger.warning("Public calendar query failed (%s); trying GraphQL/REST...", cal_exc)
+    except Exception as exc:
+        _record("Public calendar", exc)
 
-    # 3. Attempt unauthenticated GraphQL
+    # 3. Unauthenticated GraphQL (explicitly tokenless, ignoring env tokens)
     try:
-        return fetch_contributions_graphql(username, token=token)
+        snapshot = fetch_contributions_graphql(username, token="")
+        logger.info("Contribution source: graphql (unauthenticated).")
+        return snapshot
     except UserNotFoundError:
         raise
-    except (RateLimitExceededError, GitHubAPIError) as exc:
-        logger.warning("GraphQL query failed (%s); trying REST API fallback...", exc)
+    except Exception as exc:
+        _record("GraphQL (unauthenticated)", exc)
 
-    # 4. Attempt REST fallback
+    # 4. REST fallback — heuristic estimate, never an exact contribution count
     try:
-        return fetch_contributions_rest_fallback(username, token=token)
-    except Exception as rest_exc:
-        raise GitHubAPIError(f"All contribution retrieval methods failed: {rest_exc}") from rest_exc
+        snapshot = fetch_contributions_rest_fallback(username, token=token)
+        logger.warning(
+            "Contribution source: rest. Counts are ESTIMATES derived from public "
+            "repositories and events, not verified contribution totals."
+        )
+        return snapshot
+    except UserNotFoundError:
+        raise
+    except Exception as exc:
+        _record("REST API fallback", exc)
+
+    raise GitHubAPIError(
+        "All contribution retrieval methods failed: " + "; ".join(failures)
+    )
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -203,7 +232,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
         logger.error("Contribution retrieval failed: %s", exc)
         return 1
 
-    logger.info("Retrieved %d contributions across %d active days.", snapshot.total_contributions, snapshot.active_days)
+    if snapshot.is_estimate:
+        logger.warning(
+            "Snapshotted %d ESTIMATED contributions across %d active days (source: %s). "
+            "These are not verified GitHub contribution totals.",
+            snapshot.total_contributions, snapshot.active_days, snapshot.source
+        )
+    else:
+        logger.info(
+            "Retrieved %d contributions across %d active days (source: %s).",
+            snapshot.total_contributions, snapshot.active_days, snapshot.source
+        )
 
     # Load existing state if available
     prev_state = load_state(state_file)
@@ -296,7 +335,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("\n==================================================")
     print(f"  BUILDSITE STATUS: @{state.login}")
     print("==================================================")
-    print(f"  Verified Contributions: {state.total_contributions:,}")
+    if state.is_estimate:
+        print(f"  Estimated Contributions: {state.total_contributions:,} (source: {state.source})")
+    else:
+        print(f"  Verified Contributions: {state.total_contributions:,} (source: {state.source or 'unknown'})")
     print(f"  Active Contribution Days: {state.active_days}")
     print(f"  Active Milestone:       {spec.title} ({state.milestone.value})")
     print(f"  Progress to Next:       {int(micro.progress_ratio * 100)}% ({micro.contributions_to_next:,} contributions needed)")
