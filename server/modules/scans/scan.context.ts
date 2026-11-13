@@ -1,6 +1,7 @@
 import { redis } from '../../config/redis.js';
 import type { RawTreeEntry } from '../insights/structure.js';
 import type { CiRun } from '../insights/ci.js';
+import type { CollectionAlert } from '../../../shared/types/index.js';
 
 export type CommitFile = {
   filename: string;
@@ -58,6 +59,14 @@ export type ScanContext = {
    * live inside it (relative paths).
    */
   workflowFiles: string[];
+
+  /**
+   * Non-fatal data-source failures collected while building this context.
+   * Empty when every source responded successfully. Each entry names the
+   * source that failed and carries its error message so the summary can
+   * surface which metrics are based on partial data.
+   */
+  collectionAlerts: CollectionAlert[];
 };
 
 const TTL_SECONDS = 3600;

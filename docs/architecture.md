@@ -50,6 +50,15 @@ intentionally not multi-tenant**. It runs on one VPS with Docker Compose:
 5. Worker picks up job → marks `status = 'running'` → fetches GitHub data (config files, up to 1,000 commits, recursive tree, recent Actions runs) → builds `ScanContext` → saves to `scan:context:<scanId>` (1h TTL) → runs 13 detectors → persists `tool_usage` rows → backfills `tracked_tools` → computes activity/commit quality, contributor concentration, structure, workflow health, and dependency health → writes `scans.languages`, `scans.repo_tree`, `scan_ci_runs`, `scan_dependencies`, and the scored `scans.summary` → caches completed scan.
 6. On failure → final attempt writes `status = 'failed'` and error text, invalidates matching caches; earlier attempts log and leave the row for BullMQ retry (up to 3 attempts with exponential backoff). Stale retries cannot overwrite a newer scan's cached result.
 
+### Partial collection tolerance
+
+Individual GitHub data-source failures do not fail a scan. The contributor list and commit list are load-bearing and stay fatal (alongside a missing GitHub token and a deleted repository), but every per-item or secondary source is fault-tolerant:
+
+- A failed commit-detail lookup (e.g. timeout/504) skips only that commit's file breakdown. The commit is still kept with its list-level `sha`, author, message, and date, so activity and contributor concentration remain complete.
+- Failures fetching the recursive tree, root listing, individual config/workflow files, the workflows directory listing, or the Actions run record each log a warning and push an entry onto `ScanContext.collectionAlerts`; the affected metrics fall back to their existing empty-data paths.
+- The alerts are written to `scans.summary.collectionAlerts` as `{ source, message }[]` (an empty array when every source succeeds). The repository detail page and scan history render them so maintainers can see which metrics are partial. Health, adoption, and CI success-rate calculations are unchanged.
+
+
 ## Request lifecycle: automatic rescans
 
 Each tracked repository has its own BullMQ Job Scheduler named

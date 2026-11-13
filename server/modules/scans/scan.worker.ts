@@ -48,7 +48,7 @@ import {
   isToolRelevant,
   languagesToArray,
 } from '../metrics/scoring.js';
-import type { ScanSummary, ToolMetric } from '../../../shared/types/index.js';
+import type { ScanSummary, ToolMetric, CollectionAlert } from '../../../shared/types/index.js';
 import { buildCommitActivity } from '../insights/activity.js';
 import { computeConcentration } from '../insights/concentration.js';
 import { aggregateCiHealth } from '../insights/ci.js';
@@ -66,6 +66,19 @@ const MAX_CONTRIBUTORS_PAGES = 2;
 const MAX_COMMITS_PAGES = 10;
 const ACTIVITY_WINDOW_DAYS = 365;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Stable data-source names recorded in scan summary collection alerts.
+ * Kept as constants so tests and the UI can rely on the exact strings.
+ */
+const ALERT_SOURCE = {
+  commitDetail: 'commit-detail',
+  repoTree: 'repo-tree',
+  rootContents: 'root-contents',
+  configFile: 'config-file',
+  workflowsContents: 'workflows-contents',
+  workflowRuns: 'workflow-runs',
+} as const;
 
 const CONFIG_FILE_CANDIDATES = [
   'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
@@ -102,6 +115,29 @@ const CONFIG_SUBDIR_CANDIDATES = [
   { path: '.codecov.yml' },
 ];
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Records a non-fatal data-source failure. The scan keeps running with the
+ * data collected so far; downstream metrics fall back to their empty-data
+ * paths. Failures here must never be swallowed silently — each one is also
+ * logged and surfaced in the scan summary.
+ */
+function recordAlert(
+  alerts: CollectionAlert[],
+  source: string,
+  err: unknown,
+  detail?: string,
+): void {
+  const message = detail
+    ? `${detail}: ${errorMessage(err)}`
+    : errorMessage(err);
+  alerts.push({ source, message });
+  logger.warn(`Scan collection alert [${source}] ${message}`);
+}
+
 async function buildScanContext(
   token: string,
   scanId: string,
@@ -110,6 +146,9 @@ async function buildScanContext(
   name: string,
   defaultBranch: string,
 ): Promise<ScanContext> {
+  // Contributors and the commit list are load-bearing inputs: without them
+  // there are no commits to analyse, so their failures stay fatal. Every
+  // source below tolerates individual request failures instead.
   const contributorsRaw = await fetchContributors(
     token, owner, name, MAX_CONTRIBUTORS_PAGES,
   );
@@ -120,6 +159,8 @@ async function buildScanContext(
   const commitsRaw = await fetchRecentCommits(
     token, owner, name, defaultBranch, MAX_COMMITS_PAGES,
   );
+
+  const alerts: CollectionAlert[] = [];
 
   const commits: CommitInfo[] = [];
   const commitHistory: CommitInfo[] = commitsRaw.map((commit) => ({
@@ -133,13 +174,26 @@ async function buildScanContext(
   const detailTargets = commitsRaw.slice(0, MAX_COMMIT_DETAIL_LOOKUPS);
 
   for (const commit of detailTargets) {
-    const detail = await fetchCommitDetail(token, owner, name, commit.sha);
-    const files: CommitFile[] = (detail.files ?? []).map((f) => ({
-      filename: f.filename,
-      status: f.status,
-      additions: f.additions,
-      deletions: f.deletions,
-    }));
+    // A failed detail lookup only costs us the file breakdown for this
+    // commit. Its sha, author, message and date come from the list and are
+    // still pushed, so activity and concentration stay complete.
+    let files: CommitFile[] = [];
+    try {
+      const detail = await fetchCommitDetail(token, owner, name, commit.sha);
+      files = (detail.files ?? []).map((f) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
+    } catch (err) {
+      recordAlert(
+        alerts,
+        ALERT_SOURCE.commitDetail,
+        err,
+        `commit ${commit.sha}`,
+      );
+    }
 
     commits.push({
       sha: commit.sha,
@@ -163,36 +217,56 @@ async function buildScanContext(
     }));
     treeTruncated = treeResponse.truncated;
   } catch (err) {
-    logger.warn(
-      `Tree fetch failed for ${owner}/${name}: ${(err as Error).message}`,
-    );
+    recordAlert(alerts, ALERT_SOURCE.repoTree, err, `${owner}/${name}`);
   }
 
-  const root = await listContents(token, owner, name, '', defaultBranch);
-  const rootFiles = root.filter((e) => e.type === 'file').map((e) => e.name);
+  let rootFiles: string[] = [];
+  try {
+    const root = await listContents(token, owner, name, '', defaultBranch);
+    rootFiles = root.filter((e) => e.type === 'file').map((e) => e.name);
+  } catch (err) {
+    recordAlert(alerts, ALERT_SOURCE.rootContents, err, `${owner}/${name}`);
+  }
 
   const configFiles: Record<string, string> = {};
   for (const path of CONFIG_FILE_CANDIDATES) {
     if (!rootFiles.includes(path)) continue;
-    const content = await readFileText(token, owner, name, path, defaultBranch);
-    if (content !== null) configFiles[path] = content;
+    try {
+      const content = await readFileText(token, owner, name, path, defaultBranch);
+      if (content !== null) configFiles[path] = content;
+    } catch (err) {
+      recordAlert(alerts, ALERT_SOURCE.configFile, err, path);
+    }
   }
   for (const { path } of CONFIG_SUBDIR_CANDIDATES) {
-    const content = await readFileText(token, owner, name, path, defaultBranch);
-    if (content !== null) configFiles[path] = content;
+    try {
+      const content = await readFileText(token, owner, name, path, defaultBranch);
+      if (content !== null) configFiles[path] = content;
+    } catch (err) {
+      recordAlert(alerts, ALERT_SOURCE.configFile, err, path);
+    }
   }
 
-  const workflowEntries = await listContents(
-    token, owner, name, '.github/workflows', defaultBranch,
-  );
-  const workflowFiles = workflowEntries
-    .filter((e) => e.type === 'file')
-    .map((e) => `.github/workflows/${e.name}`);
+  let workflowFiles: string[] = [];
+  try {
+    const workflowEntries = await listContents(
+      token, owner, name, '.github/workflows', defaultBranch,
+    );
+    workflowFiles = workflowEntries
+      .filter((e) => e.type === 'file')
+      .map((e) => `.github/workflows/${e.name}`);
+  } catch (err) {
+    recordAlert(alerts, ALERT_SOURCE.workflowsContents, err);
+  }
 
   for (const wf of workflowFiles) {
     if (wf in configFiles) continue;
-    const content = await readFileText(token, owner, name, wf, defaultBranch);
-    if (content !== null) configFiles[wf] = content;
+    try {
+      const content = await readFileText(token, owner, name, wf, defaultBranch);
+      if (content !== null) configFiles[wf] = content;
+    } catch (err) {
+      recordAlert(alerts, ALERT_SOURCE.configFile, err, wf);
+    }
   }
 
   let ciRuns: import('../insights/ci.js').CiRun[] | undefined;
@@ -226,10 +300,8 @@ async function buildScanContext(
     } catch (err) {
       ciRuns = [];
       ciPartial = true;
-      ciError = (err as Error).message;
-      logger.warn(
-        `Workflow runs fetch failed for ${owner}/${name}: ${ciError}`,
-      );
+      ciError = errorMessage(err);
+      recordAlert(alerts, ALERT_SOURCE.workflowRuns, err);
     }
   }
 
@@ -238,6 +310,7 @@ async function buildScanContext(
     fetchedAt: new Date().toISOString(),
     commits, commitHistory, contributors, rootFiles, configFiles, workflowFiles,
     tree, treeTruncated, ciRuns, ciPartial, ciError,
+    collectionAlerts: alerts,
   };
 }
 
@@ -461,6 +534,7 @@ async function processScanJob(job: {
       health,
       ciHealth,
       ciError: ctx.ciError ?? null,
+      collectionAlerts: ctx.collectionAlerts,
       ...(activity ? { activity } : {}),
       ...(concentration ? { concentration } : {}),
       ...(dependencyResult

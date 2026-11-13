@@ -5,6 +5,7 @@ import { Loader2, RefreshCw, ScanLine } from "lucide-react"
 import { toast } from "sonner"
 import { EmptyState } from "@/components/app/EmptyState"
 import { ErrorState } from "@/components/app/ErrorState"
+import { CollectionAlertsBanner } from "@/components/app/CollectionAlerts"
 import { RepoDetailSkeleton } from "@/components/app/LoadingSkeletons"
 import { MetricsPanel } from "@/components/app/MetricsPanel"
 import { ActivityTab } from "@/components/app/insights/ActivityTab"
@@ -18,6 +19,26 @@ import { Button } from "@/components/ui/button"
 import { useRepo, useRepoMetrics, useRepoScans } from "@/hooks/useRepoDetail"
 import { useRunScan, useScanPoll } from "@/hooks/useRunScan"
 import { rememberRecentRepo } from "@/lib/recent-repos"
+import type { CollectionAlert } from "@shared/types"
+
+/**
+ * Reads the collection alerts recorded by the worker out of the latest
+ * completed scan's free-form summary JSON. Older scans and scans with no
+ * failed sources simply produce an empty list.
+ */
+function readCollectionAlerts(
+  summary: Record<string, unknown> | null,
+): CollectionAlert[] {
+  const raw = summary?.collectionAlerts
+  if (!Array.isArray(raw)) return []
+  return raw.filter(
+    (entry): entry is CollectionAlert =>
+      typeof entry === "object" &&
+      entry !== null &&
+      typeof (entry as CollectionAlert).source === "string" &&
+      typeof (entry as CollectionAlert).message === "string",
+  )
+}
 
 function NoScanState({
   scanning,
@@ -95,6 +116,12 @@ export default function RepoDetail() {
   const metrics = metricsQuery.data
   const activeScan = scansQuery.data?.scans.find(
     (scan) => scan.status === "pending" || scan.status === "running",
+  )
+  const latestCompletedScan = scansQuery.data?.scans.find(
+    (scan) => scan.status === "complete",
+  )
+  const collectionAlerts = readCollectionAlerts(
+    latestCompletedScan?.summary ?? null,
   )
 
   useEffect(() => {
@@ -217,6 +244,11 @@ export default function RepoDetail() {
         />
       ) : (
         <>
+          {collectionAlerts.length > 0 ? (
+            <div className="mt-6">
+              <CollectionAlertsBanner alerts={collectionAlerts} />
+            </div>
+          ) : null}
           <div className="mt-6">
             {activeTab === "overview" ? (
               <OverviewTab

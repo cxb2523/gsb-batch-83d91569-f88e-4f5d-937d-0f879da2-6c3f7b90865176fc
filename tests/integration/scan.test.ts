@@ -15,8 +15,11 @@ import {
 } from '../../server/modules/scans/scan.service.js';
 import { scanQueue } from '../../server/modules/scans/scan.queue.js';
 import { cacheSet, cacheGet, cacheDel, cacheKeys } from '../../server/utils/cache.js';
-import type { ScanSummary } from '../../shared/types/index.js';
-import { deleteScanContext } from '../../server/modules/scans/scan.context.js';
+import type { ScanSummary, CollectionAlert } from '../../shared/types/index.js';
+import {
+  deleteScanContext,
+  loadScanContext,
+} from '../../server/modules/scans/scan.context.js';
 
 let app: Express;
 let token: string;
@@ -44,6 +47,10 @@ function stubGithubFetch(options: {
     actor: string;
     startedAt: string;
   }>;
+  /** SHAs whose commit-detail endpoint returns 504. */
+  failingCommitDetailShas?: string[];
+  /** File paths whose contents endpoint returns 500. */
+  failingFilePaths?: string[];
 }): void {
   const contributors = options.contributors ?? [];
   const commits = options.commits ?? [];
@@ -53,6 +60,8 @@ function stubGithubFetch(options: {
   const workflows = options.workflows ?? [];
   const tree = options.tree ?? [];
   const workflowRuns = options.workflowRuns ?? [];
+  const failingCommitDetailShas = new Set(options.failingCommitDetailShas ?? []);
+  const failingFilePaths = new Set(options.failingFilePaths ?? []);
 
   const originalFetch = globalThis.fetch;
 
@@ -100,6 +109,9 @@ function stubGithubFetch(options: {
       const detailMatch = /\/repos\/[^/]+\/[^/]+\/commits\/([^?]+)$/.exec(url);
       if (detailMatch) {
         const sha = detailMatch[1]!;
+        if (failingCommitDetailShas.has(sha)) {
+          return errorResponse(504, `Gateway Timeout fetching ${sha}`);
+        }
         const files = filesBySha[sha] ?? [];
         return jsonResponse({
           sha,
@@ -174,6 +186,9 @@ function stubGithubFetch(options: {
       const fileMatch = /\/contents\/([^?]+)\?ref=/.exec(url);
       if (fileMatch) {
         const path = decodeURIComponent(fileMatch[1]!);
+        if (failingFilePaths.has(path)) {
+          return errorResponse(500, `Internal Server Error reading ${path}`);
+        }
         const content = fileContents[path];
         if (content === undefined) {
           return notFound();
@@ -205,6 +220,13 @@ function jsonResponse(body: unknown): Response {
 
 function notFound(): Response {
   return new Response('{"message":"Not Found"}', { status: 404 });
+}
+
+function errorResponse(status: number, message: string): Response {
+  return new Response(JSON.stringify({ message }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 beforeAll(async () => {
@@ -576,6 +598,146 @@ describe('scan pipeline', () => {
     // Corrupt the token
     await pool.query(
       `UPDATE users SET access_token = 'not-ciphertext' WHERE id = $1`,
+      [userId],
+    );
+
+    const post = await request(app)
+      .post(`/repos/${repoId}/scan`)
+      .set('Cookie', `token=${token}`);
+    const scanId: string = post.body.scan.id;
+
+    await expect(
+      processScanJobForTests({
+        data: { scanId, repoId, requestedBy: userId },
+      } as any),
+    ).rejects.toThrow();
+
+    const row = await pool.query<{ status: string; error: string | null }>(
+      'SELECT status, error FROM scans WHERE id = $1',
+      [scanId],
+    );
+    expect(row.rows[0]?.status).toBe('failed');
+    expect(row.rows[0]?.error).toContain('No GitHub token available');
+  });
+
+  it('tolerates commit-detail 504s and config-file 500s and records both as alerts', async () => {
+    stubGithubFetch({
+      contributors: [
+        { login: 'alice', contributions: 10 },
+        { login: 'bob', contributions: 5 },
+      ],
+      commits: [
+        { sha: 'sha1', authorLogin: 'alice', message: 'feat: first' },
+        { sha: 'sha2', authorLogin: 'bob', message: 'chore: second' },
+      ],
+      commitFilesBySha: {
+        sha2: ['src/bar.ts'],
+      },
+      // sha1's commit-detail endpoint times out (504).
+      failingCommitDetailShas: ['sha1'],
+      rootFiles: ['package.json', 'jest.config.js'],
+      fileContents: {
+        'package.json': JSON.stringify({ devDependencies: { jest: '29' } }),
+        'jest.config.js': 'module.exports = {};',
+      },
+      // package.json reads fail with 500.
+      failingFilePaths: ['package.json'],
+      workflows: [],
+      tree: [
+        { path: 'src', type: 'tree' },
+        { path: 'src/bar.ts', type: 'blob', size: 10 },
+      ],
+    });
+
+    const post = await request(app)
+      .post(`/repos/${repoId}/scan`)
+      .set('Cookie', `token=${token}`);
+    expect([200, 202]).toContain(post.status);
+    const scanId: string = post.body.scan.id;
+
+    // Must not throw: individual source failures are tolerated.
+    await processScanJobForTests({
+      data: { scanId, repoId, requestedBy: userId },
+    } as any);
+
+    const scanRow = await pool.query<{
+      status: string;
+      summary: Record<string, unknown>;
+    }>('SELECT status, summary FROM scans WHERE id = $1', [scanId]);
+    expect(scanRow.rows[0]?.status).toBe('complete');
+
+    const alerts = scanRow.rows[0]!.summary.collectionAlerts as CollectionAlert[];
+    const sources = alerts.map((a) => a.source).sort();
+    expect(sources).toEqual(['commit-detail', 'config-file']);
+
+    const commitDetailAlert = alerts.find((a) => a.source === 'commit-detail');
+    expect(commitDetailAlert?.message).toContain('sha1');
+    expect(commitDetailAlert?.message).toContain('504');
+
+    const configFileAlert = alerts.find((a) => a.source === 'config-file');
+    expect(configFileAlert?.message).toContain('package.json');
+    expect(configFileAlert?.message).toContain('500');
+
+    // Commit count still matches the commits-list response (2 of 2), and the
+    // failed commit keeps its list metadata but loses its file breakdown.
+    const ctx = await loadScanContext(scanId);
+    expect(ctx).not.toBeNull();
+    expect(ctx!.commitHistory).toHaveLength(2);
+    expect(ctx!.commits).toHaveLength(2);
+
+    const bySha = new Map(ctx!.commits.map((c) => [c.sha, c]));
+    const failedCommit = bySha.get('sha1')!;
+    expect(failedCommit.files).toEqual([]);
+    expect(failedCommit.authorLogin).toBe('alice');
+    expect(failedCommit.message).toBe('feat: first');
+    expect(failedCommit.date).toBe('2026-01-01T00:00:00Z');
+
+    const okCommit = bySha.get('sha2')!;
+    expect(okCommit.files.map((f) => f.filename)).toEqual(['src/bar.ts']);
+
+    // Activity and concentration still compute from the full commit list.
+    const concentration = scanRow.rows[0]!.summary
+      .concentration as { totalCommits: number; contributorCount: number };
+    expect(concentration.totalCommits).toBe(2);
+    expect(concentration.contributorCount).toBe(2);
+  });
+
+  it('records no collection alerts when every data source succeeds', async () => {
+    stubGithubFetch({
+      contributors: [{ login: 'alice', contributions: 1 }],
+      commits: [{ sha: 's1', authorLogin: 'alice', message: 'x' }],
+      commitFilesBySha: { s1: ['src/a.test.ts'] },
+      rootFiles: ['package.json', 'jest.config.js'],
+      fileContents: {
+        'package.json': JSON.stringify({ devDependencies: { jest: '29' } }),
+        'jest.config.js': '',
+      },
+      workflows: [],
+    });
+
+    const post = await request(app)
+      .post(`/repos/${repoId}/scan`)
+      .set('Cookie', `token=${token}`);
+    const scanId: string = post.body.scan.id;
+
+    await processScanJobForTests({
+      data: { scanId, repoId, requestedBy: userId },
+    } as any);
+
+    const scanRow = await pool.query<{
+      status: string;
+      summary: Record<string, unknown>;
+    }>('SELECT status, summary FROM scans WHERE id = $1', [scanId]);
+    expect(scanRow.rows[0]?.status).toBe('complete');
+    expect(scanRow.rows[0]!.summary.collectionAlerts).toEqual([]);
+  });
+
+  it('fails the scan when the user has no GitHub token', async () => {
+    stubGithubFetch({});
+
+    // Genuinely missing token (empty, rather than undecryptable).
+    await pool.query(
+      `UPDATE users SET access_token = '' WHERE id = $1`,
       [userId],
     );
 

@@ -1,6 +1,11 @@
 import { Fragment, useState } from "react"
 import { formatDistanceToNowStrict } from "date-fns"
-import type { ScanStatus, ScanSummary } from "@shared/types"
+import { AlertTriangle } from "lucide-react"
+import type {
+  CollectionAlert,
+  ScanStatus,
+  ScanSummary,
+} from "@shared/types"
 import { StatusBadge, type StatusTone } from "@/components/app/StatusBadge"
 import { Button } from "@/components/ui/button"
 import {
@@ -43,6 +48,20 @@ function healthScore(summary: Record<string, unknown> | null): number | null {
   return typeof score === "number" ? score : null
 }
 
+function collectionAlerts(
+  summary: Record<string, unknown> | null,
+): CollectionAlert[] {
+  const raw = summary?.collectionAlerts
+  if (!Array.isArray(raw)) return []
+  return raw.filter(
+    (entry): entry is CollectionAlert =>
+      typeof entry === "object" &&
+      entry !== null &&
+      typeof (entry as CollectionAlert).source === "string" &&
+      typeof (entry as CollectionAlert).message === "string",
+  )
+}
+
 function relativeDate(value: string): string {
   return formatDistanceToNowStrict(new Date(value), { addSuffix: true })
 }
@@ -68,6 +87,8 @@ function ScanDetails({ scan }: { scan: ScanSummary }) {
     )
   }
 
+  const alerts = collectionAlerts(scan.summary)
+
   return (
     <div className="grid gap-3 sm:grid-cols-3">
       <div>
@@ -84,6 +105,23 @@ function ScanDetails({ scan }: { scan: ScanSummary }) {
         <p className="text-xs text-muted-foreground">Tools checked</p>
         <p className="text-sm font-medium">{checked ?? "—"}</p>
       </div>
+      {alerts.length > 0 ? (
+        <div className="sm:col-span-3">
+          <p className="flex items-center gap-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+            <AlertTriangle className="size-3.5" aria-hidden="true" />
+            {alerts.length} data source{alerts.length === 1 ? "" : "s"}{" "}
+            failed during collection
+          </p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
+            {alerts.map((alert, index) => (
+              <li key={`${alert.source}-${index}`}>
+                <span className="font-medium">{alert.source}</span>
+                {alert.message ? <span>: {alert.message}</span> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   )
 }

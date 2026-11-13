@@ -47,6 +47,18 @@ export type RepoMetrics = {
 
 export type ScanStatus = 'pending' | 'running' | 'complete' | 'failed';
 
+/**
+ * A non-fatal failure of one GitHub data source during a scan. The scan still
+ * completes; metrics that depend on the source are computed through the normal
+ * empty-data path instead.
+ */
+export type CollectionAlert = {
+  /** Stable name of the data source that failed, e.g. "commit-detail". */
+  source: string;
+  /** Human-readable error message captured from the failed request. */
+  message: string;
+};
+
 export type ScanSummary = {
   id: string;
   repoId: string;

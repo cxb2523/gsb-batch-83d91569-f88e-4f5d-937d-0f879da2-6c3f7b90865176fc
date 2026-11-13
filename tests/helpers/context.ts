@@ -26,6 +26,7 @@ export function buildScanContext(opts: ContextOptions = {}): ScanContext {
     rootFiles: opts.rootFiles ?? [],
     configFiles: opts.configFiles ?? {},
     workflowFiles: opts.workflowFiles ?? [],
+    collectionAlerts: [],
   };
 }
 
