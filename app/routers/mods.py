@@ -20,9 +20,19 @@ STEAM_WORKSHOP_API = "https://api.steampowered.com/ISteamRemoteStorage/GetPublis
 _WORKSHOP_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
 _WORKSHOP_CACHE_TTL = 600.0  # 10 minutos
 
+# Límites para la recolección por lotes con resultados individuales
+WORKSHOP_ID_MAX_LENGTH = 20  # Los IDs de Workshop son numéricos de hasta 20 dígitos (uint64)
+COLLECT_ITEM_TIMEOUT = 6.0   # Tiempo máximo por cada solicitud individual
+COLLECT_BATCH_TIMEOUT = 30.0  # Tiempo máximo total para todo el lote
+
 
 class ModsUpdateRequest(BaseModel):
     mod_ids: str
+
+
+class ModsCollectRequest(BaseModel):
+    mod_ids: List[str]
+    force_refresh: bool = False
 
 
 def _get_local_mod_info(mod_id: str) -> Dict[str, Any]:
@@ -123,6 +133,152 @@ async def fetch_workshop_details(mod_ids: List[str], force_refresh: bool = False
     return results
 
 
+def _is_valid_workshop_id(raw: str) -> bool:
+    """Un ID válido es numérico, no vacío y de longitud plausible (uint64 de Steam)."""
+    return bool(raw) and raw.isdigit() and len(raw) <= WORKSHOP_ID_MAX_LENGTH
+
+
+def _create_collect_client() -> httpx.AsyncClient:
+    """Fábrica del cliente HTTP (sustituible en pruebas)."""
+    return httpx.AsyncClient(timeout=COLLECT_ITEM_TIMEOUT)
+
+
+def _empty_collect_entry(original: str) -> Dict[str, Any]:
+    return {
+        "id": original,
+        "status": None,
+        "title": None,
+        "author": None,
+        "file_size_mb": None,
+        "time_updated": None,
+        "remote_updated_str": None,
+    }
+
+
+def _fill_entry_from_info(entry: Dict[str, Any], info: Dict[str, Any]) -> None:
+    entry.update({
+        "status": "success",
+        "title": info.get("title"),
+        "author": info.get("creator"),
+        "file_size_mb": info.get("file_size_mb"),
+        "time_updated": info.get("time_updated"),
+        "remote_updated_str": info.get("remote_updated_str"),
+    })
+
+
+async def _fetch_single_workshop_details(client, mod_id: str) -> Dict[str, Any]:
+    """Solicita los metadatos de un único mod; lanza excepción si no hay datos válidos."""
+    form_data = {"itemcount": "1", f"publishedfileids[0]": mod_id}
+    resp = await client.post(STEAM_WORKSHOP_API, data=form_data)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Steam respondió HTTP {resp.status_code}")
+    payload = resp.json()
+    details_list = payload.get("response", {}).get("publishedfiledetails", [])
+    item = next((d for d in details_list if str(d.get("publishedfileid", "")) == mod_id), None)
+    if item is None:
+        raise RuntimeError("Steam no devolvió datos para este ID")
+    time_updated = int(item.get("time_updated", 0) or 0)
+    file_size = int(item.get("file_size", 0) or 0)
+    return {
+        "id": mod_id,
+        "title": item.get("title") or f"Workshop Mod #{mod_id}",
+        "preview_url": item.get("preview_url") or "",
+        "creator": item.get("creator") or "",
+        "file_size_mb": round(file_size / (1024 * 1024), 2) if file_size > 0 else 0.0,
+        "time_updated": time_updated,
+        "remote_updated_str": datetime.fromtimestamp(time_updated).strftime("%d/%m/%Y %H:%M") if time_updated > 0 else None,
+    }
+
+
+async def collect_workshop_metadata(
+    mod_ids: List[str],
+    force_refresh: bool = False,
+    client=None,
+    item_timeout: float = COLLECT_ITEM_TIMEOUT,
+    batch_timeout: float = COLLECT_BATCH_TIMEOUT,
+) -> Dict[str, Any]:
+    """
+    Recolecta metadatos de Workshop ID a ID, devolviendo un resultado por cada entrada.
+    Ningún fallo individual interrumpe el lote ni propaga excepciones al llamador.
+    """
+    owns_client = client is None
+    if owns_client:
+        client = _create_collect_client()
+
+    now = time.time()
+    deadline = now + max(0.0, batch_timeout)
+    entries: List[Dict[str, Any]] = []
+    first_index: Dict[str, int] = {}
+
+    try:
+        for raw in mod_ids:
+            original = raw if isinstance(raw, str) else str(raw)
+            normalized = original.strip()
+            entry = _empty_collect_entry(original)
+            entries.append(entry)
+            idx = len(entries) - 1
+
+            # IDs vacíos, no numéricos o de longitud ilegal: inválidos sin emitir solicitud
+            if not _is_valid_workshop_id(normalized):
+                entry["status"] = "invalid"
+                continue
+
+            # Duplicados: solo se recolecta la primera aparición
+            if normalized in first_index:
+                first = first_index[normalized]
+                entry["status"] = "duplicate"
+                entry["duplicate_of"] = entries[first]["id"]
+                entry["first_index"] = first
+                continue
+            first_index[normalized] = idx
+
+            # Caché de 10 minutos: si hay acierto no se vuelve a solicitar
+            cached = _WORKSHOP_CACHE.get(normalized)
+            if not force_refresh and cached and (now - cached[1] < _WORKSHOP_CACHE_TTL):
+                _fill_entry_from_info(entry, cached[0])
+                entry["cached"] = True
+                continue
+
+            # Límite de tiempo del lote: el resto de entradas quedan como timeout
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                entry["status"] = "timeout"
+                entry["error"] = "Se agotó el tiempo máximo del lote"
+                continue
+
+            try:
+                info = await asyncio.wait_for(
+                    _fetch_single_workshop_details(client, normalized),
+                    timeout=min(item_timeout, remaining),
+                )
+                _WORKSHOP_CACHE[normalized] = (info, time.time())
+                _fill_entry_from_info(entry, info)
+                entry["cached"] = False
+            except (asyncio.TimeoutError, httpx.TimeoutException):
+                entry["status"] = "timeout"
+                entry["error"] = "Tiempo de espera agotado para esta solicitud"
+            except Exception as exc:
+                entry["status"] = "failed"
+                entry["error"] = str(exc) or exc.__class__.__name__
+    finally:
+        if owns_client:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+    success_count = sum(1 for e in entries if e["status"] == "success")
+    failed_count = sum(1 for e in entries if e["status"] in ("invalid", "timeout", "failed"))
+    duplicate_count = sum(1 for e in entries if e["status"] == "duplicate")
+    return {
+        "total": len(entries),
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "duplicate_count": duplicate_count,
+        "results": entries,
+    }
+
+
 @router.get("")
 async def api_get_mods(enrich: bool = Query(True), refresh: bool = Query(False)):
     """Obtiene la lista de mods configurados y sus metadatos enriquecidos de Steam Workshop."""
@@ -141,6 +297,18 @@ async def api_get_mods(enrich: bool = Query(True), refresh: bool = Query(False))
         "details": details,
         "updates_available": updates_count
     }
+
+
+@router.post("/collect")
+async def api_collect_mods(req: ModsCollectRequest):
+    """Recolecta metadatos de Workshop por ID, devolviendo un resultado verificable por entrada."""
+    result = await collect_workshop_metadata(req.mod_ids, force_refresh=req.force_refresh)
+    activity_manager.log(
+        "Mods",
+        f"Recolección de metadatos de Workshop: {result['success_count']} exitosos, "
+        f"{result['failed_count']} fallidos (total {result['total']} IDs)"
+    )
+    return result
 
 
 @router.post("")
