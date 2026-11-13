@@ -1,0 +1,64 @@
+name: Site changed / selectors broke
+description: Tokopedia changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth its
+        own report because the fix is different from a code bug: something on
+        tokopedia.com moved.
+
+        Useful to know before filing: a listing page carries no structured
+        data at all, so the parser reads the rendered grid — the grid
+        container, the tile marker, and the reading order inside a tile.
+        Which of those broke narrows the fix a lot; CONTRIBUTING.md lists
+        them. A product page (`--mode product`) also reads the page's own
+        `window.__cache` Apollo blob.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - Products (0 rows on a page that visibly has products)
+        - A specific field is null or wrong (price, sku, image, URL)
+        - Price coverage warned below its per-page-kind floor in the run log
+        - Pagination stops early or repeats a page
+        - The captcha detector finds nothing on a page that has one
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: The exact listing URL, and the country your exit IP was in.
+      placeholder: "https://www.tokopedia.com/search?st=product&q=kopi (exit IP: ID residential, Scraping Browser pid: toko1)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description.
+
+        - The exact bytes the parser was given: rerun with
+          `--dump-html dump.html` (it writes on success too) and attach it,
+          with credentials and session values removed.
+        - Or open devtools and paste one tile's outer HTML from the grid.
+        - For a field problem: the value you got, and the value on the page.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces from a
+        different country, and when it last worked.

@@ -1,0 +1,464 @@
+# Changelog
+
+All notable changes to this project are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project follows [Semantic Versioning](https://semver.org/) as closely
+as a CLI toolkit can. In practice that means: **a patch release fixes things**
+— it does not promise that every flag and every default is frozen. Where a
+patch changes behaviour an existing user would notice, the release notes lead
+with it, so nobody discovers it from a bill or from a diff.
+
+---
+
+## [Unreleased]
+
+### Changed
+
+- **The canary now runs weekly** (Tuesdays, 06:41 UTC) as well as on demand,
+  through the Scraping Browser API. It had only ever run by hand, and its last
+  run (2026-10-15) failed because the endpoint secret was not set; the secret
+  now exists. Tuesday keeps it clear of sibling canaries that share one
+  Scraping Browser profile on Mondays.
+- **The access notes no longer say "any residential exit" clears the block.**
+  What was measured on 2026-09-10 is the Scraping Browser API from an
+  Indonesian and a US exit; a residential German address got the connection
+  reset and a browser through the residential proxy gateway timed out. README,
+  TROUBLESHOOTING and the canary's own comments now state just that.
+
+## [0.2.0] — 2026-10-15
+
+> **Behaviour change:** `--retries 0` is now a usage error (exit 2). It used
+> to be accepted and made the page-load loop unreachable, so nothing was
+> fetched and the engine reported the browser's own blank page as a result:
+> exit 3 or 4 with a 39-byte "capture", in tens of milliseconds. If a
+> script of yours passes 0, pass **1**: the flag counts ATTEMPTS, so 1 means
+> "try once and do not retry".
+
+> **Behaviour change:** a page Tokopedia served that never painted a grid, a
+> product or a no-results message, and a page whose tiles parsed to zero
+> rows, now end the run as **exit 5** with `stop_reason`
+> `page_never_painted` / `parser_found_nothing` (exit 6 when earlier pages
+> gave rows). Both used to exit **4**, "empty catalogue". A navigation that
+> answers 403, 429 or 5xx is now classified as blocked (exit 3) in the
+> Playwright and pyppeteer engines, which now read the response status.
+
+> **Behaviour change:** `--pages`, `--concurrency` (below 1), `--delay`,
+> `--retry-delay`, `--proxy-block-retries` (below 0) and, in
+> `scraper_api_client.py`, `--retries`, `--retry-delay` (below 0) and
+> `--timeout` (below 1) are now usage errors (exit 2) naming the flag. They
+> were accepted and either fetched nothing or failed mid-run.
+
+> **Behaviour change:** the canary now fails when it did not test the site:
+> with no `TOKOPEDIA_CDP_ENDPOINT` secret, and on exit 3, 5 or 6. It used to
+> skip or warn and stay green.
+
+### Fixed
+
+- **The pyppeteer and Selenium engines crashed without `--proxy`.** The first
+  blocked page (both) or failed navigation (pyppeteer) reached
+  `pool.current` / `pool.advance` on a pool that does not exist, an
+  `AttributeError` and exit 1 where 3 or 5 was due. They now re-fetch through
+  the same access path, as the Playwright engine does.
+- **A page could buy more paid solves than its allowance.** The solve before
+  classification was not counted, so a page that stayed a challenge bought
+  one solve per retry (3 against a limit of 1 in Playwright). Both call sites
+  in every engine now claim from one per-page allowance immediately before
+  the purchase, and a retry or proxy rotation does not reset it.
+- **The HTTP status never reached the classifier.** The Playwright and
+  pyppeteer engines now pass the navigation's status; Selenium has none and
+  says so at each call. A 404 or 410 is not treated as a block.
+- **A zero-row page was always read as an empty catalogue** (see above).
+- **The credential scan reported "ok" after scanning nothing** when the clone
+  sat under a directory named `venv`, because its exclusions were tested
+  against the absolute path. They are now relative to the repository, and a
+  scan of 0 files fails.
+- **`--allow-empty` wrote a `"failed"` sidecar** for a completed empty run;
+  it now says `"complete"` with `products: 0`.
+- `.gitignore` now covers the `X.pageN` files `--dump-html X --pages N`
+  writes, and common capture directories (`live/`, `out/`, `runs/`, ...).
+- Removed citations of private instruction files from code comments and the
+  changelog, a stale `--mode shop` docstring, and the claim that a Scraping
+  Browser credential lasts about a day. README now says Selenium sets its
+  Chrome options in code rather than offering them as flags.
+
+- **`--retries 0` fetched nothing and called it a result.** The load loop is
+  `range(1, retries + 1)`, so 0 never runs it and the engine judged
+  `about:blank`. Three third-party audits of this family ran exactly that and
+  reported a working scraper as broken. `--retries` now goes through
+  `page_flow.attempts` in every entry point; a check reads the source of each
+  one and calls the validator, so a new engine declaring the flag with a
+  plain int fails the suite.
+
+## [0.1.5] — 2026-10-05
+
+> **Behaviour changes for existing users.** A run that gathered nothing and
+> did not finish now exits **5** (it was 4, "empty"); a run with failed pages
+> is `partial`/exit 6 (it was `complete`); output files are now written
+> atomically; and CSV cells beginning with a formula character carry a leading
+> apostrophe. Details below.
+
+### Fixed
+
+
+- **A failed `--cdp-endpoint` connection now names its real cause.** The
+  Playwright engine appended "a 500 here usually means another run still holds
+  this `pid`" to every connection error. Measured 2026-10-05: an expired
+  profile answers HTTP 401 `deny_no_user` and an unresolvable host raises
+  ENOTFOUND, and a different pid helps neither. `page_flow.cdp_failure_hint`
+  picks the step by cause (expired credentials, DNS, profile held, timeout)
+  and claims nothing when it does not recognise the error.
+- **CSV cells that a spreadsheet would execute are neutralised.** A cell
+  beginning `=`, `+`, `-`, `@`, tab, CR or LF is prefixed with an apostrophe,
+  in the CSV only; the JSON keeps the site's bytes. Only strings are touched
+  (a negative price stays a number), the escape runs after a list is joined,
+  and the count is recorded as `csv_cells_escaped` in the sidecar, under the
+  caller's own `extra`. Not measured against live Tokopedia rows: it may fire
+  on no current data and is not claimed to.
+- **Output files are written atomically.** `write_json`, `write_csv` and
+  `write_run_meta` opened the destination with `"w"`, which truncates before
+  the first byte, so a crash or full disk mid-write replaced the previous good
+  output (and its sidecar) with a short file. They now write a temp file in
+  the same directory, fsync, and `os.replace`; the destination's mode is kept
+  rather than left at the temp file's 0600.
+
+- **Scraper API: `waitFor` is now sent as a JSON object.** It went out as a
+  JSON-encoded string, following a docstring that said the API required one.
+  Measured 2026-09-23 against `/tasks/sync`: the string form is refused with
+  HTTP 422 ("params.waitFor must be an object") and still billed ($0.0005);
+  the object form answers HTTP 200. Every `--wait-*` run was therefore
+  a paid exit 5.
+- **Scraper API: the target's HTTP status is read from `http_code`.** The
+  client read `status`, which is the API's own verdict string (`"success"`),
+  so the page classifier never saw a target 403/503 — a live rakuten run
+  logged "Upstream page status success". `status` is now a fallback only
+  when it is an integer.
+- **Leftovers from the repo this one was bootstrapped from (etsy-scraper)
+  removed from the files a reader meets first.** The bug-report and
+  site-change issue templates still described Etsy — DataDome answering
+  datacentre IPs with 403, the `t=bv` challenge, `shop_rating`, `/fr/`
+  storefront redirects, a `lowest_price_30d` tile overlay, JSON-LD as the
+  primary path and an `etsy.com` example URL. They now describe what this
+  README measures on Tokopedia: an address it has scored gets no response
+  at all, a category listing prints no rating, sold count or was-price, and
+  a listing page carries no structured data. `SECURITY.md` said "Etsy
+  changing its markup is expected"; it now says Tokopedia.
+- **`CONTRIBUTING.md` listed a "`rating` vs `shop_rating`" property this repo
+  does not have** — no `shop_rating` column exists here, and its figures
+  (825, 375 and 16,679 reviews) were Etsy's. Removed, along with the stale
+  "five properties" count above a list of eight. A comment in
+  `output_writer.py` used `shop_rating` as its example sidecar field; it now
+  names `scroll`, which this repo's engines really write there.
+- **`CONTRIBUTING.md` described a structured-price confirmation share with
+  Etsy's per-page-kind floors (search 8%, category 70%, shop 80%).** This
+  repo has no structured price on a listing and no shop page kind; the
+  engines deliberately log plain price coverage against `PRICE_FLOOR` (95%)
+  instead, and the paragraph now says that.
+- **`captcha_solver.py`'s docstring pointed at a "No DataDome solver" section
+  that does not exist** — it went with the solver in 0.1.0. The sentence now
+  says where the explanation is.
+- **A smoke-test comment described "MediaMarkt's pages" as if this site's**;
+  it now names mediamarkt-scraper as the sibling it came from.
+
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+
+- **Fifteen lines of unreachable code removed from `playwright_scraper.py`.**
+  A function's `def` line had been lost at some point before this repo's
+  first commit, leaving its docstring and its `try: return page.content()`
+  body indented into the end of `_mask_credentials`, where the control flow
+  can never arrive. Nothing called it — `_content_when_settled` below it
+  does the job — so no behaviour changes. The same fifteen lines, byte for
+  byte, were in six repos of this family.
+
+### Added
+
+- **A check for a statement the control flow can never reach.** The
+  undefined-name walk beside it cannot see this class by design: it pools
+  every binding in a file rather than tracking scopes, so a name used inside
+  dead code passes as long as anything else in the module binds it. The new
+  one is narrow — a statement after a `return`/`raise`/`break`/`continue` in
+  the SAME block — and measured across the eighteen repos of this family it
+  found six real problems and zero false positives. Verified by control:
+  appending `return 1` followed by a statement turns the suite red.
+
+## [0.1.4] — 2026-09-11
+
+### Fixed
+
+- **`fingerprint_client.py` could not read the key from `.env`.** `--key`
+  defaulted to `os.environ.get("TWOCAPTCHA_KEY")` and only that, so a key put
+  in `.env` — exactly as the README and `.env.example` instruct — worked
+  for every engine and failed HERE with "No API key". A documented mechanism
+  not applied on one path.
+
+  It now reads through `env_config.env_value`, calling `load_env()` itself
+  because this is a standalone entry point that no engine has necessarily run
+  first. Going through the loader rather than `os.environ` is measured rather
+  than stylistic: with `TWOCAPTCHA_KEY=your_2captcha_api_key_here` exported,
+  the old path sent the placeholder to the API and reported "Fingerprint API
+  rejected the key (401) — note this is a separate subscription", sending the
+  reader off to check a subscription they never needed; the loader says
+  "still set to the placeholder from .env.example" instead.
+
+  Found on a sibling repo's first live `--fingerprint` run, then checked
+  across the family before patching: five repos had it and one had
+  already fixed it. Pinned by a check verified to fail on the old code —
+  including that the help string does not interpolate its default, which is
+  one substring away from printing a live credential to anyone who types
+  `--help`.
+
+---
+
+## [0.1.3] — 2026-09-11
+
+### Fixed
+
+- **`--fingerprint` dropped `deviceScaleFactor`, so the identity
+  contradicted itself.** `playwright_context_kwargs` mapped the user agent,
+  the locale, the timezone and the screen onto the browser context and
+  ignored the scale factor the fingerprint API returns beside them. Measured
+  2026-09-11 against the live API and a live browser: a fingerprint stating
+  `deviceScaleFactor: 1.25` produced a browser reporting
+  `window.devicePixelRatio === 1` — the paid identity saying one thing and
+  the browser another, on every run, silently, on an axis any fingerprinter
+  reads for free. Playwright takes it as its own context option, so the fix
+  is to pass it; verified in a live browser both ways and pinned in the
+  offline suite.
+
+  Found while auditing a new sibling repo against the family's shared rules. All five
+  repos in this family had it.
+
+---
+
+## [0.1.2] — 2026-09-10
+
+Captcha detection, after being asked a question the artefacts could answer:
+were any captchas encountered on this site?
+
+**No — and the site is configured for one on every page**, which turned out
+to matter. 13 dumps scanned (six captures across two page kinds and two exit
+countries, plus every live run's snapshot): zero reCAPTCHA, zero hCaptcha,
+zero Turnstile, zero DataDome, zero PerimeterX, zero Incapsula, zero Kasada,
+zero AWS WAF, no Akamai refusal page, no challenge iframe, no `data-sitekey`
+in served markup. The `cf-turnstile` strings in a raw `--cdp-endpoint` dump
+are the Scraping Browser's own auto-solve extension injecting its hunters —
+stripped before any marker scan, and the reason `cf-turnstile` is not in this
+repo's marker set.
+
+But two things survive that strip, on every page the site serves:
+
+    <captcha-widgets></captcha-widgets>     an EMPTY custom element
+    "CAPTCHA_SITE_KEY":"6L…"                a reCAPTCHA key in its config
+
+So Tokopedia has reCAPTCHA wired and does not render it to an anonymous
+visitor reading listings. Testing the shapes it would take if it did found
+three the detection missed.
+
+### Fixed
+
+- **A rendered widget was not detected.** The marker set had the loader
+  (`recaptcha/api.js`) but neither of a rendered widget's iframes. Added
+  `recaptcha/api2/anchor` and `recaptcha/api2/bframe`.
+- **A widget configured by attribute alone was not detected.** Added
+  `data-sitekey`, which is any vendor's widget declared in markup.
+- **The site's own mount point having content was not detected**, and could
+  not be added as a substring: the bare
+  `<captcha-widgets></captcha-widgets>` is on 13 of 13 dumps, so matching the
+  tag would report a challenge on every page — the same mistake the bare
+  string `akamai` made in 0.1.0. `captcha_widget_is_populated()` checks the
+  element for non-whitespace content instead.
+
+All three are pinned in both directions, together with a re-check that the
+three committed fixtures still report clean — every broadening of a marker
+set risks the "matches every page" failure, so it is verified rather than
+argued about.
+
+479 offline checks, all green.
+
+---
+
+## [0.1.1] — 2026-09-10
+
+A pre-publication audit against the family's shared rules. Five
+defects, all found by checking rather than by reading, all pinned by checks
+now. Two of them made a documented feature not work at all.
+
+> **If you copied `.env.example`, re-check what your run is actually using.**
+> The placeholder check was a literal set, so it caught
+> `your_2captcha_api_key_here` and MISSED the two credentialled URLs, which
+> the file documents the way the vendor does — with the parts you fill in in
+> braces. A copied example therefore read as CONFIGURED, and a run connected
+> to `cb.2captcha.com` with the string `{login}-zone-…` as its username and
+> got a 401 a long way from its cause. Any `{…}` left in a value now reads as
+> unset, and `python3 env_config.py` says so by name.
+
+> **`--fingerprint` never worked.** The engines' `--fp-tags` default was
+> `Windows,Chrome,Desktop`, and the fingerprint API rejects it with HTTP 400
+> — while `fingerprint_client.py`'s own `--tags` help has always said ONE
+> OS-family tag, not a list. Measured against the live API: `Windows`
+> succeeds; `Windows,Chrome,Desktop`, `Chrome` and `Desktop` each 400. Fixed
+> and verified end to end. **This one was in all four sibling repos too**, and
+> each has its own fix.
+
+### Fixed
+
+- A copied `.env.example` read as configured — see above.
+- `--fingerprint` failed on every invocation — see above.
+- **A no-results page could be reported as blocked.** `detect_page_state`
+  checked the served-by-Tokopedia heuristic (two or more asset references)
+  BEFORE the site's own "Oops, produk nggak ditemukan" sentence, so a minimal
+  real page carrying one reference instead of the measured 3-7 came back as
+  exit 3 — a proxy hunt for a correct answer. The unambiguous positive signal
+  now comes first.
+- **`RETRY_ON_BLOCKED` was a policy nothing enforced.** A constant with a
+  paragraph of justification that no engine read: all three computed their
+  budget from `BLOCK_RETRIES_WITHOUT_POOL` alone, so setting it False changed
+  nothing. Now consulted by all three.
+- **Half the CLI was undocumented.** Sixteen real flags appeared in no
+  document — `--out`, `--delay`, `--retries`, `--proxy-file`,
+  `--proxy-rotate`, `--twocaptcha-key`, `--headless`/`--headful` among them.
+  The README now has every flag with its default, and the three engines' flag
+  sets are pinned against the family contract and against each other in both
+  directions, so a new divergence fails a check and closing a documented one
+  does too.
+
+### Removed
+
+- `page_flow.page_bound` (never called, always returned its input) and
+  `page_flow.page_number` (a wrapper that only delegated).
+
+### Documented
+
+- `proxy_pool.mask()` takes a bare URL, not a sentence: given one it returns
+  `?://?` — the password is gone, which is the property that matters, but so
+  is the host and port the log was written to show. Every call site passes the
+  URL as its own argument for that reason, and the limitation is now pinned
+  rather than half-guarded. `_mask_credentials()` is what handles arbitrary
+  text, globally.
+- Two README figures that legitimately vary between runs (`image_url` and
+  `slug_id` coverage on a category run) are stated as ranges rather than as
+  fractions that would go stale on the next run.
+
+467 offline checks, all green.
+
+---
+
+## [0.1.0] — 2026-09-10
+
+First release as a member of the [2scraper](https://github.com/2scraper)
+family. The repository previously held an April 2026 prototype; **nothing of
+its behaviour is preserved** — see "Replaced, not extended" below before
+upgrading anything that consumed its output.
+
+### What it does
+
+Scrapes Tokopedia search grids, category listings and product pages through
+Playwright, Selenium or pyppeteer, with JSON/CSV output, a run-metadata
+sidecar and the family's exit-code contract.
+
+Everything in the README is measured, dated and taken through the 2Captcha
+Scraping Browser API on 2026-09-10. The headline numbers: a two-page category
+run gives 119 rows at 100% price coverage; a search grid gives 155 rows at
+100% price, 98% rating and 100% sold-count coverage.
+
+### Replaced, not extended
+
+The April prototype and this release share no data contract. If anything
+consumed the old output, it needs rewriting rather than adjusting:
+
+- **Prices are numbers.** `price` was the string `"Rp17.999.000"`; it is now
+  `17999000.0`, with `currency` as the ISO code `IDR`. `discount` was
+  `"18%"`; `discount_pct` is now a number computed from the two prices.
+- **`sold` is parsed.** It was the site's own abbreviation `"2rb+"`; it is
+  now `2000` with `sold_is_floor: true` beside it, because *rb* is *ribu* and
+  the `+` means the site rounded down.
+- **There are exit codes and a sidecar.** 0 ok · 1 crash · 2 bad usage ·
+  3 blocked · 4 zero products · 5 remote API error · 6 partial, plus
+  `<out>.meta.json` per run. A run that finds nothing now writes nothing,
+  rather than replacing good output with an empty file.
+- **The 2Captcha key no longer travels in a query string.** The prototype
+  called the v1 `res.php?key=…` endpoints, which put the key into the text of
+  every `HTTPError`. All calls now carry it in a body or a header.
+- **`--mode shop` does not exist**, and neither does `--country`. Tokopedia
+  is one storefront — measured identical from an Indonesian and a US exit —
+  so a country flag could only disagree with the URL.
+- **The prototype's 20 `/p/<slug>` "categories" were all hub pages.** They
+  have no product grid on them; the real listings are one or two levels down.
+  A run against a hub now reports 0 rows and exit 4 rather than returning
+  recommendation-carousel filler.
+- **Its field selectors no longer exist.** `linkProductName`,
+  `linkProductPrice`, `linkProductShopName` and the rest: zero occurrences on
+  either page kind five months later.
+
+### Four defects the first live runs found
+
+Every one was in new code, every one was invisible to a green offline suite,
+and every one is pinned by a check now. The lesson:
+running the code beats reading it, and running EVERY engine beats running the
+primary one.
+
+- **The readiness wait crashed on `/search`.** Tokopedia's
+  Content-Security-Policy has no `unsafe-eval`, and Playwright's
+  `wait_for_function` hands the browser a string to evaluate — so the site's
+  most obvious URL died with `EvalError` and exit 1. Every readiness wait now
+  polls `querySelectorAll` over CDP instead.
+- **Two of the three engines crashed on their FIRST fetch.**
+  `page_flow.classify(html, status, url)` took `status` positionally, while
+  pyppeteer and Selenium call it as `classify(html, url=…)` because neither
+  exposes a response status at that point. `TypeError`, immediately — and
+  invisible to import, `--help`, `compileall`, the AST undefined-name walk
+  and 400+ green assertions, because none of those calls a function the way a
+  live run does. `status` is now optional, and the suite binds every
+  `page_flow.*` and `product_parser.*` call in every engine against the real
+  signature. That check was verified by reverting the fix: it names all six
+  call sites.
+- **A `/p/<slug>` hub reported exit 3.** The bare string `akamai` was in the
+  challenge-marker list, and Tokopedia — which is fronted by Akamai — names
+  `…clientnsv4-s.akamaihd.net` in its own performance script on every page it
+  serves. A marker that matches every page of the site it guards is worse
+  than no marker; it is gone, Akamai's actual refusal strings stay, and the
+  vendor check now only consults markers for a state the policy had already
+  given up on.
+- **`page` was 1 on every row of a two-page run**, which made `position`
+  ambiguous: a row from page 2 claimed the same position as one from page 1.
+  The page number is threaded into the parser in all three engines.
+
+### Inherited code that could never run here, removed
+
+- **The DataDome solver** — roughly 240 lines: the slider task, the cookie
+  parsing, the mandatory-proxy fields. Tokopedia has no such page, and an
+  address it has scored gets no response at all rather than an interstitial,
+  so none of it could ever fire. A paid code path that looks load-bearing and
+  cannot run is worse than no code. The absence is pinned by a check.
+- **`price_is_from` and `price_max`** from the row schema, and from
+  `diff_runs`' tracked fields. A Tokopedia tile prints one price, not a
+  range. `sold` and `sold_is_floor` are tracked in their place, as a pair:
+  without the flag a `sold` change is unreadable, since a tile's figure is a
+  floor and a product page's is exact.
+
+### Known limitations, measured
+
+- **A residential exit is required.** Tokopedia answers an address it has
+  scored with nothing at all: no status code, no interstitial, no challenge.
+  The country does not matter.
+- **`--proxy` is not usable from a browser here.** The 2Captcha residential
+  gateway reaches an Indonesian exit and plain `requests` goes through it, but
+  every Chromium navigation through it times out — including a control site,
+  so it is the browser-plus-proxy combination rather than Tokopedia. Not yet
+  understood, and therefore not recommended.
+- **A search listing has no per-page addresses.** `?page=2` on a search URL
+  empties the result set rather than advancing it, so `--concurrency` above 1
+  is refused for one, with that reason. A category listing paginates
+  normally.
+- **`image_url` is populated on about 37% of listing rows.** Tokopedia
+  lazy-loads tile images and this parser reports `null` rather than the
+  placeholder a tile below the fold carries.
+- **No challenge of any kind has been observed on this site**, so a solving
+  key buys nothing here today. The path is wired up and capped at one solve
+  per page.
+- **The Scraper API path returns about 5 products where a browser engine
+  returns 60.** Measured: 200, 416,939 bytes, $0.0005, 5 rows. Tokopedia
+  hydrates its grid from client-side GraphQL only as the page is scrolled, so
+  a single browserless fetch sees the first paint and nothing after it. It
+  cannot read a full listing by construction.
