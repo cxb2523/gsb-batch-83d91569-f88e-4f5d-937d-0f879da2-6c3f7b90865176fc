@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 120" width="560" height="120" role="img" aria-labelledby="t">
+  <title id="t">UnTangled</title>
+  <!-- Mark: a tangle that resolves into a straight line -->
+  <path d="M 14 60 C 14 26, 50 26, 50 60 S 86 94, 86 60 S 50 26, 50 60 C 50 78, 64 78, 76 60 L 112 60"
+        fill="none" stroke="#2fd0e0" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="112" cy="60" r="7" fill="#149cab"/>
+  <!-- Wordmark, dark-background variant: explicit colours because an SVG
+       loaded via <img> cannot inherit currentColor from the page. -->
+  <text x="138" y="80" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        font-size="60" font-weight="700" letter-spacing="-1.5" fill="#e4f1f5">Un<tspan fill="#2fd0e0">Tangled</tspan></text>
+</svg>

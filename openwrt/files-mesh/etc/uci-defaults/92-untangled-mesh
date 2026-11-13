@@ -1,0 +1,23 @@
+#!/bin/sh
+# Initialise UnTangled mesh state and enable its supporting services.
+# Idempotent and non-fatal: never breaks first boot if a dep is missing.
+
+if ! uci -q get untangled.mesh >/dev/null 2>&1; then
+	touch /etc/config/untangled 2>/dev/null
+	uci -q batch <<-EOF
+		set untangled.mesh=mesh
+		set untangled.mesh.role='standalone'
+		set untangled.mesh.backhaul='wired'
+		set untangled.mesh.mesh_id='untangled'
+	EOF
+	uci -q commit untangled
+fi
+
+# Turn on roaming + discovery daemons when installed (ignore if absent).
+[ -x /etc/init.d/dawn ] && /etc/init.d/dawn enable 2>/dev/null
+[ -x /etc/init.d/umdns ] && { /etc/init.d/umdns enable; /etc/init.d/umdns restart; } 2>/dev/null
+
+# Pick up the new rpcd helper.
+/etc/init.d/rpcd reload 2>/dev/null
+
+exit 0

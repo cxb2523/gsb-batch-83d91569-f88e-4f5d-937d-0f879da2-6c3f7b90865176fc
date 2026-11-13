@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnTangled — the easy, modern web interface for OpenWRT</title>
+<meta name="description" content="UnTangled gives any OpenWRT router a clean, friendly UI: Network Map, Mesh Wi-Fi, parental controls, VPN, QoS. ~75 KB, offline-first, runs alongside LuCI. Install in 60 seconds.">
+<link rel="canonical" href="https://bidhata.github.io/untangled/">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0fb5c4">
+<!-- Social previews -->
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://bidhata.github.io/untangled/">
+<meta property="og:title" content="UnTangled — your router, untangled">
+<meta property="og:description" content="A modern, friendly web interface for OpenWRT. The power of LuCI — without the maze. Live demo, 60-second install.">
+<meta property="og:image" content="https://bidhata.github.io/untangled/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="UnTangled — your router, untangled">
+<meta name="twitter:description" content="A modern, friendly web interface for OpenWRT. Live demo in your browser, install in 60 seconds.">
+<meta name="twitter:image" content="https://bidhata.github.io/untangled/og.png">
+<style>
+  :root{
+    --accent:#0fb5c4; --accent-deep:#0a8c99; --bg:#edf1f4; --card:#ffffff; --ink:#15282f; --ink-dim:#44565f;
+    --muted:#7c8d97; --line:#e3e9ee; --good:#17b26a; --code:#0c161c; --code-ink:#e4f1f5; color-scheme:light dark;
+  }
+  @media (prefers-color-scheme:dark){ :root{ --accent:#2fd0e0; --accent-deep:#149cab; --bg:#0c161c; --card:#152530; --ink:#e4f1f5; --ink-dim:#a9c3cd; --muted:#7694a0; --line:#28434f; --code:#071015; } }
+  *{box-sizing:border-box} html{scroll-behavior:smooth}
+  body{margin:0;font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--bg)}
+  a{color:var(--accent-deep)} img{max-width:100%;height:auto;display:block}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 1.25rem}
+  /* nav */
+  nav{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+  nav .logo{height:34px;color:var(--ink)} nav ul{list-style:none;display:flex;gap:1.25rem;margin:0;padding:0;align-items:center}
+  nav a{text-decoration:none;color:var(--ink-dim);font-weight:600} nav a:hover{color:var(--ink)}
+  .btn{display:inline-block;padding:.7rem 1.15rem;border-radius:10px;font-weight:700;text-decoration:none;border:1px solid transparent}
+  .btn-primary{background:var(--accent);color:#06262b} .btn-primary:hover{background:var(--accent-deep);color:#fff}
+  .btn-ghost{border-color:var(--line);color:var(--ink);background:var(--card)} .btn-ghost:hover{border-color:var(--accent)}
+  .btn-sm{padding:.45rem .8rem;border-radius:8px;font-size:.92rem}
+  /* hero */
+  .hero{padding:4rem 0 2.5rem}
+  .hero .wrap{display:grid;grid-template-columns:1.05fr 1.2fr;gap:2.5rem;align-items:center}
+  .eyebrow{color:var(--accent-deep);font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:.8rem}
+  h1{font-size:clamp(2.2rem,4.6vw,3.4rem);line-height:1.08;letter-spacing:-.02em;margin:.4rem 0 1rem}
+  h1 em{font-style:normal;color:var(--accent)}
+  .lead{font-size:1.18rem;color:var(--ink-dim);margin:0 0 1.5rem}
+  .cta{display:flex;gap:.75rem;flex-wrap:wrap;align-items:center}
+  .shot{border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.18);border:1px solid var(--line);overflow:hidden;background:var(--card)}
+  .facts{display:flex;flex-wrap:wrap;gap:.6rem 1.5rem;margin-top:1.4rem;color:var(--muted);font-size:.92rem}
+  .facts span::before{content:"✓ ";color:var(--good);font-weight:700}
+  /* sections */
+  section{padding:3.5rem 0} section.alt{background:var(--card);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  h2{font-size:clamp(1.6rem,3vw,2.2rem);letter-spacing:-.015em;margin:0 0 .5rem} .sub{color:var(--ink-dim);margin:0 0 2rem;font-size:1.08rem;max-width:720px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:1.25rem}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1.4rem}
+  section.alt .card{background:var(--bg)}
+  .card h3{margin:.2rem 0 .4rem;font-size:1.1rem} .card p{margin:0;color:var(--ink-dim)}
+  .ic{width:40px;height:40px;border-radius:10px;background:color-mix(in srgb,var(--accent) 18%,transparent);display:grid;place-items:center;font-size:1.25rem;margin-bottom:.6rem}
+  /* install */
+  .tabs{display:grid;grid-template-columns:1fr 1fr;gap:1.25rem}
+  .tab{background:var(--code);color:var(--code-ink);border-radius:14px;padding:1.1rem 1.25rem;border:1px solid var(--line)}
+  .tab h3{margin:0 0 .6rem;font-size:1rem;color:#9ad9e0} .tab small{color:#a9c3cd}
+  pre{margin:0;white-space:pre;overflow-x:auto;font:.9rem/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--code-ink)}
+  pre .c{color:#7694a0} pre .k{color:#2fd0e0}
+  /* gallery */
+  .gal{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}
+  .gal figure{margin:0} .gal img{border-radius:12px;border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.12)}
+  .gal figcaption{margin-top:.6rem;color:var(--ink-dim)} .gal figcaption b{color:var(--ink)}
+  /* compare */
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th,td{padding:.8rem 1rem;text-align:left;border-bottom:1px solid var(--line);vertical-align:top} th{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+  tr:last-child td{border-bottom:0} td.y{color:var(--good);font-weight:700}
+  .beta{border-left:4px solid var(--accent);background:var(--card);padding:1rem 1.25rem;border-radius:10px;color:var(--ink-dim)}
+  footer{padding:2.5rem 0 3rem;color:var(--muted);font-size:.92rem;border-top:1px solid var(--line)}
+  footer .wrap{display:flex;flex-wrap:wrap;gap:1rem 2rem;justify-content:space-between;align-items:center}
+  @media (max-width:860px){ .hero .wrap,.grid3,.tabs,.gal{grid-template-columns:1fr} nav ul li.hide{display:none} .hero{padding-top:2.5rem} }
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a href="./" aria-label="UnTangled home"><picture><source srcset="logo-dark.svg" media="(prefers-color-scheme: dark)"><img class="logo" src="logo.svg" alt="UnTangled"></picture></a>
+  <ul>
+    <li class="hide"><a href="#why">Why</a></li>
+    <li class="hide"><a href="#tour">Tour</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="demo/" target="_blank" rel="noopener">Live demo</a></li>
+    <li><a class="btn btn-ghost btn-sm" href="https://github.com/bidhata/untangled">★ GitHub</a></li>
+  </ul>
+</div></nav>
+
+<header class="hero"><div class="wrap">
+  <div>
+    <div class="eyebrow">For OpenWRT routers</div>
+    <h1>Your router, <em>untangled.</em></h1>
+    <p class="lead">A modern, friendly web interface for OpenWRT. The power of LuCI — without the maze. Built for the whole household, with every advanced knob still one click away.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="demo/" target="_blank" rel="noopener">Try the live demo →</a>
+      <a class="btn btn-ghost" href="#install">Install in 60 seconds</a>
+    </div>
+    <div class="facts">
+      <span>~75 KB UI</span><span>Offline-first, zero cloud</span><span>Runs alongside LuCI</span><span>Auto-rollback safety</span><span>GPL-2.0</span>
+    </div>
+  </div>
+  <picture class="shot">
+    <source srcset="screenshots/network-map-dark.png" media="(prefers-color-scheme: dark)">
+    <img src="screenshots/network-map.png" alt="UnTangled Network Map — your router, internet and devices at a glance" width="1340" height="880" fetchpriority="high">
+  </picture>
+</div></header>
+
+<section id="why"><div class="wrap">
+  <h2>Why people switch</h2>
+  <p class="sub">OpenWRT is the best router firmware there is. Its stock interface was built for engineers. UnTangled keeps all the power and makes it feel like a product.</p>
+  <div class="grid3">
+    <div class="card"><div class="ic">🧭</div><h3>Made for everyone</h3><p>A visual Network Map and plain-language toggles for the family. A ⌘K command palette and “Advanced details” for you. One UI, no compromise.</p></div>
+    <div class="card"><div class="ic">🛟</div><h3>Impossible to lock yourself out</h3><p>Risky changes — Wi-Fi, WAN, firewall — apply with an auto-rollback timer. If a change would cut you off, the router quietly reverts it.</p></div>
+    <div class="card"><div class="ic">🪶</div><h3>Tiny, fast, private</h3><p>The whole UI is ~75 KB gzipped — LuCI is megabytes. System fonts, no CDNs, no telemetry, no cloud account. Your router never needs the internet to serve it.</p></div>
+    <div class="card"><div class="ic">❓</div><h3>Help where you need it</h3><p>A <b>?</b> beside every setting explains it in a sentence. No jargon walls, no wiki tab-hopping.</p></div>
+    <div class="card"><div class="ic">📶</div><h3>Mesh Wi-Fi, the easy way</h3><p>One Wi-Fi name across routers with seamless roaming (802.11r/k/v via dawn) — set up like a consumer mesh system, running on open firmware.</p></div>
+    <div class="card"><div class="ic">🧩</div><h3>Extensible</h3><p>A runtime plugin system lets packages add whole screens without rebuilding the core. Mesh Wi-Fi itself ships as a plugin.</p></div>
+  </div>
+</div></section>
+
+<section class="alt" id="install"><div class="wrap">
+  <h2>Install in 60 seconds</h2>
+  <p class="sub">Add the signed UnTangled feed once, then install and upgrade with your router’s own package manager.</p>
+  <ol style="max-width:760px;margin:0 auto 1.25rem;padding-left:1.2rem;color:var(--ink-dim);line-height:1.7">
+    <li><b>Check your OpenWRT version</b> — LuCI → Status → Overview (or <code>cat /etc/openwrt_release</code>). <b>23.05 / 24.10</b> → use the <b>opkg</b> tab; <b>SNAPSHOT</b> → the <b>apk</b> tab. In doubt, you’re on stable.</li>
+    <li><b>Run the matching commands on the router</b> — over SSH, or paste them into LuCI → System → Custom Commands.</li>
+    <li><b>Open <code>http://&lt;router-ip&gt;/untangled/</code></b> and sign in with your router’s admin account (same login as LuCI).</li>
+  </ol>
+  <div class="tabs">
+    <div class="tab"><h3>Stable OpenWRT — 23.05 / 24.10 <small>(opkg)</small></h3>
+<pre><span class="c"># trust the signing key, add the feed (once)</span>
+wget -O /tmp/untangled.pub https://bidhata.github.io/untangled/keys/untangled.pub
+opkg-key add /tmp/untangled.pub
+echo 'src/gz untangled https://bidhata.github.io/untangled/stable' \
+  &gt;&gt; /etc/opkg/customfeeds.conf
+<span class="c"># install</span>
+opkg update &amp;&amp; <span class="k">opkg install untangled-full</span></pre></div>
+    <div class="tab"><h3>OpenWRT snapshot <small>(apk)</small></h3>
+<pre><span class="c"># trust the signing key, add the feed (once)</span>
+wget -O /etc/apk/keys/untangled.pem https://bidhata.github.io/untangled/keys/untangled.pem
+echo 'https://bidhata.github.io/untangled/snapshot/packages.adb' \
+  &gt; /etc/apk/repositories.d/untangled.list
+<span class="c"># install</span>
+apk update &amp;&amp; <span class="k">apk add untangled-full</span></pre></div>
+  </div>
+  <p style="margin-top:1.25rem;color:var(--ink-dim)">Then open <code>http://&lt;router-ip&gt;/untangled/</code> and sign in with your router’s admin account. <b>LuCI keeps working untouched</b> — UnTangled lives at its own path. Prefer a file? Grab the <code>.ipk</code>/<code>.apk</code> from <a href="https://github.com/bidhata/untangled/releases">Releases</a>. Choose <code>untangled</code> (minimal), <code>untangled-full</code> (HTTPS, Wi-Fi scan, firmware, Wake-on-LAN) or add <code>untangled-mesh</code>.</p>
+  <p style="margin-top:.75rem;color:var(--ink-dim);font-size:.95rem"><b>Just want everything?</b> Install <code>untangled-full</code>. And don’t be surprised that its download is tiny (~1&nbsp;KB) while <code>untangled</code> is ~90&nbsp;KB — the core package holds the actual interface, and <code>untangled-full</code> is just a short list that tells the router to install the core <b>plus</b> the extras. Small file, full install. On the Releases page: use the <code>.ipk</code> files for stable OpenWRT (23.05 / 24.10) and the <code>.apk</code> files only for <em>snapshot</em>; the long names are required by the package manager, so don’t rename them.</p>
+</div></section>
+
+<section id="tour"><div class="wrap">
+  <h2>Take the tour</h2>
+  <p class="sub">Every screen below is real UI. Or skip the screenshots and <a href="demo/" target="_blank" rel="noopener">click through the live demo</a> — no router required.</p>
+  <div class="gal">
+    <figure><img loading="lazy" src="screenshots/devices.png" alt="Devices screen" width="1340" height="880"><figcaption><b>Devices.</b> Reserve a fixed IP, block a device’s internet, or wake it on LAN — one click each.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/mesh.png" alt="Mesh Wi-Fi screen" width="1340" height="880"><figcaption><b>Mesh Wi-Fi.</b> One network name across routers, seamless roaming, join with a code.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/parental.png" alt="Parental Controls" width="1340" height="880"><figcaption><b>Parental Controls.</b> Per-device internet schedules by the week.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/wireless.png" alt="Wireless settings" width="1340" height="880"><figcaption><b>Wireless.</b> SSID, security and channels up front; power, fast roaming and WMM under Advanced.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/qos.png" alt="QoS / Smart Queue" width="1340" height="880"><figcaption><b>QoS.</b> Kill bufferbloat so calls and gaming stay smooth.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/usage-history.png" alt="Usage History" width="1340" height="880"><figcaption><b>Usage History.</b> Daily and monthly internet use, per device.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/vpn.png" alt="VPN (dark theme)" width="1340" height="880"><figcaption><b>VPN.</b> WireGuard &amp; OpenVPN, server <i>and</i> client. Shown in the dark theme.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/command-palette.png" alt="Command palette" width="1340" height="880"><figcaption><b>⌘K command palette.</b> Jump to any page, device or action in a keystroke.</figcaption></figure>
+  </div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>UnTangled vs. LuCI</h2>
+  <p class="sub">Honest comparison. LuCI is excellent and complete — UnTangled is the friendlier front door. Keep both.</p>
+  <table>
+    <tr><th></th><th>UnTangled</th><th>LuCI</th></tr>
+    <tr><td>Built for non-technical users</td><td class="y">Yes — task-based, plain language, per-field help</td><td>Engineer-oriented</td></tr>
+    <tr><td>Visual Network Map &amp; device cards</td><td class="y">Yes</td><td>No</td></tr>
+    <tr><td>Mesh Wi-Fi setup</td><td class="y">Guided, consumer-mesh style</td><td>Manual, per-package</td></tr>
+    <tr><td>Lock-out protection on risky changes</td><td class="y">Auto-rollback timer</td><td>Apply-with-rollback (manual)</td></tr>
+    <tr><td>UI size</td><td class="y">~75 KB gzipped</td><td>Several MB</td></tr>
+    <tr><td>Feature completeness &amp; maturity</td><td>Beta — growing fast</td><td class="y">Mature, exhaustive</td></tr>
+    <tr><td>Coexist on the same router</td><td class="y" colspan="2">Yes — UnTangled runs at <code>/untangled/</code> and never modifies LuCI</td></tr>
+  </table>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Beta — help us make it bulletproof</h2>
+  <div class="beta">UnTangled is written to documented OpenWRT UCI/ubus/fw4 interfaces and every release is installed and exercised in real OpenWRT containers (23.05 and snapshot) before it ships — but it has <b>not yet been validated on many physical routers</b>. If you run it, <a href="https://github.com/bidhata/untangled/issues">tell us what you see</a>; a ⭐ on GitHub helps more people find it.</div>
+</div></section>
+
+<footer><div class="wrap">
+  <div><picture><source srcset="logo-dark.svg" media="(prefers-color-scheme: dark)"><img src="logo.svg" alt="UnTangled" style="height:26px;margin-bottom:.4rem"></picture><br>Developed by Krish Paul · GPL-2.0-or-later</div>
+  <div><a href="https://github.com/bidhata/untangled">GitHub</a> · <a href="https://github.com/bidhata/untangled/releases">Releases</a> · <a href="demo/">Live demo</a> · <a href="keys/">Signing keys</a> · <a href="https://github.com/bidhata/untangled/blob/main/docs/PLUGINS.md">Write a plugin</a></div>
+</div></footer>
+
+</body>
+</html>

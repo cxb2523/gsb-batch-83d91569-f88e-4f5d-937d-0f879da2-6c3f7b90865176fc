@@ -1,0 +1,18 @@
+#!/bin/sh
+# Ensure uhttpd exposes the /ubus JSON-RPC endpoint UnTangled talks to.
+uci -q batch <<'EOF'
+set uhttpd.main.ubus_prefix='/ubus'
+EOF
+uci -q commit uhttpd
+/etc/init.d/uhttpd reload 2>/dev/null
+
+# rpcd ACL groups (untangled, untangled-readonly) are installed under
+# /usr/share/rpcd/acl.d/. Assign them to a login in /etc/config/rpcd, e.g.:
+#   config login
+#       option username 'root'
+#       option password '$p$root'
+#       list read  'untangled'
+#       list write 'untangled'
+/etc/init.d/rpcd reload 2>/dev/null
+
+exit 0

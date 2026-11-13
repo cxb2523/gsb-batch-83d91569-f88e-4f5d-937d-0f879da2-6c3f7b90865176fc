@@ -1,0 +1,1942 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnTangled</title>
+<style>
+:root{
+  /* layout: fixed top bar + left nav rail + scrolling content. TP-Link-style light default, dark toggle. */
+  --bg:#edf1f4; --panel:#ffffff; --panel-2:#f3f7f9; --rail:#ffffff; --topbar:#ffffff;
+  --line:#e3e9ee; --line-soft:#eef2f5;
+  --ink:#15282f; --ink-dim:#44565f; --muted:#7c8d97;
+  --accent:#0fb5c4; --accent-deep:#0a8c99; --accent-soft:rgba(15,181,196,.12);
+  --good:#17b26a; --warn:#f79009; --crit:#f04438;
+  --band5:#0fb5c4; --band24:#f79009; --wired:#17b26a;
+  --node-bg:#f3f7f9; --node-line:#d7e1e8; --router-bg:#def8fb; --router-ring:#0fb5c4; --topo-line:#c2d2db;
+  --shadow:0 1px 2px rgba(16,40,60,.05),0 12px 32px -16px rgba(16,40,60,.20);
+  --shadow-sm:0 1px 2px rgba(16,40,60,.06),0 6px 16px -10px rgba(16,40,60,.16);
+  color-scheme:light;
+  /* offline-only stacks: no web fonts fetched, so the UI renders on a router with no internet */
+  --font-body:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --radius:18px; --radius-sm:11px;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  --bg:#0c161c; --panel:#152530; --panel-2:#1b3240; --rail:#0b171e; --topbar:#0a1318;
+  --line:#28434f; --line-soft:#1d3440;
+  --ink:#e4f1f5; --ink-dim:#a9c3cd; --muted:#7694a0;
+  --accent:#2fd0e0; --accent-deep:#149cab; --accent-soft:rgba(47,208,224,.16);
+  --good:#36d67a; --warn:#ffb02e; --crit:#ff5f5f;
+  --band5:#2fd0e0; --band24:#ffb02e; --wired:#36d67a;
+  --node-bg:#152530; --node-line:#28434f; --router-bg:#10303a; --router-ring:#2fd0e0; --topo-line:#7694a0;
+  --shadow:0 12px 34px -18px rgba(0,0,0,.85); --shadow-sm:0 8px 20px -12px rgba(0,0,0,.7);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#0c161c; --panel:#152530; --panel-2:#1b3240; --rail:#0b171e; --topbar:#0a1318;
+  --line:#28434f; --line-soft:#1d3440;
+  --ink:#e4f1f5; --ink-dim:#a9c3cd; --muted:#7694a0;
+  --accent:#2fd0e0; --accent-deep:#149cab; --accent-soft:rgba(47,208,224,.16);
+  --good:#36d67a; --warn:#ffb02e; --crit:#ff5f5f;
+  --band5:#2fd0e0; --band24:#ffb02e; --wired:#36d67a;
+  --node-bg:#152530; --node-line:#28434f; --router-bg:#10303a; --router-ring:#2fd0e0; --topo-line:#7694a0;
+  --shadow:0 12px 34px -18px rgba(0,0,0,.85); --shadow-sm:0 8px 20px -12px rgba(0,0,0,.7);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; font-family:var(--font-body); color:var(--ink);
+  background:radial-gradient(1100px 620px at 92% -8%, var(--accent-soft), transparent 55%), var(--bg);
+  background-attachment:fixed; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent);text-decoration:none}
+button{font-family:inherit}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+
+.app{display:grid;grid-template-columns:248px 1fr;grid-template-rows:60px 1fr;grid-template-areas:"brand top" "nav main";height:100%}
+.topbar{grid-area:top;display:flex;align-items:center;gap:14px;padding:0 22px;background:var(--topbar);border-bottom:1px solid var(--line);position:relative;z-index:30}
+.brandbar{grid-area:brand;display:flex;align-items:center;gap:11px;padding:0 18px;background:var(--rail);border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
+.sidebar{grid-area:nav;background:var(--rail);border-right:1px solid var(--line);overflow-y:auto;padding:12px 0 40px}
+.main{grid-area:main;overflow-y:auto;padding:24px 28px 64px;scroll-behavior:smooth}
+
+.logo{width:30px;height:30px;flex:0 0 auto;border-radius:9px;background:radial-gradient(circle at 30% 25%,#45e2ef,#0a8c99 65%);display:grid;place-items:center;box-shadow:0 4px 14px -4px var(--accent)}
+.logo svg{width:18px;height:18px;color:#fff}
+.brand-txt{line-height:1.05}
+.brand-txt b{font-size:16px;letter-spacing:.2px}
+.brand-txt span{display:block;font-size:10px;color:var(--muted);letter-spacing:1.6px;text-transform:uppercase}
+
+.hamburger{display:none;background:none;border:1px solid var(--line);color:var(--ink-dim);width:38px;height:36px;border-radius:10px;cursor:pointer;align-items:center;justify-content:center}
+.model{font-weight:600;font-size:14px}
+.model small{display:block;font-weight:400;font-size:11px;color:var(--muted);font-family:var(--font-mono)}
+.top-spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 13px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--ink-dim);background:var(--panel)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 8px var(--good)}
+.tbtn{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 13px;border:1px solid var(--line);background:var(--panel);color:var(--ink-dim);border-radius:10px;font-size:12.5px;cursor:pointer;transition:.15s}
+.tbtn:hover{border-color:var(--accent);color:var(--ink)}
+.tbtn svg{width:15px;height:15px}
+.tbtn.danger:hover{border-color:var(--crit);color:var(--crit)}
+.icbtn{width:34px;padding:0;justify-content:center}
+
+.nav-label{font-size:10.5px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);padding:14px 20px 6px;font-weight:700}
+.nav-group{padding:0 12px}
+.nav-item{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:0;background:none;color:var(--ink-dim);padding:10px 12px;border-radius:11px;font-size:13.5px;cursor:pointer;transition:.14s;margin-bottom:2px}
+.nav-item svg{width:18px;height:18px;flex:0 0 auto;color:var(--muted)}
+.nav-item:hover{background:var(--panel-2);color:var(--ink)}
+.nav-item.active{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+.nav-item.active svg{color:var(--accent)}
+.nav-item .tag{margin-left:auto;font-size:9.5px;letter-spacing:.4px;color:var(--muted);border:1px solid var(--line);padding:1px 6px;border-radius:999px;text-transform:uppercase}
+.nav-foot{margin:18px 12px 0;padding:14px 12px 4px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);line-height:1.7}
+.nav-foot .ver{font-family:var(--font-mono);color:var(--ink-dim)}
+.nav-foot a{color:var(--muted);text-decoration:none}
+.nav-foot a:hover{color:var(--accent)}
+.nav-foot .gh{display:inline-flex;align-items:center;gap:6px;margin-top:4px}
+.nav-foot .gh svg{width:14px;height:14px}
+
+.screen{display:none;animation:fade .25s ease}
+.screen.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.page-head h1{margin:0;font-size:23px;font-weight:700;letter-spacing:-.2px;text-wrap:balance}
+.page-head p{margin:5px 0 0;color:var(--muted);font-size:13px;max-width:60ch}
+.breadcrumb{font-size:11px;color:var(--muted);letter-spacing:1.4px;text-transform:uppercase;margin-bottom:4px;font-weight:600}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.panel-h{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--line-soft)}
+.panel-h h2{margin:0;font-size:14px;font-weight:700;letter-spacing:.2px}
+.panel-h .sub{font-size:11.5px;color:var(--muted);margin-left:auto;font-family:var(--font-mono)}
+.panel-b{padding:20px}
+
+.grid{display:grid;gap:18px}
+.map-grid{grid-template-columns:1fr 330px}
+
+.tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:18px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 17px;box-shadow:var(--shadow-sm)}
+.tile .k{font-size:11px;color:var(--muted);letter-spacing:.3px;display:flex;align-items:center;gap:7px;font-weight:600}
+.tile .k svg{width:15px;height:15px;color:var(--accent)}
+.tile .v{font-size:23px;font-weight:700;margin-top:9px;font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.tile .v small{font-size:12px;color:var(--muted);font-weight:500}
+.tile .meter{height:5px;border-radius:4px;background:var(--line-soft);margin-top:11px;overflow:hidden}
+.tile .meter i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent-deep),var(--accent));transition:width .6s}
+
+.mapwrap{padding:8px}
+.topo{width:100%;max-width:760px;height:auto;display:block;margin:0 auto}
+.topo text{font-family:var(--font-body);fill:var(--ink-dim)}
+.topo .nbg{fill:var(--node-bg);stroke:var(--node-line);stroke-width:1.5;transition:.15s}
+.topo .nbg-router{fill:var(--router-bg);stroke:var(--router-ring);stroke-width:2.5;transition:.15s}
+.topo .pulse{stroke:var(--router-ring)}
+.topo .ilink{stroke:var(--topo-line)}
+.topo .router-ic{color:var(--router-ring)}
+.topo .inet-ic{color:var(--muted)}
+.node{cursor:pointer}
+.node:hover .nbg,.node.sel .nbg,.node:hover .nbg-router,.node.sel .nbg-router{stroke:var(--accent);stroke-width:2.5}
+.node:focus{outline:none}
+.node:focus-visible .nbg,.node:focus-visible .nbg-router{stroke:var(--accent);stroke-width:3}
+.node.sel .nlabel{fill:var(--ink);font-weight:600}
+.link{fill:none;stroke-linecap:round;opacity:.6}
+.legend{display:flex;gap:16px;flex-wrap:wrap;padding:6px 16px 14px;font-size:11.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.lg{width:14px;height:4px;border-radius:3px;display:inline-block}
+
+.detail .big{display:flex;gap:13px;align-items:center;padding-bottom:16px;border-bottom:1px solid var(--line-soft);margin-bottom:14px}
+.devicon{width:48px;height:48px;border-radius:14px;background:var(--panel-2);display:grid;place-items:center;flex:0 0 auto;border:1px solid var(--line)}
+.devicon svg{width:24px;height:24px;color:var(--accent)}
+.detail .big b{font-size:15px}
+.detail .big .m{font-size:11.5px;color:var(--muted)}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;font-size:12.5px;border-bottom:1px dashed var(--line-soft)}
+.kv:last-child{border-bottom:0}
+.kv .l{color:var(--muted)}
+.kv .r{font-family:var(--font-mono);color:var(--ink)}
+.bandchip{font-size:10.5px;padding:3px 9px;border-radius:999px;font-weight:700;letter-spacing:.2px}
+.b5{background:rgba(15,181,196,.14);color:var(--accent-deep)}
+.b24{background:rgba(247,144,9,.16);color:#b45309}
+.bwired{background:rgba(23,178,106,.15);color:#0f7a4a}
+:root[data-theme="dark"] .b24,:root:not([data-theme="light"]) .b24{color:var(--band24)}
+:root[data-theme="dark"] .bwired,:root:not([data-theme="light"]) .bwired{color:var(--wired)}
+
+.clients{width:100%;border-collapse:collapse;font-size:13px}
+.clients th{text-align:left;font-size:10.5px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);font-weight:700;padding:10px 14px;border-bottom:1px solid var(--line)}
+.clients td{padding:12px 14px;border-bottom:1px solid var(--line-soft)}
+.clients tr:last-child td{border-bottom:0}
+.clients tbody tr{cursor:pointer;transition:.12s}
+.clients tbody tr:hover{background:var(--panel-2)}
+.cname{display:flex;align-items:center;gap:11px}
+.cname .mi{width:34px;height:34px;border-radius:10px;background:var(--panel-2);display:grid;place-items:center;border:1px solid var(--line)}
+.cname .mi svg{width:17px;height:17px;color:var(--ink-dim)}
+.cname b{font-weight:600}
+.cname small{display:block;color:var(--muted);font-size:11px;font-family:var(--font-mono)}
+.sig{display:inline-flex;gap:2px;align-items:flex-end;height:14px}
+.sig i{width:3px;background:var(--line);border-radius:1px}
+.sig i.on{background:var(--good)}
+
+.seg{display:flex;gap:4px;padding:4px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;width:max-content;margin-bottom:20px}
+.seg button{border:0;background:none;color:var(--ink-dim);padding:8px 18px;border-radius:9px;font-size:13px;cursor:pointer;font-weight:600;transition:.15s}
+.seg button.active{background:var(--panel);color:var(--accent-deep);box-shadow:var(--shadow-sm)}
+.form-row{display:grid;grid-template-columns:210px 1fr;gap:18px;align-items:center;padding:16px 0;border-bottom:1px solid var(--line-soft)}
+.form-row:last-child{border-bottom:0}
+.form-row .lbl{font-size:13px;color:var(--ink);font-weight:500}
+.form-row .lbl small{display:block;color:var(--muted);font-size:11px;margin-top:3px;font-weight:400}
+.ctl{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+input[type=text],input[type=password],input[type=time],select{background:var(--panel);border:1px solid var(--line);color:var(--ink);border-radius:10px;padding:10px 12px;font-size:13px;font-family:inherit;min-width:230px;transition:.15s}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+select{cursor:pointer;min-width:170px}
+input[type=time]{min-width:0}
+.hint{font-size:11.5px;color:var(--muted)}
+.toggle{--w:46px;position:relative;width:var(--w);height:26px;flex:0 0 auto;cursor:pointer}
+.toggle input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
+.toggle .track{position:absolute;inset:0;background:var(--line);border-radius:999px;transition:.2s}
+.toggle .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.2s}
+.toggle input:checked + .track{background:linear-gradient(90deg,var(--accent-deep),var(--accent))}
+.toggle input:checked ~ .knob{left:23px}
+.toggle input:focus-visible + .track{box-shadow:0 0 0 3px var(--accent-soft)}
+.form-actions{display:flex;gap:10px;justify-content:flex-end;padding-top:20px;margin-top:6px;border-top:1px solid var(--line-soft)}
+.btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:10px 20px;border-radius:11px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--accent);color:var(--ink)}
+.btn.primary{background:linear-gradient(180deg,var(--accent),var(--accent-deep));border-color:transparent;color:#fff;box-shadow:0 8px 22px -8px var(--accent)}
+.btn.primary:hover{filter:brightness(1.06);color:#fff}
+.btn.ghost{background:none}
+.strength{font-size:11px;font-family:var(--font-mono);font-weight:600}
+
+.cardgrid{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.gcard{border:1px solid var(--line);border-radius:var(--radius);padding:18px;background:var(--panel);display:flex;flex-direction:column;gap:13px;box-shadow:var(--shadow-sm)}
+.gcard.off{opacity:.6}
+.gc-top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.gc-top b{font-size:14px}
+.gc-ssid{font-family:var(--font-mono);font-size:13px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);padding:7px 11px;border-radius:9px;display:inline-block}
+.gc-meta{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.gc-meta b{color:var(--ink);font-family:var(--font-mono);font-weight:600}
+
+.traffic-big{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+.tbox{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;box-shadow:var(--shadow-sm)}
+.tbox .k{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:7px;font-weight:600}
+.tbox .k i{width:9px;height:9px;border-radius:3px;display:inline-block}
+.tbox .v{font-size:25px;font-weight:700;font-family:var(--font-mono);margin-top:7px}
+.tbox .v small{font-size:13px;color:var(--muted)}
+.chartwrap{padding:12px 10px 6px}
+#trafficChart{width:100%;height:260px;display:block}
+.bar{height:7px;border-radius:5px;background:var(--line-soft);overflow:hidden;min-width:80px}
+.bar i{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,var(--accent-deep),var(--accent))}
+
+/* wizard */
+.stepper{display:flex;gap:6px;margin-bottom:22px;flex-wrap:wrap}
+.step{display:flex;align-items:center;gap:10px;flex:1;min-width:150px}
+.step .num{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-size:12.5px;font-weight:700;background:var(--panel-2);color:var(--muted);border:1px solid var(--line);flex:0 0 auto}
+.step .lab{font-size:12px;color:var(--muted);font-weight:600}
+.step .line{flex:1;height:2px;background:var(--line);border-radius:2px;min-width:16px}
+.step.active .num{background:var(--accent);color:#fff;border-color:transparent}
+.step.active .lab{color:var(--ink)}
+.step.done .num{background:var(--good);color:#fff;border-color:transparent}
+.step.done .line{background:var(--good)}
+.wstep{display:none}
+.wstep.active{display:block}
+.rcard{display:flex;gap:14px;align-items:flex-start;border:1.5px solid var(--line);border-radius:var(--radius-sm);padding:16px;cursor:pointer;transition:.15s;background:var(--panel);margin-bottom:12px}
+.rcard:hover{border-color:var(--accent)}
+.rcard.sel{border-color:var(--accent);background:var(--accent-soft)}
+.rcard .ic{width:40px;height:40px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;flex:0 0 auto;border:1px solid var(--line)}
+.rcard.sel .ic{background:var(--panel);border-color:var(--accent)}
+.rcard .ic svg{width:21px;height:21px;color:var(--accent)}
+.rcard .rt{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px}
+.rcard .rd{font-size:12px;color:var(--muted);margin-top:3px}
+.rdot{width:18px;height:18px;border-radius:50%;border:2px solid var(--line);margin-left:auto;flex:0 0 auto;display:grid;place-items:center}
+.rcard.sel .rdot{border-color:var(--accent)}
+.rcard.sel .rdot::after{content:"";width:9px;height:9px;border-radius:50%;background:var(--accent)}
+.review{display:grid;gap:0}
+.wdone{text-align:center;padding:30px 20px}
+.wdone .big-ic{width:70px;height:70px;border-radius:50%;background:rgba(23,178,106,.14);display:grid;place-items:center;margin:0 auto 16px}
+.wdone .big-ic svg{width:34px;height:34px;color:var(--good)}
+.wdone h3{margin:0 0 6px;font-size:18px}
+.detectbar{display:flex;align-items:center;gap:11px;background:var(--accent-soft);border:1px solid var(--accent);border-radius:12px;padding:12px 15px;margin-bottom:16px;font-size:13px;animation:slidein .25s ease}
+.detectbar svg{width:18px;height:18px;color:var(--accent-deep);flex:0 0 auto}
+.devrow2{display:flex;align-items:center;gap:13px;border:1.5px solid var(--line);border-radius:var(--radius-sm);padding:14px 16px;cursor:pointer;transition:.15s;background:var(--panel);margin-bottom:10px}
+.devrow2:hover{border-color:var(--accent)}
+.devrow2.sel{border-color:var(--accent);background:var(--accent-soft)}
+.devrow2 .ic{width:40px;height:40px;border-radius:11px;background:var(--panel-2);display:grid;place-items:center;border:1px solid var(--line);flex:0 0 auto}
+.devrow2 .ic svg{width:20px;height:20px;color:var(--accent)}
+.devrow2 .dn{flex:1;min-width:0}
+.devrow2 .dn b{font-weight:600;font-size:14px}
+.devrow2 .dn small{display:block;color:var(--muted);font-size:11.5px;font-family:var(--font-mono)}
+.devrow2.sel .rdot{border-color:var(--accent)}
+.devrow2.sel .rdot::after{content:"";width:9px;height:9px;border-radius:50%;background:var(--accent)}
+.linkchip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px}
+.link-up{background:rgba(23,178,106,.14);color:#0f7a4a}
+:root[data-theme="dark"] .link-up,:root:not([data-theme="light"]) .link-up{color:var(--good)}
+.link-down{background:var(--panel-2);color:var(--muted)}
+.proto-un{opacity:.8;cursor:default}
+.proto-un:hover{border-color:var(--line)}
+.big-ic{width:70px;height:70px;border-radius:50%;background:rgba(23,178,106,.14);display:grid;place-items:center}
+.big-ic svg{width:34px;height:34px;color:var(--good)}
+.ext-head{display:flex;align-items:center;gap:13px;margin-bottom:18px}
+.ext-head .devicon{width:46px;height:46px}
+.ext-net{display:flex;align-items:center;gap:13px;border:1px solid var(--line);border-radius:var(--radius-sm);padding:13px 15px;cursor:pointer;transition:.15s;background:var(--panel);margin-bottom:9px}
+.ext-net:hover{border-color:var(--accent);background:var(--accent-soft)}
+.ext-net .nm{flex:1}.ext-net .nm b{font-weight:600}
+.ext-flow{display:flex;align-items:center;justify-content:center;gap:12px;margin:14px 0 20px;flex-wrap:wrap}
+.ext-flow .fn{display:flex;flex-direction:column;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);text-align:center;width:100px;line-height:1.4}
+.ext-flow .fn .devicon{width:54px;height:54px}
+.ext-flow .ar{color:var(--accent);font-size:22px;font-weight:700}
+details.adv{margin-top:20px;border:1px solid var(--line);border-radius:12px;background:var(--panel-2)}
+details.adv summary{cursor:pointer;padding:12px 15px;font-size:12.5px;font-weight:600;color:var(--ink-dim);list-style:none}
+details.adv summary::-webkit-details-marker{display:none}
+details.adv summary::before{content:"▸ ";color:var(--muted)}
+details.adv[open] summary::before{content:"▾ "}
+details.adv .advb{padding:0 15px 15px;font-size:12.5px;color:var(--muted);line-height:1.65}
+.help{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;border:0;color:#fff;font-size:11px;font-weight:700;cursor:help;margin-left:6px;vertical-align:middle;position:relative;flex:0 0 auto;background:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.2);font-family:var(--font-body);line-height:1;padding:0}
+.help:hover,.help:focus-visible{background:var(--accent-deep);color:#fff;outline:none}
+.help .tip{position:absolute;bottom:calc(100% + 9px);left:50%;transform:translateX(-50%) scale(.96);transform-origin:bottom center;width:250px;max-width:62vw;background:var(--ink);color:var(--bg);border-radius:10px;padding:10px 12px;font-size:12px;font-weight:400;line-height:1.5;text-align:left;box-shadow:var(--shadow);opacity:0;visibility:hidden;transition:.14s;z-index:60;pointer-events:none}
+.help:hover .tip,.help:focus .tip,.help:focus-within .tip{opacity:1;visibility:visible;transform:translateX(-50%) scale(1)}
+.help .tip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-top-color:var(--ink)}
+.help .tip .mono{color:var(--bg)}
+.kbd{font-family:var(--font-mono);font-size:10.5px;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--muted);margin-left:2px}
+.overlay.top{place-items:start center;padding-top:11vh}
+.cmdbox{width:min(600px,94vw);background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 30px 90px -20px rgba(0,0,0,.45);overflow:hidden}
+.cmd-in{display:flex;align-items:center;gap:11px;padding:15px 17px;border-bottom:1px solid var(--line-soft)}
+.cmd-in svg{width:18px;height:18px;color:var(--muted);flex:0 0 auto}
+.cmd-in input{border:0;background:none;flex:1;min-width:0;font-size:15px;color:var(--ink);padding:0}
+.cmd-in input:focus{outline:none;box-shadow:none}
+.cmd-results{max-height:50vh;overflow-y:auto;padding:8px}
+.cmd-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;cursor:pointer}
+.cmd-item .ci{width:32px;height:32px;border-radius:9px;background:var(--panel-2);display:grid;place-items:center;border:1px solid var(--line);flex:0 0 auto}
+.cmd-item .ci svg{width:16px;height:16px;color:var(--accent)}
+.cmd-item .ct{flex:1;min-width:0}
+.cmd-item .ct b{font-weight:600;font-size:13.5px}
+.cmd-item .cat{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;flex:0 0 auto}
+.cmd-item.active{background:var(--accent-soft)}
+.cmd-empty{padding:24px;text-align:center;color:var(--muted);font-size:13px}
+.cmd-foot{display:flex;gap:16px;padding:10px 17px;border-top:1px solid var(--line-soft);font-size:11px;color:var(--muted)}
+.cmd-foot b{font-family:var(--font-mono);background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-weight:600}
+@media (max-width:820px){#cmdBtn .lbltxt,#cmdBtn .kbd{display:none}}
+
+/* parental */
+.pc-grid{grid-template-columns:340px 1fr}
+.dev-row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line-soft);cursor:pointer;transition:.12s}
+.dev-row:last-child{border-bottom:0}
+.dev-row:hover{background:var(--panel-2)}
+.dev-row.sel{background:var(--accent-soft)}
+.dev-row .mi{width:36px;height:36px;border-radius:10px;background:var(--panel-2);display:grid;place-items:center;border:1px solid var(--line);flex:0 0 auto}
+.dev-row .mi svg{width:18px;height:18px;color:var(--ink-dim)}
+.dev-row .nm{flex:1;min-width:0}
+.dev-row .nm b{font-weight:600;font-size:13.5px}
+.dev-row .nm small{display:block;color:var(--muted);font-size:11px}
+.statechip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:999px}
+.st-ok{background:rgba(23,178,106,.14);color:#0f7a4a}
+.st-paused{background:rgba(240,68,56,.14);color:#b42318}
+.st-sched{background:rgba(247,144,9,.16);color:#b45309}
+:root[data-theme="dark"] .st-ok,:root:not([data-theme="light"]) .st-ok{color:var(--good)}
+:root[data-theme="dark"] .st-paused,:root:not([data-theme="light"]) .st-paused{color:var(--crit)}
+:root[data-theme="dark"] .st-sched,:root:not([data-theme="light"]) .st-sched{color:var(--warn)}
+.days{display:flex;gap:7px;flex-wrap:wrap}
+.day{width:42px;height:42px;border-radius:12px;border:1.5px solid var(--line);background:var(--panel);color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;transition:.14s}
+.day.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-deep)}
+
+.stub{display:grid;place-items:center;text-align:center;padding:62px 20px;color:var(--muted)}
+.stub .ic{width:68px;height:68px;border-radius:18px;background:var(--panel-2);display:grid;place-items:center;border:1px solid var(--line);margin-bottom:16px}
+.stub .ic svg{width:30px;height:30px;color:var(--accent)}
+.stub h3{color:var(--ink);margin:0 0 6px;font-size:16px}
+.stub p{max-width:440px;margin:0 auto;font-size:13px;line-height:1.6}
+.stub .note{margin-top:16px;font-size:11.5px;border:1px dashed var(--line);padding:8px 14px;border-radius:9px}
+
+.overlay{position:fixed;inset:0;background:rgba(10,24,30,.5);backdrop-filter:blur(3px);display:none;place-items:center;z-index:100}
+.overlay.show{display:grid}
+.modal{width:min(430px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px;box-shadow:0 30px 80px -20px rgba(0,0,0,.4)}
+.modal h3{margin:0 0 8px;font-size:17px}
+.modal p{margin:0 0 20px;color:var(--ink-dim);font-size:13.5px;line-height:1.55}
+.modal .row{display:flex;gap:10px;justify-content:flex-end}
+.toasts{position:fixed;right:22px;bottom:22px;display:flex;flex-direction:column;gap:10px;z-index:120}
+.toast{display:flex;align-items:center;gap:11px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--good);border-radius:12px;padding:13px 17px;font-size:13px;box-shadow:var(--shadow);animation:slidein .25s ease;max-width:340px}
+.toast svg{width:18px;height:18px;color:var(--good);flex:0 0 auto}
+@keyframes slidein{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+
+@media (max-width:1040px){ .map-grid,.pc-grid{grid-template-columns:1fr} .tiles{grid-template-columns:repeat(3,1fr)} .traffic-big{grid-template-columns:repeat(2,1fr)} }
+@media (max-width:820px){
+  .app{grid-template-columns:minmax(0,1fr);grid-template-areas:"top" "main"}.main{padding:16px 14px 64px}.form-row{grid-template-columns:1fr;gap:8px;padding:12px 0}.topbar{gap:8px;padding:0 12px}.model{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill,.topbar .tbtn.danger{display:none}
+  .brandbar{display:none}
+  .sidebar{position:fixed;top:0;left:0;bottom:0;width:264px;z-index:60;transform:translateX(-100%);transition:transform .22s;padding-top:16px}
+  .sidebar.open{transform:none;box-shadow:30px 0 80px -30px rgba(0,0,0,.4)}
+  .hamburger{display:inline-flex}
+  .model small{display:none}
+  .tiles{grid-template-columns:repeat(2,1fr)}
+}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important}}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;z-index:55}
+.scrim.show{display:block}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-map" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M19 5l-3 3M8 16l-3 3"/></symbol>
+<symbol id="i-guest" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M17 11l2 2 3-3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5z"/><path d="M9 12l2 2 4-4"/></symbol>
+<symbol id="i-qos" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13a4 4 0 100-8 4 4 0 000 8z"/><path d="M12 5v2M12 2a9 9 0 019 9M3 11a9 9 0 019-9"/><path d="M12 13l3 3"/></symbol>
+<symbol id="i-kids" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="3.5"/><path d="M5.5 21a6.5 6.5 0 0113 0"/><path d="M9 7h.01M15 7h.01"/></symbol>
+<symbol id="i-wifi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.8a16 16 0 0120 0M5 12.3a11 11 0 0114 0M8.5 15.8a6 6 0 017 0"/><circle cx="12" cy="19.5" r="1.2" fill="currentColor"/></symbol>
+<symbol id="i-lan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="5" rx="1"/><rect x="3" y="16" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M6 16v-2h12v2"/></symbol>
+<symbol id="i-wan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></symbol>
+<symbol id="i-ipv6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 9v6M8 12c0-2 1.5-3 3-3s2.5 1 2.5 3-1 3-2.5 3-3-1-3-3M16 9h-2.5"/></symbol>
+<symbol id="i-vpn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/><circle cx="12" cy="15" r="1.4"/></symbol>
+<symbol id="i-fire" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18v18H3z"/><path d="M3 9h18M3 15h18M9 3v6M15 9v6M9 15v6"/></symbol>
+<symbol id="i-admin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1.3l2-1.6-2-3.4-2.4 1a7 7 0 00-2.3-1.3L13.8 2h-3.6l-.4 2.4a7 7 0 00-2.3 1.3l-2.4-1-2 3.4 2 1.6A7 7 0 005 12a7 7 0 00.1 1.3l-2 1.6 2 3.4 2.4-1a7 7 0 002.3 1.3l.4 2.4h3.6l.4-2.4a7 7 0 002.3-1.3l2.4 1 2-3.4-2-1.6c.1-.4.1-.9.1-1.3z"/></symbol>
+<symbol id="i-log" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14v18H5z"/><path d="M9 8h6M9 12h6M9 16h4"/></symbol>
+<symbol id="i-pkg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 12l9-5M12 12v10M12 12L3 7"/></symbol>
+<symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v9M6.3 6.3a8 8 0 1011.4 0"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></symbol>
+<symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a10 10 0 00-3.16 19.49c.5.09.68-.22.68-.48l-.01-1.7c-2.78.6-3.37-1.34-3.37-1.34-.46-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.08.63-1.33-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.26-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 015 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.39.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85l-.01 2.74c0 .27.18.58.69.48A10 10 0 0012 2z"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+<symbol id="i-mem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 7V5M10 7V5M14 7V5M18 7V5M6 21v-2M18 21v-2M11 21v-2"/></symbol>
+<symbol id="i-temp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13.5V5a2 2 0 114 0v8.5a4 4 0 11-4 0z"/></symbol>
+<symbol id="i-clients" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M2.5 20a6.5 6.5 0 0113 0"/><circle cx="17.5" cy="9" r="2.3"/><path d="M15 20a5 5 0 017-4.6"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5l12 7-12 7z"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></symbol>
+<symbol id="i-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5a10 10 0 0114 0M8.5 15.5a6 6 0 017 0"/><circle cx="12" cy="18.5" r="1.1" fill="currentColor"/><path d="M12 9V3M9.5 5.5L12 3l2.5 2.5"/></symbol>
+<symbol id="i-port" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 12h7M11 9l3 3-3 3"/></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M7 8h10v3a5 5 0 01-10 0zM12 16v6"/></symbol>
+<symbol id="d-router" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 16.5h.01M11 16.5h3M17 10V7M14.5 9.5l5-5M12 10c0-2 1.5-3.5 3.5-3.5"/></symbol>
+<symbol id="d-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></symbol>
+<symbol id="d-laptop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="10" rx="1.5"/><path d="M2 19h20l-1.5-2.5h-17z"/></symbol>
+<symbol id="d-desktop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></symbol>
+<symbol id="d-tv" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/></symbol>
+<symbol id="d-game" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10a5 5 0 015 5v2a3 3 0 01-5.5 1.7L15 14H9l-1.5 1.7A3 3 0 012 14v-2a5 5 0 015-5z"/><path d="M7 11v2M6 12h2M15.5 11.5h.01M17.5 13h.01"/></symbol>
+<symbol id="d-speaker" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="3"/><circle cx="12" cy="14" r="3.5"/><circle cx="12" cy="6" r="1"/></symbol>
+<symbol id="d-tablet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2.5" width="16" height="19" rx="2.5"/><path d="M11 18.5h2"/></symbol>
+<symbol id="d-printer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="1.5"/><rect x="7" y="14" width="10" height="6"/><path d="M17 12.5h.01"/></symbol>
+<symbol id="d-cloud" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a4 4 0 01-.5-8A6 6 0 0118 10.5 3.5 3.5 0 0117.5 18z"/></symbol>
+</defs></svg>
+
+<div class="app">
+  <div class="brandbar">
+    <div class="logo"><svg><use href="#i-wifi"/></svg></div>
+    <div class="brand-txt"><b>UnTangled</b><span>Router&nbsp;UI</span></div>
+  </div>
+
+  <header class="topbar">
+    <button class="hamburger" id="hamburger" aria-label="Open menu"><svg><use href="#i-menu"/></svg></button>
+    <div class="model">RT-AX88U <small>OpenWRT 24.10 · UnTangled 1.0-beta</small></div>
+    <div class="top-spacer"></div>
+    <button class="tbtn" id="cmdBtn" aria-label="Search"><svg><use href="#i-search"/></svg><span class="lbltxt">Search</span><kbd class="kbd">⌘K</kbd></button>
+    <span class="pill"><span class="dot"></span> Internet online</span>
+    <button class="tbtn icbtn" id="themeBtn" aria-label="Toggle theme"><svg id="themeIcon"><use href="#i-moon"/></svg></button>
+    <button class="tbtn danger" id="rebootBtn"><svg><use href="#i-power"/></svg> Reboot</button>
+    <button class="tbtn"><svg><use href="#i-logout"/></svg> admin</button>
+  </header>
+
+  <nav class="sidebar" id="sidebar" aria-label="Main navigation">
+    <div class="nav-label">General</div>
+    <div class="nav-group">
+      <button class="nav-item active" data-screen="map"><svg><use href="#i-map"/></svg> Network Map</button>
+      <button class="nav-item" data-screen="devices"><svg><use href="#i-clients"/></svg> Devices</button>
+      <button class="nav-item" data-screen="mesh"><svg><use href="#i-ext"/></svg> Mesh Wi-Fi</button>
+      <button class="nav-item" data-screen="guest"><svg><use href="#i-guest"/></svg> Guest Network</button>
+      <button class="nav-item" data-screen="traffic"><svg><use href="#i-qos"/></svg> Traffic Monitor</button>
+      <button class="nav-item" data-screen="usage"><svg><use href="#i-qos"/></svg> Usage History</button>
+      <button class="nav-item" data-screen="parental"><svg><use href="#i-kids"/></svg> Parental Controls</button>
+      <button class="nav-item" data-screen="extend"><svg><use href="#i-ext"/></svg> Extend Wi-Fi</button>
+      <button class="nav-item" data-screen="aiprotect"><svg><use href="#i-shield"/></svg> Network Protection</button>
+    </div>
+    <div class="nav-label">Advanced Settings</div>
+    <div class="nav-group">
+      <button class="nav-item" data-screen="wireless"><svg><use href="#i-wifi"/></svg> Wireless</button>
+      <button class="nav-item" data-screen="wan"><svg><use href="#i-wan"/></svg> Internet (WAN)</button>
+      <button class="nav-item" data-screen="ddns"><svg><use href="#i-wan"/></svg> Dynamic DNS</button>
+      <button class="nav-item" data-screen="qos"><svg><use href="#i-qos"/></svg> QoS (Smart Queue)</button>
+      <button class="nav-item" data-screen="dualwan"><svg><use href="#i-wan"/></svg> Dual WAN</button>
+      <button class="nav-item" data-screen="upnp"><svg><use href="#i-port"/></svg> UPnP</button>
+      <button class="nav-item" data-screen="portfwd"><svg><use href="#i-port"/></svg> Port Forwarding</button>
+      <button class="nav-item" data-screen="lan"><svg><use href="#i-lan"/></svg> LAN</button>
+      <button class="nav-item" data-screen="ipv6"><svg><use href="#i-ipv6"/></svg> IPv6</button>
+      <button class="nav-item" data-screen="vpn"><svg><use href="#i-vpn"/></svg> VPN</button>
+      <button class="nav-item" data-screen="firewall"><svg><use href="#i-fire"/></svg> Firewall</button>
+      <button class="nav-item" data-screen="dmz"><svg><use href="#i-port"/></svg> DMZ</button>
+      <button class="nav-item" data-screen="admin"><svg><use href="#i-admin"/></svg> Administration</button>
+      <button class="nav-item" data-screen="log"><svg><use href="#i-log"/></svg> System Log</button>
+    </div>
+    <div class="nav-label">System</div>
+    <div class="nav-group">
+      <button class="nav-item" data-screen="usb"><svg><use href="#i-pkg"/></svg> USB Storage</button>
+      <button class="nav-item" data-screen="firmware"><svg><use href="#i-power"/></svg> Firmware</button>
+      <button class="nav-item" data-screen="software"><svg><use href="#i-pkg"/></svg> Software</button>
+    </div>
+    <div class="nav-foot">
+      <div class="ver">UnTangled 0.1-beta</div>
+      <div>by <a href="mailto:me@krishnendu.com">Krish Paul</a></div>
+      <a class="gh" href="https://github.com/bidhata/untangled" target="_blank" rel="noopener"><svg><use href="#i-github"/></svg> GitHub</a>
+    </div>
+  </nav>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main" id="main">
+
+    <!-- NETWORK MAP -->
+    <section class="screen active" id="screen-map">
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Network Map</h1><p>Live view of your router, the internet connection, and every connected device.</p></div></div>
+      <div class="tiles">
+        <div class="tile"><div class="k"><svg><use href="#i-wan"/></svg> Internet</div><div class="v" style="font-size:16px;margin-top:11px">Connected</div><div class="hint mono" style="margin-top:4px">203.0.113.42</div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-clients"/></svg> Clients</div><div class="v" id="tileClients">8 <small>online</small></div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-cpu"/></svg> CPU</div><div class="v" id="tileCpu">14<small>%</small></div><div class="meter"><i id="barCpu" style="width:14%"></i></div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-mem"/></svg> Memory</div><div class="v" id="tileMem">38<small>%</small></div><div class="meter"><i id="barMem" style="width:38%"></i></div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-temp"/></svg> Temp</div><div class="v" id="tileTemp">54<small>°C</small></div></div>
+      </div>
+      <div class="grid map-grid">
+        <div class="panel">
+          <div class="panel-h"><h2>Topology</h2><span class="sub">192.168.1.0/24</span></div>
+          <div class="mapwrap">
+            <svg class="topo" viewBox="0 0 800 430" id="topo" role="img" aria-label="Network topology diagram">
+              <g id="links"></g>
+              <g class="node" data-id="internet" tabindex="0" role="button" aria-label="Internet">
+                <circle class="nbg" cx="400" cy="52" r="30"/>
+                <use class="inet-ic" href="#d-cloud" x="384" y="36" width="32" height="32"/>
+                <text x="400" y="100" text-anchor="middle" font-size="12">Internet</text>
+              </g>
+              <g class="node" data-id="router" tabindex="0" role="button" aria-label="Router">
+                <circle class="pulse" cx="400" cy="205" r="52" fill="none" stroke-opacity=".25" stroke-width="2"><animate attributeName="r" values="46;58;46" dur="3.5s" repeatCount="indefinite"/><animate attributeName="stroke-opacity" values=".4;0;.4" dur="3.5s" repeatCount="indefinite"/></circle>
+                <circle class="nbg-router" cx="400" cy="205" r="40"/>
+                <use class="router-ic" href="#d-router" x="378" y="183" width="44" height="44"/>
+                <text x="400" y="268" text-anchor="middle" font-size="12.5" font-weight="700">RT-AX88U</text>
+              </g>
+              <g id="clientNodes"></g>
+            </svg>
+            <div class="legend">
+              <span><i class="lg" style="background:var(--band5)"></i> 5 GHz</span>
+              <span><i class="lg" style="background:var(--band24)"></i> 2.4 GHz</span>
+              <span><i class="lg" style="background:var(--wired)"></i> Wired</span>
+              <span style="opacity:.8">Tap a device for details</span>
+            </div>
+          </div>
+        </div>
+        <div class="panel detail" id="detailPanel">
+          <div class="panel-h"><h2 id="detailTitle">Device</h2></div>
+          <div class="panel-b" id="detailBody"></div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-h"><h2>Connected Clients</h2><span class="sub" id="clientCount">8 devices</span></div>
+        <div style="overflow-x:auto"><table class="clients">
+          <thead><tr><th>Device</th><th>IP Address</th><th>Connection</th><th>Signal</th><th>Download</th></tr></thead>
+          <tbody id="clientRows"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- WIRELESS -->
+    <section class="screen" id="screen-wireless">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Wireless</h1><p>Configure your Wi-Fi networks. Changes apply after you press Apply.</p></div></div>
+      <div class="panel" style="margin-bottom:18px">
+        <div class="panel-h"><h2>Radios</h2><span class="sub">live from iwinfo</span></div>
+        <div class="panel-b" style="padding-bottom:10px">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:12px"><button class="btn" type="button" id="simWifi" style="padding:7px 13px">+ Plug in USB Wi-Fi adapter</button></div>
+          <div id="wifiDetectBanner"></div>
+          <div id="radioList"></div>
+        </div>
+      </div>
+      <div class="seg" role="tablist">
+        <button class="active" data-band="5">5 GHz</button>
+        <button data-band="24">2.4 GHz</button>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><h2 id="wlTitle">5 GHz — Wireless Settings</h2><span class="sub">radio on</span></div>
+        <div class="panel-b">
+          <div class="form-row"><div class="lbl">Enable radio<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Switches this Wi-Fi band on or off. Turning it off disconnects every device using it.</span></span><small>Turn this band on or off</small></div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+          <div class="form-row"><div class="lbl">Network name (SSID)<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The Wi-Fi name devices see when they scan. 1&ndash;32 characters.</span></span></div><div class="ctl"><input type="text" id="wlSsid" value="Nebula-5G"><span class="hint">Shown to devices</span></div></div>
+          <div class="form-row"><div class="lbl">Hide SSID<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Stops the name being broadcast, so devices must type it to join. Minor privacy only &mdash; not real security.</span></span><small>Make network invisible</small></div><div class="ctl"><label class="toggle"><input type="checkbox"><span class="track"></span><span class="knob"></span></label></div></div>
+          <div class="form-row"><div class="lbl">Security<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">How the Wi-Fi is encrypted. WPA3 is strongest; WPA2/WPA3 keeps older devices working. Avoid Open except for a captive guest network.</span></span></div><div class="ctl"><select><option>WPA3-Personal</option><option selected>WPA2/WPA3-Personal</option><option>WPA2-Personal</option><option>Open (no password)</option></select></div></div>
+          <div class="form-row"><div class="lbl">Password<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The key devices need to join. Use at least 12 characters for a strong network.</span></span></div><div class="ctl"><input type="password" id="wlPass" value="skywalker-42-orbit"><button class="btn" id="wlShow" type="button">Show</button><span class="strength" id="wlStrength" style="color:var(--good)">Strong</span></div></div>
+          <div class="form-row"><div class="lbl">Channel<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The radio channel. Auto picks the clearest one; set it manually only to dodge a known busy channel. Width (20&ndash;160 MHz) trades range for speed.</span></span></div><div class="ctl"><select><option selected>Auto</option><option>36</option><option>40</option><option>44</option><option>48</option><option>149</option><option>153</option></select><select><option>20 MHz</option><option>40 MHz</option><option selected>80 MHz</option><option>160 MHz</option></select></div></div>
+          <details class="adv"><summary>Advanced radio settings</summary><div class="advb">
+            <div class="form-row"><div class="lbl">Country / region<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Regulatory domain (e.g. US, DE, IN). Sets legal channels and power. Match where the router actually is.</span></span></div><div class="ctl"><input type="text" maxlength="2" value="US" style="min-width:80px;text-transform:uppercase"></div></div>
+            <div class="form-row"><div class="lbl">Transmit power<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Radio power in dBm. Leave blank for the driver maximum. Lower it only to reduce range/overlap between APs.</span></span></div><div class="ctl"><input type="text" placeholder="max" style="min-width:100px"><span class="hint">dBm</span></div></div>
+            <div class="form-row"><div class="lbl">Fast roaming (802.11r)<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Lets devices hand off between access points with the same SSID almost instantly. Useful with more than one AP; harmless on a single router.</span></span><small>smoother multi-AP handoff</small></div><div class="ctl"><label class="toggle"><input type="checkbox"><span class="track"></span><span class="knob"></span></label></div></div>
+            <div class="form-row"><div class="lbl">WMM / Wi-Fi QoS<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Prioritises voice and video over bulk traffic on the air. Keep on — required for 802.11n/ac/ax speeds.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+            <div class="form-row" style="border:0"><div class="lbl">Client isolation<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Stops devices on this network from talking to each other — only the internet is reachable. Good for a guest band; leave off at home.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox"><span class="track"></span><span class="knob"></span></label></div></div>
+          </div></details>
+          <div class="form-actions"><button class="btn" type="button" id="wlReset">Reset</button><button class="btn primary" type="button" id="wlApply"><svg style="width:15px;height:15px"><use href="#i-check"/></svg> Apply</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MESH WI-FI -->
+    <section class="screen" id="screen-mesh">
+      <div class="page-head"><div><div class="breadcrumb">General · Plugin</div><h1>Mesh Wi-Fi</h1><p>Blanket your home in one Wi-Fi name, with devices roaming smoothly between routers.</p></div></div>
+      <div class="tiles" style="grid-template-columns:repeat(3,1fr);max-width:720px">
+        <div class="tile"><div class="k">This router</div><div class="v" style="font-size:16px;margin-top:11px">Main router</div></div>
+        <div class="tile"><div class="k">Backhaul</div><div class="v" style="font-size:16px;margin-top:11px">wired</div></div>
+        <div class="tile"><div class="k">Routers</div><div class="v">2</div></div>
+      </div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Seamless roaming</h2><span class="sub">802.11r / k / v · dawn</span></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Hand devices between routers automatically<small>phones switch to the strongest router without dropping</small></div><div class="ctl"><label class="toggle"><input type="checkbox" checked onchange="toast(this.checked?'Seamless roaming turned on':'Seamless roaming turned off')"><span class="track"></span><span class="knob"></span></label></div></div>
+      </div></div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Routers in this mesh</h2><span class="sub">2</span></div>
+        <div style="overflow-x:auto"><table class="clients">
+          <thead><tr><th>Router</th><th>Role</th><th>Signal</th></tr></thead>
+          <tbody>
+            <tr><td><div class="cname"><span class="mi"><svg><use href="#d-router"/></svg></span><span><b>RT-AX88U</b><small class="mono">192.168.1.1</small></span></div></td><td>Main router</td><td class="mono">this router</td></tr>
+            <tr><td><div class="cname"><span class="mi"><svg><use href="#d-router"/></svg></span><span><b>Study-AP</b><small class="mono">192.168.1.2</small></span></div></td><td>Mesh point</td><td class="mono">-58 dBm</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Role</h2><span class="sub">Main router</span></div><div class="panel-b">
+        <div class="hint" style="margin:0 0 12px">This router leads the mesh. Add satellites with the code below.</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn" type="button" onclick="toast('Left the mesh (simulated)')">Leave mesh</button></div>
+      </div></div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Add another router</h2><span class="sub">extend coverage</span></div><div class="panel-b">
+        <ol style="margin:0 0 4px;padding-left:20px;line-height:1.9">
+          <li>Install UnTangled + <span class="mono">untangled-mesh</span> on the second router.</li>
+          <li>Connect it to this one — by Ethernet (most reliable) or over Wi-Fi.</li>
+          <li>On the new router, open Mesh Wi-Fi → <b>Join an existing mesh</b>, then paste this code.</li>
+        </ol>
+        <div class="form-row" style="border:0"><div class="lbl">Join code</div><div class="ctl"><input type="text" class="mono" readonly value="dW50YW5nbGVkLW1lc2h8dW50YW5nbGVkfE5lYnVsYS01R3w=" style="min-width:280px"><button class="btn" type="button" onclick="toast('Join code copied (simulated)')">Copy</button></div></div>
+      </div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-h"><h2>Join an existing mesh</h2><span class="sub">for a satellite router</span></div><div class="panel-b">
+        <div class="form-row" style="border:0"><div class="lbl">Join code<small>from the main router's Mesh screen</small></div><div class="ctl"><input type="text" class="mono" placeholder="paste code" style="min-width:280px"><button class="btn primary" type="button" onclick="toast('Wi-Fi matched to the mesh (simulated)')">Join</button></div></div>
+        <div class="hint">Matches this router's Wi-Fi name &amp; password to the mesh and turns on roaming. To share one network, also connect it to the main router by Ethernet and switch it to Access Point mode on the LAN screen.</div>
+      </div></div>
+      <details class="adv" style="max-width:720px"><summary>About this plugin</summary><div class="advb">Mesh Wi-Fi is an UnTangled <b>plugin</b> (ships in the UI) driving the device-side <span class="mono">untangled.mesh</span> helper from the <span class="mono">untangled-mesh</span> package. The screen degrades to an "install the backend" prompt when that package isn't present, and the only live write (roaming) leaves SSID/password untouched so it can't lock you out.</div></details>
+    </section>
+
+    <!-- DEVICES -->
+    <section class="screen" id="screen-devices">
+      <style>
+        .devtable td{vertical-align:middle}
+        .fixip{display:flex;gap:6px;align-items:center}
+        .ipin{min-width:128px;width:128px;padding:6px 8px;font-family:var(--font-mono);font-size:12px;min-width:128px}
+        .btn.sm{padding:6px 10px;font-size:12px;display:inline-flex;align-items:center;gap:5px;min-width:0}
+        .btn.sm svg{width:14px;height:14px}
+        .btn.sm.ghost{padding:6px 9px;color:var(--muted)}
+      </style>
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Devices</h1><p>Everything on your network. Give a device a fixed address, block its internet, or wake it up.</p></div></div>
+      <div class="panel"><div class="panel-h"><h2>Connected &amp; known devices</h2><span class="sub" id="devCount"></span></div>
+        <div style="overflow-x:auto"><table class="clients devtable">
+          <thead><tr>
+            <th>Device</th>
+            <th>Connection</th>
+            <th>Fixed IP<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Always give this device the same local address. Useful for port forwarding, printers, servers and NAS.</span></span></th>
+            <th style="text-align:center">Block internet<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Cuts this device off from the internet (it can still reach the router). Toggle back any time.</span></span></th>
+            <th style="text-align:right">Wake<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Sends a Wake-on-LAN signal to power on a sleeping device. Needs the etherwake package on the router.</span></span></th>
+          </tr></thead>
+          <tbody id="devRows"></tbody>
+        </table></div>
+      </div>
+      <details class="adv" style="max-width:900px"><summary>Advanced details</summary><div class="advb"><b>Fixed IP</b> is a <span class="mono">config host</span> entry in <span class="mono">/etc/config/dhcp</span> (static lease by MAC). <b>Block internet</b> is a <span class="mono">config rule</span> in <span class="mono">/etc/config/firewall</span> (<span class="mono">src lan → dest wan</span>, <span class="mono">src_mac</span>, target <span class="mono">REJECT</span>). <b>Wake</b> runs <span class="mono">etherwake</span> on the router.</div></details>
+    </section>
+
+    <!-- GUEST -->
+    <section class="screen" id="screen-guest">
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Guest Network</h1><p>Give visitors internet access without sharing your main password or exposing your LAN.</p></div>
+        <button class="btn primary" type="button" id="guestApply"><svg style="width:15px;height:15px"><use href="#i-check"/></svg> Apply changes</button></div>
+      <div class="cardgrid">
+        <div class="gcard" id="g1">
+          <div class="gc-top"><b>Guest 1 · 5 GHz</b><label class="toggle"><input type="checkbox" checked data-guest><span class="track"></span><span class="knob"></span></label></div>
+          <span class="gc-ssid">Nebula-Guest</span>
+          <div class="gc-meta"><span>Clients <b>3</b></span><span>Time left <b>18h 42m</b></span><span>Isolation <b>On</b></span></div>
+          <div class="form-row" style="grid-template-columns:120px 1fr;padding:8px 0;border:0"><div class="lbl">Access time<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">How long a guest device may stay connected before it must rejoin. Unlimited never expires.</span></span></div><div class="ctl"><select><option>1 hour</option><option>4 hours</option><option selected>1 day</option><option>Unlimited</option></select></div></div>
+        </div>
+        <div class="gcard" id="g2">
+          <div class="gc-top"><b>Guest 2 · 2.4 GHz</b><label class="toggle"><input type="checkbox" checked data-guest><span class="track"></span><span class="knob"></span></label></div>
+          <span class="gc-ssid">Nebula-IoT</span>
+          <div class="gc-meta"><span>Clients <b>5</b></span><span>Time left <b>Unlimited</b></span><span>Isolation <b>On</b></span></div>
+          <div class="form-row" style="grid-template-columns:120px 1fr;padding:8px 0;border:0"><div class="lbl">Access time<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">How long a guest device may stay connected before it must rejoin. Unlimited never expires.</span></span></div><div class="ctl"><select><option>1 hour</option><option>4 hours</option><option>1 day</option><option selected>Unlimited</option></select></div></div>
+        </div>
+        <div class="gcard off" id="g3">
+          <div class="gc-top"><b>Guest 3 · 5 GHz</b><label class="toggle"><input type="checkbox" data-guest><span class="track"></span><span class="knob"></span></label></div>
+          <span class="gc-ssid">Not configured</span>
+          <div class="gc-meta"><span>Turn on the toggle to enable a third guest network.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TRAFFIC -->
+    <section class="screen" id="screen-traffic">
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Traffic Monitor</h1><p>Real-time throughput across your internet connection, updated every second.</p></div></div>
+      <div class="traffic-big">
+        <div class="tbox"><div class="k"><i style="background:var(--accent)"></i> Download</div><div class="v" id="tDown">0.0<small> Mbps</small></div></div>
+        <div class="tbox"><div class="k"><i style="background:var(--good)"></i> Upload</div><div class="v" id="tUp">0.0<small> Mbps</small></div></div>
+        <div class="tbox"><div class="k">Peak download</div><div class="v" id="tPeak">0.0<small> Mbps</small></div></div>
+        <div class="tbox"><div class="k">Today total</div><div class="v">42.6<small> GB</small></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><h2>Throughput</h2><span class="sub">last 60 s · Mbps</span></div>
+        <div class="chartwrap"><canvas id="trafficChart" width="1000" height="260"></canvas></div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-h"><h2>Top Talkers</h2><span class="sub">by download today</span></div>
+        <div style="overflow-x:auto"><table class="clients">
+          <thead><tr><th>Device</th><th>Download</th><th>Upload</th><th style="width:40%">Share</th></tr></thead>
+          <tbody id="talkerRows"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- USAGE HISTORY -->
+    <section class="screen" id="screen-usage">
+      <style>
+        #screen-usage .chart{display:flex;align-items:flex-end;gap:4px;height:160px;padding:8px 2px 0;overflow-x:auto}
+        #screen-usage .bar-wrap{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:20px;flex:1}
+        #screen-usage .bar{width:100%;height:130px;display:flex;align-items:flex-end}
+        #screen-usage .bar i{width:100%;border-radius:4px 4px 0 0;background:linear-gradient(180deg,var(--accent),var(--accent-deep));display:block}
+        #screen-usage .bl{font-size:10px;color:var(--muted);white-space:nowrap;transform:rotate(-35deg);height:14px}
+      </style>
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Usage History</h1><p>How much data your internet and your devices have used over time.</p></div></div>
+      <div class="panel" style="margin-bottom:16px"><div class="panel-h"><h2>Internet usage</h2><span class="sub">br-wan</span></div><div class="panel-b">
+        <div class="tiles" style="grid-template-columns:repeat(2,1fr);max-width:460px;margin-bottom:18px">
+          <div class="tile"><div class="k">Today</div><div class="v" style="font-size:17px;margin-top:10px">14.8 GB</div><div class="hint mono" style="margin-top:4px">↓ 12.1 GB · ↑ 2.7 GB</div></div>
+          <div class="tile"><div class="k">This month</div><div class="v" style="font-size:17px;margin-top:10px">312 GB</div><div class="hint mono" style="margin-top:4px">↓ 268 GB · ↑ 44 GB</div></div>
+        </div>
+        <div class="seg" role="tablist" style="margin-bottom:14px"><button class="active">Daily</button><button>Monthly</button></div>
+        <div class="chart" id="usgChart" role="img" aria-label="Usage bar chart"></div>
+      </div></div>
+      <div class="panel"><div class="panel-h"><h2>By device<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Data used per device for the current period. Needs the nlbwmon package, which records per-device totals on the router.</span></span></h2><span class="sub">nlbwmon</span></div>
+        <div style="overflow-x:auto"><table class="clients">
+          <thead><tr><th>Device</th><th>Download</th><th>Upload</th><th>Total</th></tr></thead>
+          <tbody>
+            <tr><td><div class="cname"><span><b>Living Room TV</b><small class="mono">192.168.1.110</small></span></div></td><td class="mono">84.2 GB</td><td class="mono">1.1 GB</td><td class="mono"><b>85.3 GB</b></td></tr>
+            <tr><td><div class="cname"><span><b>MacBook Pro</b><small class="mono">192.168.1.102</small></span></div></td><td class="mono">61.0 GB</td><td class="mono">12.4 GB</td><td class="mono"><b>73.4 GB</b></td></tr>
+            <tr><td><div class="cname"><span><b>PlayStation 5</b><small class="mono">192.168.1.133</small></span></div></td><td class="mono">48.7 GB</td><td class="mono">3.2 GB</td><td class="mono"><b>51.9 GB</b></td></tr>
+            <tr><td><div class="cname"><span><b>iPhone 15 Pro</b><small class="mono">192.168.1.145</small></span></div></td><td class="mono">22.3 GB</td><td class="mono">4.8 GB</td><td class="mono"><b>27.1 GB</b></td></tr>
+            <tr><td><div class="cname"><span><b>Work Desktop</b><small class="mono">192.168.1.101</small></span></div></td><td class="mono">9.6 GB</td><td class="mono">6.1 GB</td><td class="mono"><b>15.7 GB</b></td></tr>
+          </tbody>
+        </table></div>
+      </div>
+      <details class="adv" style="max-width:860px"><summary>Advanced details</summary><div class="advb">Internet totals come from <span class="mono">vnstat --json</span> (per-interface, persistent). Per-device figures come from <span class="mono">nlbw -c json</span> (nlbwmon). Both are read-only; UnTangled stores nothing itself.</div></details>
+    </section>
+
+    <!-- PARENTAL CONTROLS -->
+    <section class="screen" id="screen-parental">
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Parental Controls</h1><p>Set internet schedules and content filtering per device. Backed by nftables time rules and a DNS filter.</p></div></div>
+      <div class="grid pc-grid">
+        <div class="panel">
+          <div class="panel-h"><h2>Devices</h2><span class="sub" id="pcCount"></span></div>
+          <div id="pcList"></div>
+        </div>
+        <div class="panel" id="pcEditor"><div class="panel-b"></div></div>
+      </div>
+    </section>
+
+    <!-- WAN SETUP WIZARD -->
+    <section class="screen" id="screen-wan">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Internet Setup</h1><p>Connect UnTangled to your internet provider. Interfaces are detected live from the router.</p></div>
+        <button class="btn" type="button" id="addIfaceBtn">+ Add interface</button></div>
+      <div class="panel"><div class="panel-b">
+        <div class="stepper" id="stepper">
+          <div class="step active" data-s="1"><span class="num">1</span><span class="lab">Interface</span><span class="line"></span></div>
+          <div class="step" data-s="2"><span class="num">2</span><span class="lab">Protocol</span><span class="line"></span></div>
+          <div class="step" data-s="3"><span class="num">3</span><span class="lab">Details</span><span class="line"></span></div>
+          <div class="step" data-s="4"><span class="num">4</span><span class="lab">DNS &amp; IPv6</span><span class="line"></span></div>
+          <div class="step" data-s="5"><span class="num">5</span><span class="lab">Review</span></div>
+        </div>
+
+        <div class="wstep active" id="wstep-1">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+            <div class="hint">Detected WAN interfaces · live from <span class="mono">ubus network.device</span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn" type="button" id="simRndis" style="padding:7px 13px">+ USB tether (RNDIS)</button>
+              <button class="btn" type="button" id="simDongle" style="padding:7px 13px">+ USB-Ethernet adapter</button>
+              <button class="btn" type="button" id="simLte" style="padding:7px 13px">+ LTE modem</button>
+            </div>
+          </div>
+          <div id="wanDetectBanner"></div>
+          <div id="wanDevices"></div>
+        </div>
+
+        <div class="wstep" id="wstep-2"><div id="wanProtos"></div></div>
+
+        <div class="wstep" id="wstep-3"><div id="wizFields"></div></div>
+
+        <div class="wstep" id="wstep-4">
+          <div class="form-row"><div class="lbl">DNS servers<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The servers that turn names like example.com into addresses. Automatic uses your ISP's; a public resolver such as Cloudflare can be faster or more private.</span></span><small>Who resolves domain names</small></div><div class="ctl"><select id="wizDns"><option selected>Automatic (from ISP)</option><option>Cloudflare — 1.1.1.1</option><option>Google — 8.8.8.8</option><option>Quad9 — 9.9.9.9</option></select></div></div>
+          <div class="form-row"><div class="lbl">Enable IPv6<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Turns on the newer internet addressing alongside IPv4. Safe to leave on; disable only if your ISP has no IPv6 or it causes trouble.</span></span><small>Dual-stack if your ISP supports it</small></div><div class="ctl"><label class="toggle"><input type="checkbox" id="wizV6" checked><span class="track"></span><span class="knob"></span></label></div></div>
+          <div class="form-row"><div class="lbl">MTU<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Largest packet size on the link, in bytes. 1500 suits most connections; some PPPoE/DSL lines need 1492.</span></span></div><div class="ctl"><input type="text" id="wizMtu" value="1500" style="min-width:120px"><span class="hint">Leave at 1500 unless your ISP says otherwise</span></div></div>
+        </div>
+
+        <div class="wstep" id="wstep-5">
+          <div class="review" id="wizReview"></div>
+        </div>
+
+        <div class="wstep" id="wstep-done">
+          <div class="wdone">
+            <div class="big-ic"><svg><use href="#i-check"/></svg></div>
+            <h3>You're online</h3>
+            <p class="hint" style="max-width:420px;margin:0 auto 18px">Internet settings were applied and the connection is up. This is a prototype, so nothing was written to a real router.</p>
+            <button class="btn" type="button" id="wizRestart">Reconfigure</button>
+          </div>
+        </div>
+
+        <div class="form-actions" id="wizNav">
+          <button class="btn ghost" type="button" id="wizBack" style="margin-right:auto;visibility:hidden">Back</button>
+          <button class="btn primary" type="button" id="wizNext">Next</button>
+        </div>
+      </div></div>
+    </section>
+
+    <!-- SOFTWARE -->
+    <section class="screen" id="screen-software">
+      <div class="page-head"><div><div class="breadcrumb">System</div><h1>Software</h1><p>Firmware and packages. Everything here runs on the router itself — no cloud account, no external store.</p></div>
+        <button class="btn" type="button" id="swRefresh">Refresh list</button></div>
+      <div class="panel" style="margin-bottom:18px"><div class="panel-b" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div class="devicon" style="width:52px;height:52px"><svg><use href="#i-pkg"/></svg></div>
+        <div style="flex:1;min-width:200px"><div style="font-size:15px;font-weight:700">Firmware · UnTangled 1.0-beta</div><div class="hint">OpenWRT 24.10.0 · r28427 · kernel 6.6.73</div></div>
+        <span class="pill"><span class="dot"></span> Up to date</span>
+        <button class="btn" type="button" id="fwCheck">Check for updates</button>
+      </div></div>
+      <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
+        <div class="tile"><div class="k"><svg><use href="#i-pkg"/></svg> Installed</div><div class="v">147 <small>packages</small></div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-up"/></svg> Updates</div><div class="v">4 <small>available</small></div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-mem"/></svg> Storage</div><div class="v">12.4<small>/104 MB</small></div><div class="meter"><i style="width:12%"></i></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><h2>Package manager</h2><span class="sub">apk · on-device</span></div>
+        <div class="panel-b" style="padding-bottom:0">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+            <input type="text" id="swSearch" placeholder="Search packages…" style="min-width:220px;flex:1">
+            <div class="seg" style="margin:0">
+              <button class="active" data-filter="update">Updates</button>
+              <button data-filter="installed">Installed</button>
+              <button data-filter="available">Available</button>
+            </div>
+          </div>
+        </div>
+        <div style="overflow-x:auto"><table class="clients">
+          <thead><tr><th>Package</th><th>Version</th><th>Size</th><th style="text-align:right">Action</th></tr></thead>
+          <tbody id="swRows"></tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <!-- NETWORK PROTECTION (Safety) -->
+    <section class="screen" id="screen-aiprotect">
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Network Protection</h1><p>Simple safety switches for everyone on your network. Turn on what you want.</p></div></div>
+      <div class="tiles" style="grid-template-columns:repeat(3,1fr)">
+        <div class="tile"><div class="k"><svg><use href="#i-shield"/></svg> Status</div><div class="v" style="font-size:16px;margin-top:11px">Protected</div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-shield"/></svg> Ads blocked today</div><div class="v">12,480</div></div>
+        <div class="tile"><div class="k"><svg><use href="#i-shield"/></svg> Threats blocked</div><div class="v">37</div></div>
+      </div>
+      <div class="cardgrid" id="npCards"></div>
+      <details class="adv" style="max-width:700px"><summary>Advanced details</summary><div class="advb">These switches drive on-device services: ad and tracker blocking via <span class="mono">adblock</span>, malicious-site and threat-feed blocking via <span class="mono">banIP</span>, and Safe Search / adult-content filtering via DNS rewrites in <span class="mono">dnsmasq</span>. No traffic is sent to a cloud filter.</div></details>
+    </section>
+
+    <!-- VPN (Access home while away) -->
+    <section class="screen" id="screen-vpn">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Access home while away</h1><p>Create a private, secure link so your phone or laptop can reach your home network from anywhere.</p></div></div>
+      <div class="panel" style="max-width:780px"><div class="panel-b" id="vpnBody"></div></div>
+    </section>
+
+    <!-- DYNAMIC DNS -->
+    <section class="screen" id="screen-ddns">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Dynamic DNS</h1><p>Reach your router by name even when your internet provider changes its IP address.</p></div></div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Hostnames</h2><span class="sub">1 configured</span></div><div class="panel-b">
+        <div class="form-row">
+          <div class="lbl"><b>myhome.duckdns.org</b><small style="display:block;color:var(--muted)">DuckDNS</small></div>
+          <div class="ctl" style="gap:12px"><label class="toggle"><input type="checkbox" checked onchange="toast(this.checked?'DDNS enabled':'DDNS disabled')"><span class="track"></span><span class="knob"></span></label><button class="btn" type="button" onclick="toast('DDNS entry removed (simulated)')">Remove</button></div>
+        </div>
+      </div></div>
+      <button class="btn primary" type="button" id="ddnsAddBtn">Add a hostname</button>
+      <div class="panel" style="max-width:720px;margin-top:12px;display:none" id="ddnsAddPanel"><div class="panel-h"><h2>Add a hostname</h2></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Provider<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The DDNS service you have an account with. Create the free account on their site first.</span></span></div><div class="ctl"><select><option>DuckDNS</option><option>dynv6</option><option>No-IP</option><option>Dyn</option><option>Cloudflare</option><option>FreeDNS (afraid.org)</option><option>Google Domains</option></select></div></div>
+        <div class="form-row"><div class="lbl">Hostname<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The full name you'll use to reach your network, e.g. myhome.duckdns.org.</span></span></div><div class="ctl"><input type="text" placeholder="myhome.duckdns.org" style="min-width:240px"></div></div>
+        <div class="form-row"><div class="lbl">Username<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">For most providers this is your account name; some (like DuckDNS) leave it blank and use only a token.</span></span></div><div class="ctl"><input type="text" style="min-width:200px"></div></div>
+        <div class="form-row"><div class="lbl">Password / token<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The account password or API token from the provider. It's stored on the router only.</span></span></div><div class="ctl"><input type="password" style="min-width:200px"></div></div>
+        <div class="form-actions"><button class="btn" type="button" id="ddnsCancel">Cancel</button><button class="btn primary" type="button" onclick="toast('DDNS entry added (simulated)')">Add hostname</button></div>
+      </div></div>
+      <details class="adv" style="max-width:720px;margin-top:16px"><summary>Advanced details</summary><div class="advb">Each hostname is a <span class="mono">config service</span> in <span class="mono">/etc/config/ddns</span> (ddns-scripts), checking the <span class="mono">wan</span> address every 10 minutes over HTTPS and updating the provider when it changes.</div></details>
+    </section>
+
+    <!-- QOS (SMART QUEUE) -->
+    <section class="screen" id="screen-qos">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>QoS (Smart Queue)</h1><p>Keep video calls, gaming and browsing smooth when the connection is busy, by taming bufferbloat.</p></div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div class="form-row"><div class="lbl">Turn on Smart Queue<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Shapes your traffic just below your real line speed so no single download can hog the link. Greatly reduces lag during heavy use.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" id="qosOn" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div id="qosFields">
+          <div class="form-row"><div class="lbl">Download speed<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Your plan's download speed in Mbps. Set it to about 90–95% of your measured speed for best results.</span></span></div><div class="ctl"><input type="number" min="0" value="450" style="min-width:120px"><span class="hint">Mbps</span></div></div>
+          <div class="form-row"><div class="lbl">Upload speed<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Your plan's upload speed in Mbps (about 90–95% of measured). Correct upload is the biggest factor for call/gaming lag.</span></span></div><div class="ctl"><input type="number" min="0" value="40" style="min-width:120px"><span class="hint">Mbps</span></div></div>
+          <div class="form-row"><div class="lbl">Mode<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Simple shares the link fairly between devices. Prioritised also gives interactive traffic (calls, games, DNS) a head start.</span></span></div><div class="ctl"><select><option>Simple (fair sharing)</option><option selected>Prioritised (calls &amp; games first)</option></select></div></div>
+          <details class="adv"><summary>Advanced details</summary><div class="advb"><div class="form-row" style="border:0;padding-top:4px"><div class="lbl">WAN interface</div><div class="ctl"><input type="text" value="eth1" style="min-width:160px"></div></div><p style="margin:6px 0 0">Shaper <span class="mono">cake</span> via <span class="mono">sqm-scripts</span>, stored as a <span class="mono">config queue</span> in <span class="mono">/etc/config/sqm</span>.</p></div></details>
+        </div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="toast('Smart Queue applied (simulated)')">Apply</button></div>
+      </div></div>
+    </section>
+
+    <!-- DUAL WAN -->
+    <section class="screen" id="screen-dualwan">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Dual WAN</h1><p>Use a second internet connection for automatic backup, or share the load across both.</p></div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div class="form-row"><div class="lbl">Mode<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Failover: use the backup only when the primary goes down. Load balance: use both at once. Off: single connection as normal.</span></span></div><div class="ctl"><select id="dwMode"><option value="off">Off (single connection)</option><option value="failover" selected>Failover (backup kicks in)</option><option value="balance">Load balance (use both)</option></select></div></div>
+        <div id="dwPair">
+          <div class="form-row"><div class="lbl">Primary<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The connection used first. Health is checked by pinging 8.8.8.8 and 1.1.1.1.</span></span></div><div class="ctl"><select><option>wan (dhcp)</option><option>wan2 (dhcp)</option><option>wwan (modem)</option></select></div></div>
+          <div class="form-row"><div class="lbl">Backup<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Used only when the primary fails (failover) or shares traffic (load balance).</span></span></div><div class="ctl"><select><option>wwan (modem)</option><option>wan2 (dhcp)</option><option>wan (dhcp)</option></select></div></div>
+        </div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="toast('Dual WAN applied (simulated)')">Apply</button></div>
+      </div></div>
+      <details class="adv" style="max-width:720px"><summary>Advanced details</summary><div class="advb">Writes a clean <span class="mono">mwan3</span> config in <span class="mono">/etc/config/mwan3</span>: two tracked interfaces (ping health check), two members (equal metric = balance, stepped = failover), a policy and a catch-all rule.</div></details>
+    </section>
+
+    <!-- UPNP -->
+    <section class="screen" id="screen-upnp">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>UPnP</h1><p>Let games and apps open the ports they need automatically — no manual port forwarding.</p></div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div class="form-row"><div class="lbl">Allow automatic port opening<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Lets consoles and apps request inbound ports on demand. Convenient, but any app on your network can open a port — leave off if you don't need it.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" id="upnpOn" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-row" id="upnpSecure"><div class="lbl">Secure mode<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">A device may only open ports to itself, not redirect traffic to other devices. Recommended — keep this on.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="toast('UPnP settings applied (simulated)')">Apply</button></div>
+      </div></div>
+      <details class="adv" style="max-width:720px"><summary>Advanced details</summary><div class="advb">Toggles <span class="mono">miniupnpd-nftables</span> (UPnP IGD + NAT-PMP) via <span class="mono">/etc/config/upnpd</span>, listening on <span class="mono">lan</span> and mapping to <span class="mono">wan</span>. <b>This is the modern replacement for old-style “port triggering,”</b> which current OpenWRT (nftables) doesn't support — for a fixed service, use Port Forwarding.</div></details>
+    </section>
+
+    <!-- USB STORAGE -->
+    <section class="screen" id="screen-usb">
+      <div class="page-head"><div><div class="breadcrumb">System</div><h1>USB Storage</h1><p>Share a USB drive with your devices and stream media from it.</p></div></div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Attached storage</h2><span class="sub">1 mounted</span></div><div class="panel-b">
+        <div class="kv"><span class="l mono">/mnt/sda1</span><span class="r mono">/dev/sda1 · ext4</span></div>
+      </div></div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Network file sharing (SMB)</h2></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Share over the network<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Makes the folder below reachable at \\router (SMB) from your computers and phones.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox"><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-row"><div class="lbl">Folder</div><div class="ctl"><input type="text" value="/mnt/sda1" style="min-width:240px"></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="toast('File sharing updated (simulated)')">Apply</button></div>
+      </div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-h"><h2>Media server (DLNA)</h2></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Stream media<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Shares media to DLNA-capable TVs, consoles and apps on your network.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox"><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-row"><div class="lbl">Media folder</div><div class="ctl"><input type="text" value="/mnt/sda1/Media" style="min-width:240px"></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="toast('Media server updated (simulated)')">Apply</button></div>
+      </div></div>
+    </section>
+
+    <!-- FIRMWARE -->
+    <section class="screen" id="screen-firmware">
+      <div class="page-head"><div><div class="breadcrumb">System</div><h1>Firmware</h1><p>Install a new OpenWRT image on your router.</p></div></div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px"><div class="panel-h"><h2>Current</h2></div><div class="panel-b">
+        <div class="kv"><span class="l">Model</span><span class="r">RT-AX88U</span></div>
+        <div class="kv"><span class="l">Firmware</span><span class="r">OpenWrt 24.10.0 r28427</span></div>
+      </div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div style="display:flex;gap:11px;align-items:flex-start;background:rgba(247,144,9,.1);border:1px solid rgba(247,144,9,.35);border-radius:12px;padding:14px 16px;margin-bottom:18px;font-size:13px;line-height:1.5">
+          <svg style="width:20px;height:20px;color:var(--warn);flex:0 0 auto"><use href="#i-shield"/></svg>
+          <span><b>Flashing replaces the router's software.</b> Use only an image built for <span class="mono">RT-AX88U</span>. A wrong image can brick the device. The network drops while it reboots — do not power off.</span></div>
+        <div class="form-row"><div class="lbl">Firmware image<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The sysupgrade image for your exact model (a .bin, often named *-sysupgrade.bin). Download it from the OpenWRT firmware selector for this device.</span></span></div><div class="ctl"><label class="btn" style="cursor:pointer">Choose file<input type="file" id="fwFile" style="display:none"></label><span class="hint" id="fwName">No file chosen</span></div></div>
+        <div class="form-row" id="fwKeepRow" style="display:none"><div class="lbl">Keep settings<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">On: your configuration is preserved (recommended for a normal update). Off: a clean factory install.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" id="fwBtn" disabled>Upload &amp; verify</button></div>
+      </div></div>
+      <details class="adv" style="max-width:720px"><summary>Advanced details</summary><div class="advb">Uploads to <span class="mono">/tmp/firmware.img</span> via <span class="mono">cgi-io</span>, validates with <span class="mono">rpc-sys upgrade_test</span>, then runs <span class="mono">rpc-sys upgrade_start</span> (sysupgrade). Needs <span class="mono">rpcd-mod-rpcsys</span> and <span class="mono">cgi-io</span>.</div></details>
+    </section>
+
+    <!-- PORT FORWARDING (Open access to a device) -->
+    <section class="screen" id="screen-portfwd">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Open access to a device</h1><p>Let people on the internet reach something in your home, like a game console, camera or server.</p></div>
+        <button class="btn primary" type="button" id="pfAdd">+ Open access</button></div>
+      <div class="panel" style="max-width:840px"><div class="panel-b" id="pfBody"></div></div>
+      <details class="adv" style="max-width:840px"><summary>Advanced details</summary><div class="advb">Each item is a port-forwarding rule (DNAT) in the <span class="mono">nftables</span> firewall. Presets pick the usual external port and protocol; Custom lets you set them by hand. Your home address is <span class="mono">203.0.113.42</span>.</div></details>
+    </section>
+
+    <!-- ADMINISTRATION (config profiles + backup) -->
+    <section class="screen" id="screen-admin">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Administration</h1><p>Router name, time, password, and your saved configurations.</p></div></div>
+      <div class="panel" style="max-width:1000px;margin-bottom:18px"><div class="panel-h"><h2>General</h2></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Router name<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The hostname shown on your network and in the title bar.</span></span></div><div class="ctl"><input type="text" value="UnTangled"></div></div>
+        <div class="form-row"><div class="lbl">Time zone<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Sets the clock used for logs and schedules (like Parental Controls).</span></span></div><div class="ctl"><select><option selected>Asia/Kolkata</option><option>UTC</option><option>America/New_York</option><option>America/Los_Angeles</option><option>Europe/London</option><option>Europe/Berlin</option><option>Asia/Singapore</option><option>Australia/Sydney</option></select></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="toast('System settings applied')">Apply</button></div>
+      </div></div>
+      <div class="panel" style="max-width:1000px;margin-bottom:18px"><div class="panel-h"><h2>Router password</h2><span class="sub">for signing in to UnTangled</span></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">New password<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The router's admin login password (the same one SSH uses). Use at least 8 characters.</span></span></div><div class="ctl"><input type="password" id="admPw1" placeholder="New password"><button class="btn" type="button" onclick="var p=document.getElementById('admPw1');var s=p.type==='password';p.type=s?'text':'password';this.textContent=s?'Hide':'Show';">Show</button></div></div>
+        <div class="form-row"><div class="lbl">Confirm password</div><div class="ctl"><input type="password" id="admPw2" placeholder="Re-enter password"></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" onclick="var a=document.getElementById('admPw1').value,b=document.getElementById('admPw2').value;if(a.length<8){toast('Choose a longer password (8+ characters)');}else if(a!==b){toast('Passwords do not match');}else{document.getElementById('admPw1').value='';document.getElementById('admPw2').value='';toast('Router password changed (simulated)');}">Change password</button></div>
+      </div></div>
+      <div class="panel" style="max-width:1000px;margin-bottom:18px"><div class="panel-h"><h2>Scheduled reboot</h2><span class="sub">optional</span></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Reboot automatically<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Restart the router on a regular schedule to keep it fresh. The network drops for about a minute when it runs.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" id="schedOn"><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-row" id="schedWhen" style="display:none"><div class="lbl">When</div><div class="ctl"><select id="schedDay"><option value="*">Every day</option><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option><option value="0">Sunday</option></select><span class="hint">at</span><input type="time" id="schedTime" value="04:00"></div></div>
+        <div class="form-actions"><button class="btn primary" type="button" id="schedSave">Save schedule</button></div>
+      </div></div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));max-width:1000px">
+        <div class="panel"><div class="panel-h"><h2>Configuration profiles</h2><span class="sub" id="profCount"></span></div><div class="panel-b">
+          <div id="profList"></div>
+          <div class="ctl" style="margin-top:12px"><input type="text" id="profName" placeholder="Name this snapshot (e.g. Before changes)" style="flex:1;min-width:200px"><button class="btn primary" type="button" id="profSave">Save current</button></div>
+        </div></div>
+        <div class="panel"><div class="panel-h"><h2>Backup &amp; restore</h2></div><div class="panel-b">
+          <div class="form-row" style="grid-template-columns:1fr"><div class="lbl">Export a backup file${""}<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Downloads one file with all your settings. Keep it safe so you can restore this router, or set up a replacement exactly the same.</span></span><small>A portable copy of the whole configuration.</small></div><div class="ctl"><button class="btn" type="button" id="admExport">Export backup</button></div></div>
+          <div class="form-row" style="grid-template-columns:1fr;border:0"><div class="lbl">Restore from a backup file<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Loads settings from a backup you saved earlier. This replaces the current configuration and reloads services.</span></span></div><div class="ctl"><label class="btn" style="cursor:pointer">Choose file<input type="file" id="admImport" style="display:none"></label><span class="hint" id="admImportName">No file chosen</span></div></div>
+        </div></div>
+      </div>
+      <div class="panel" style="max-width:1000px;margin-top:18px"><div class="panel-h"><h2>Recent changes</h2><span class="sub">undo individual changes</span></div><div class="panel-b" id="changeList" style="padding-top:8px"></div></div>
+      <details class="adv" style="max-width:1000px"><summary>Advanced details</summary><div class="advb">Profiles and backups are UCI snapshots of <span class="mono">/etc/config</span>, packaged like <span class="mono">sysupgrade -b</span>. Restoring applies the saved UCI and reloads the affected services; the export is a portable <span class="mono">.tar.gz</span> of the same.</div></details>
+    </section>
+
+    <!-- EXTEND WI-FI -->
+    <section class="screen" id="screen-extend">
+      <div class="page-head"><div><div class="breadcrumb">General</div><h1>Extend Wi-Fi</h1><p>Make your Wi-Fi reach further by connecting UnTangled to a network you already have.</p></div></div>
+      <div class="panel" style="max-width:660px"><div class="panel-b" id="extBody"></div></div>
+    </section>
+
+    <!-- FIREWALL -->
+    <section class="screen" id="screen-firewall">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>Firewall</h1><p>Control how traffic is allowed between your networks and the internet.</p></div></div>
+      <div class="panel" style="margin-bottom:16px"><div class="panel-h"><h2><span class="chip">lan</span></h2><span class="sub">192.168.1.0/24</span></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Incoming<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Traffic from this zone to the router itself.</span></span></div><div class="ctl"><select><option selected>ACCEPT</option><option>REJECT</option><option>DROP</option></select></div></div>
+        <div class="form-row"><div class="lbl">Outgoing</div><div class="ctl"><select><option selected>ACCEPT</option><option>REJECT</option><option>DROP</option></select></div></div>
+        <div class="form-row"><div class="lbl">Forward</div><div class="ctl"><select><option selected>ACCEPT</option><option>REJECT</option><option>DROP</option></select></div></div>
+        <div class="form-row"><div class="lbl">Masquerade (NAT)<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Off for internal zones; on for wan so your LAN shares one public address.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox"><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-actions"><button class="btn primary" onclick="toast('Firewall zone &quot;lan&quot; applied')">Apply</button></div>
+      </div></div>
+      <div class="panel" style="margin-bottom:16px"><div class="panel-h"><h2><span class="chip">wan</span></h2><span class="sub">internet</span></div><div class="panel-b">
+        <div class="form-row"><div class="lbl">Incoming</div><div class="ctl"><select><option>ACCEPT</option><option selected>REJECT</option><option>DROP</option></select></div></div>
+        <div class="form-row"><div class="lbl">Forward</div><div class="ctl"><select><option>ACCEPT</option><option selected>REJECT</option><option>DROP</option></select></div></div>
+        <div class="form-row"><div class="lbl">Masquerade (NAT)</div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-actions"><button class="btn primary" onclick="toast('Firewall zone &quot;wan&quot; applied')">Apply</button></div>
+      </div></div>
+      <div class="panel"><div class="panel-h"><h2>Zone forwarding</h2><span class="sub">who can reach whom</span></div><div class="panel-b"><span class="chip">lan → wan</span><span class="chip">guest → wan</span></div></div>
+    </section>
+
+    <!-- DMZ -->
+    <section class="screen" id="screen-dmz">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>DMZ</h1><p>Expose a single device directly to the internet. Use only when you understand the risk.</p></div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div style="display:flex;gap:11px;align-items:flex-start;background:rgba(247,144,9,.1);border:1px solid rgba(247,144,9,.35);border-radius:12px;padding:14px 16px;margin-bottom:18px;font-size:13px;line-height:1.5">
+          <svg style="width:20px;height:20px;color:var(--warn);flex:0 0 auto"><use href="#i-shield"/></svg>
+          <span><b>This removes the firewall's protection for one device.</b> Every port reaches it from the internet. Prefer Port Forwarding for a single app.</span></div>
+        <div class="form-row"><div class="lbl">Exposed device<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">All inbound internet traffic is forwarded to this device. It should have a fixed local address.</span></span></div>
+          <div class="ctl"><select><option value="">Choose a device…</option><option>PlayStation 5 (192.168.1.133)</option><option>Work Desktop (192.168.1.101)</option></select><span class="hint">or</span><input type="text" placeholder="192.168.1.x" style="min-width:150px"></div></div>
+        <div class="form-actions" style="border:0"><button class="btn primary" onclick="toast('DMZ enabled (simulated)')">Enable DMZ</button></div>
+      </div></div>
+    </section>
+
+    <!-- LAN -->
+    <section class="screen" id="screen-lan">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>LAN</h1><p>Your home network address and the range handed out to devices.</p></div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div class="form-row"><div class="lbl">Router address<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">The router's own address, and the one you type to reach this page. Changing it disconnects you briefly.</span></span></div><div class="ctl"><input type="text" value="192.168.1.1"></div></div>
+        <div class="form-row"><div class="lbl">Subnet mask</div><div class="ctl"><input type="text" value="255.255.255.0"></div></div>
+        <div class="form-row"><div class="lbl">Hand out addresses (DHCP)<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">When on, the router automatically gives each device an address.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-row"><div class="lbl">First address</div><div class="ctl"><input type="text" value="100" style="min-width:120px"></div></div>
+        <div class="form-row"><div class="lbl">Pool size</div><div class="ctl"><input type="text" value="150" style="min-width:120px"></div></div>
+        <div class="form-row"><div class="lbl">Lease time</div><div class="ctl"><input type="text" value="12h" style="min-width:120px"></div></div>
+        <div class="form-actions"><button class="btn primary" onclick="toast('LAN settings applied')">Apply</button></div>
+      </div></div>
+    </section>
+
+    <!-- IPv6 -->
+    <section class="screen" id="screen-ipv6">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>IPv6</h1><p>The newer internet addressing, alongside IPv4.</p></div></div>
+      <div class="panel" style="max-width:720px"><div class="panel-b">
+        <div class="form-row"><div class="lbl">IPv6 on the internet connection<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Turn off only if your ISP has no IPv6 or it causes trouble.</span></span></div><div class="ctl"><label class="toggle"><input type="checkbox" checked><span class="track"></span><span class="knob"></span></label></div></div>
+        <div class="form-row"><div class="lbl">Hand out IPv6 to devices<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Server: the router advertises IPv6 and runs DHCPv6. Relay: pass the ISP's IPv6 through. Off: no IPv6 on the LAN.</span></span></div><div class="ctl"><select><option selected>Server (recommended)</option><option>Relay</option><option>Off</option></select></div></div>
+        <div class="form-actions"><button class="btn primary" onclick="toast('IPv6 settings applied')">Apply</button></div>
+      </div></div>
+    </section>
+
+    <!-- SYSTEM LOG -->
+    <section class="screen" id="screen-log">
+      <div class="page-head"><div><div class="breadcrumb">Advanced Settings</div><h1>System Log</h1><p>Live kernel and system messages from the router.</p></div></div>
+      <div class="panel"><div class="panel-h" style="flex-wrap:wrap;gap:12px"><h2>Log</h2>
+        <div style="display:flex;gap:10px;align-items:center;margin-left:auto;flex-wrap:wrap">
+          <input type="text" placeholder="Filter messages…" style="min-width:180px">
+          <select><option>All levels</option><option>Warnings &amp; errors</option><option>Errors only</option></select>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-dim)"><input type="checkbox" checked> Follow</label>
+        </div></div>
+        <div style="max-height:58vh;overflow:auto;padding:6px 0" class="mono" id="logbox"></div>
+      </div>
+    </section>
+
+    <!-- STUBS -->
+    <section class="screen" id="screen-stub">
+      <div class="page-head"><div><div class="breadcrumb" id="stubCrumb">Advanced Settings</div><h1 id="stubTitle">Section</h1></div></div>
+      <div class="panel"><div class="stub">
+        <div class="ic"><svg id="stubIcon"><use href="#i-admin"/></svg></div>
+        <h3 id="stubName">Section</h3>
+        <p id="stubDesc"></p>
+        <div class="note">Prototype shell · backend wiring comes in the on-device build</div>
+      </div></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="overlay" id="rebootModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rbTitle">
+    <h3 id="rbTitle">Reboot router?</h3>
+    <p>The router will restart. Your internet connection and all Wi-Fi devices will drop for about 60 seconds.</p>
+    <div class="row"><button class="btn" id="rbCancel">Cancel</button><button class="btn primary" id="rbOk">Reboot now</button></div>
+  </div>
+</div>
+<div class="overlay" id="addIfaceModal">
+  <div class="modal" style="width:min(580px,94vw)" role="dialog" aria-modal="true" aria-labelledby="aiTitle">
+    <h3 id="aiTitle">Add an interface</h3>
+    <p>These types don't auto-detect — you create them. A type is available only if its handler package is installed.</p>
+    <div id="ifaceTypeList"></div>
+    <div class="row" style="margin-top:18px"><button class="btn" id="aiClose">Close</button></div>
+  </div>
+</div>
+<div class="overlay" id="qrModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="qrTitle">
+    <h3 id="qrTitle">Connect device</h3>
+    <div id="qrBody"></div>
+    <div class="row" style="margin-top:18px"><button class="btn primary" id="qrDone">Done</button></div>
+  </div>
+</div>
+<div class="overlay top" id="cmdModal">
+  <div class="cmdbox" role="dialog" aria-modal="true" aria-label="Search UnTangled">
+    <div class="cmd-in"><svg><use href="#i-search"/></svg><input type="text" id="cmdInput" placeholder="Search settings, devices and actions…" autocomplete="off" spellcheck="false"></div>
+    <div id="cmdResults" class="cmd-results"></div>
+    <div class="cmd-foot"><span><b>↑↓</b> move</span><span><b>↵</b> open</span><span><b>esc</b> close</span></div>
+  </div>
+</div>
+<div class="overlay" id="pfModal">
+  <div class="modal" style="width:min(560px,94vw)" role="dialog" aria-modal="true" aria-labelledby="pfTitle">
+    <h3 id="pfTitle">Open access to a device</h3>
+    <div id="pfModalBody"></div>
+    <div class="row" style="margin-top:18px"><button class="btn" id="pfCancel">Cancel</button><button class="btn primary" id="pfCreate">Open access</button></div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+"use strict";
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $=id=>document.getElementById(id);
+/* reusable per-field help: a focusable "?" with a hover/focus tooltip */
+function help(t){return `<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">${t}</span></span>`;}
+
+/* ---------- Theme ---------- */
+const THEME_KEY="untangled-theme";
+function setTheme(t){
+  document.documentElement.setAttribute("data-theme",t);
+  $("themeIcon").innerHTML=`<use href="#${t==="dark"?"i-sun":"i-moon"}"/>`;
+  try{localStorage.setItem(THEME_KEY,t);}catch(e){}
+  if(window._chartReady) drawChart();
+}
+$("themeBtn").addEventListener("click",()=>{
+  setTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");
+});
+
+/* ---------- Data ---------- */
+const clients = [
+  {id:"mac",   name:"MacBook Pro",     type:"d-laptop",  ip:"192.168.1.102", mac:"A4:83:E7:2C:19:F0", band:"5",    sig:4, down:"118 Mbps", dl:"9.4 GB", ul:"2.1 GB", vendor:"Apple, Inc."},
+  {id:"iph",   name:"iPhone 15 Pro",   type:"d-phone",   ip:"192.168.1.145", mac:"F0:18:98:3D:7A:52", band:"5",    sig:3, down:"44 Mbps",  dl:"6.8 GB", ul:"1.3 GB", vendor:"Apple, Inc."},
+  {id:"tv",    name:"Living Room TV",  type:"d-tv",      ip:"192.168.1.110", mac:"20:DF:B9:04:C1:88", band:"wired",sig:4, down:"211 Mbps", dl:"14.2 GB",ul:"0.4 GB", vendor:"LG Electronics"},
+  {id:"ps5",   name:"PlayStation 5",   type:"d-game",    ip:"192.168.1.133", mac:"BC:60:A7:9E:22:10", band:"wired",sig:4, down:"96 Mbps",  dl:"7.1 GB", ul:"0.9 GB", vendor:"Sony Interactive"},
+  {id:"echo",  name:"Echo Dot",        type:"d-speaker", ip:"192.168.1.151", mac:"44:65:0D:A1:B7:3C", band:"24",   sig:2, down:"0.3 Mbps", dl:"0.2 GB", ul:"0.1 GB", vendor:"Amazon Technologies"},
+  {id:"desk",  name:"Work Desktop",    type:"d-desktop", ip:"192.168.1.101", mac:"3C:7C:3F:59:0E:A4", band:"wired",sig:4, down:"33 Mbps",  dl:"3.3 GB", ul:"1.7 GB", vendor:"ASUSTek"},
+  {id:"ipad",  name:"iPad Air",        type:"d-tablet",  ip:"192.168.1.148", mac:"8C:85:90:11:4D:E9", band:"5",    sig:3, down:"28 Mbps",  dl:"1.9 GB", ul:"0.3 GB", vendor:"Apple, Inc."},
+  {id:"print", name:"Office Printer",  type:"d-printer", ip:"192.168.1.160", mac:"30:CD:A7:72:88:1B", band:"24",   sig:1, down:"0.0 Mbps", dl:"0.1 GB", ul:"0.0 GB", vendor:"HP Inc."},
+];
+const bandName={"5":"5 GHz","24":"2.4 GHz","wired":"Wired"};
+const bandStroke={"5":"#0fb5c4","24":"#f79009","wired":"#17b26a"};
+const bandClass={"5":"b5","24":"b24","wired":"bwired"};
+
+/* ---------- Topology ---------- */
+function buildTopology(){
+  const links=$("links"), nodes=$("clientNodes");
+  links.innerHTML=`<line class="link ilink" x1="400" y1="82" x2="400" y2="165" stroke-width="2.5"/>`;
+  nodes.innerHTML="";
+  const n=clients.length, spread=720, startX=400-spread/2, y=358;
+  clients.forEach((c,i)=>{
+    const x=n===1?400:startX+(spread/(n-1))*i;
+    links.insertAdjacentHTML("beforeend",`<path class="link" d="M400,245 C400,320 ${x},285 ${x},${y-30}" stroke="${bandStroke[c.band]}" stroke-width="2.5"/>`);
+    nodes.insertAdjacentHTML("beforeend",
+      `<g class="node" data-id="${c.id}" tabindex="0" role="button" aria-label="${c.name}">
+         <circle class="nbg" cx="${x}" cy="${y}" r="26"/>
+         <use href="#${c.type}" x="${x-14}" y="${y-14}" width="28" height="28" color="${bandStroke[c.band]}"/>
+         <text class="nlabel" x="${x}" y="${y+44}" text-anchor="middle" font-size="11">${c.name.split(' ')[0]}</text>
+       </g>`);
+  });
+  document.querySelectorAll("#topo .node").forEach(g=>{
+    const act=()=>selectDevice(g.dataset.id,g);
+    g.addEventListener("click",act);
+    g.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();act();}});
+  });
+}
+function selectDevice(id,gEl){
+  document.querySelectorAll("#topo .node").forEach(n=>n.classList.remove("sel"));
+  const body=$("detailBody"), title=$("detailTitle");
+  if(gEl) gEl.classList.add("sel"); else { const g=document.querySelector(`#topo .node[data-id="${id}"]`); if(g)g.classList.add("sel"); }
+  if(id==="router"){ title.textContent="This Router";
+    body.innerHTML=`<div class="big"><div class="devicon"><svg><use href="#d-router"/></svg></div><div><b>RT-AX88U</b><div class="m">AX6000 · Wireless Router mode</div></div></div>
+      <div class="kv"><span class="l">Firmware</span><span class="r">UnTangled 1.0-beta</span></div>
+      <div class="kv"><span class="l">LAN IP</span><span class="r">192.168.1.1</span></div>
+      <div class="kv"><span class="l">WAN IP</span><span class="r">203.0.113.42</span></div>
+      <div class="kv"><span class="l">Uptime</span><span class="r">6d 14h 09m</span></div>
+      <div class="kv"><span class="l">Clients</span><span class="r">${clients.length} online</span></div>`; return; }
+  if(id==="internet"){ title.textContent="Internet";
+    body.innerHTML=`<div class="big"><div class="devicon"><svg><use href="#d-cloud"/></svg></div><div><b>WAN · Connected</b><div class="m">DHCP · 1 Gbps fiber</div></div></div>
+      <div class="kv"><span class="l">Public IP</span><span class="r">203.0.113.42</span></div>
+      <div class="kv"><span class="l">Gateway</span><span class="r">203.0.113.1</span></div>
+      <div class="kv"><span class="l">DNS</span><span class="r">1.1.1.1 · 9.9.9.9</span></div>
+      <div class="kv"><span class="l">Latency</span><span class="r">8 ms</span></div>`; return; }
+  const c=clients.find(x=>x.id===id); if(!c) return;
+  title.textContent="Device";
+  const bars=[1,2,3,4].map(nn=>`<i class="${nn<=c.sig?'on':''}" style="height:${nn*3+2}px"></i>`).join("");
+  body.innerHTML=`<div class="big"><div class="devicon"><svg><use href="#${c.type}"/></svg></div><div><b>${c.name}</b><div class="m">${c.vendor}</div></div></div>
+    <div class="kv"><span class="l">Connection</span><span class="r"><span class="bandchip ${bandClass[c.band]}">${bandName[c.band]}</span></span></div>
+    <div class="kv"><span class="l">IP address</span><span class="r">${c.ip}</span></div>
+    <div class="kv"><span class="l">MAC</span><span class="r">${c.mac}</span></div>
+    <div class="kv"><span class="l">Signal</span><span class="r"><span class="sig">${bars}</span></span></div>
+    <div class="kv"><span class="l">Live download</span><span class="r">${c.down}</span></div>
+    <div class="kv"><span class="l">Today ↓ / ↑</span><span class="r">${c.dl} / ${c.ul}</span></div>
+    <div style="display:flex;gap:8px;margin-top:16px"><button class="btn" style="flex:1" onclick="toast('Blocked ${c.name} (simulated)')">Block</button><button class="btn" style="flex:1" onclick="toast('Prioritized ${c.name} (simulated)')">Prioritize</button></div>`;
+}
+
+/* ---------- Client table ---------- */
+function buildClientTable(){
+  const tb=$("clientRows"); tb.innerHTML="";
+  clients.forEach(c=>{
+    const bars=[1,2,3,4].map(nn=>`<i class="${nn<=c.sig?'on':''}" style="height:${nn*3+2}px"></i>`).join("");
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td><div class="cname"><span class="mi"><svg><use href="#${c.type}"/></svg></span><span><b>${c.name}</b><small>${c.mac}</small></span></div></td>
+      <td class="mono">${c.ip}</td><td><span class="bandchip ${bandClass[c.band]}">${bandName[c.band]}</span></td>
+      <td><span class="sig">${bars}</span></td><td class="mono">${c.down}</td>`;
+    tr.addEventListener("click",()=>{navTo("map");selectDevice(c.id);$("detailPanel").scrollIntoView({block:"nearest"});});
+    tb.appendChild(tr);
+  });
+  $("clientCount").textContent=clients.length+" devices";
+  $("tileClients").innerHTML=clients.length+' <small>online</small>';
+}
+
+/* ---------- Top talkers ---------- */
+function buildTalkers(){
+  const rows=$("talkerRows"); rows.innerHTML="";
+  const sorted=[...clients].sort((a,b)=>parseFloat(b.dl)-parseFloat(a.dl));
+  const max=parseFloat(sorted[0].dl)||1;
+  sorted.forEach(c=>{
+    const pct=Math.round(parseFloat(c.dl)/max*100);
+    rows.insertAdjacentHTML("beforeend",`<tr><td><div class="cname"><span class="mi"><svg><use href="#${c.type}"/></svg></span><b>${c.name}</b></div></td><td class="mono">${c.dl}</td><td class="mono">${c.ul}</td><td><div class="bar"><i style="width:${pct}%"></i></div></td></tr>`);
+  });
+}
+
+/* ---------- Parental controls ---------- */
+const DAYS=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+const pcDevices=clients.slice(0,6).map((c,i)=>({...c,
+  paused:false, filter:i===1?"Strict":i===6?"Moderate":"None",
+  days:[true,true,true,true,true,i>3,i>3], from:"07:00", to:i<2?"20:30":"22:00"}));
+let pcSel="iph";
+function pcStatus(d){ if(d.paused)return['Paused','st-paused']; if(d.days.filter(x=>x).length<7)return['Scheduled','st-sched']; return['Allowed','st-ok']; }
+function buildParental(){
+  const list=$("pcList"); list.innerHTML=""; $("pcCount").textContent=pcDevices.length+" managed";
+  pcDevices.forEach(d=>{
+    const [txt,cls]=pcStatus(d);
+    const row=document.createElement("div");
+    row.className="dev-row"+(d.id===pcSel?" sel":""); row.dataset.id=d.id;
+    row.innerHTML=`<span class="mi"><svg><use href="#${d.type}"/></svg></span><span class="nm"><b>${d.name}</b><small>${d.ip}</small></span><span class="statechip ${cls}">${txt}</span>`;
+    row.addEventListener("click",()=>{pcSel=d.id;buildParental();pcEditor();});
+    list.appendChild(row);
+  });
+}
+function pcEditor(){
+  const d=pcDevices.find(x=>x.id===pcSel); const box=$("pcEditor").querySelector(".panel-b");
+  const dayBtns=DAYS.map((n,i)=>`<button class="day ${d.days[i]?'on':''}" data-day="${i}">${n}</button>`).join("");
+  box.innerHTML=`
+    <div class="big" style="display:flex;gap:13px;align-items:center;padding-bottom:16px;border-bottom:1px solid var(--line-soft);margin-bottom:4px">
+      <div class="devicon"><svg><use href="#${d.type}"/></svg></div><div><b style="font-size:15px">${d.name}</b><div class="hint">${d.mac} · ${bandName[d.band]}</div></div>
+      <button class="btn ${d.paused?'':'primary'}" id="pcPause" style="margin-left:auto">
+        <svg style="width:15px;height:15px"><use href="#${d.paused?'i-play':'i-pause'}"/></svg> ${d.paused?'Resume internet':'Pause internet'}</button>
+    </div>
+    <div class="form-row"><div class="lbl">Allowed days${help("Days this device is allowed online. Unticked days block it all day.")}<small>Internet is on for this device</small></div><div class="ctl"><div class="days" id="pcDays">${dayBtns}</div></div></div>
+    <div class="form-row"><div class="lbl">Allowed hours${help("The daily window when internet is allowed. Outside it, this device cannot reach the internet.")}<small>Outside this window, access is blocked</small></div><div class="ctl"><input type="time" id="pcFrom" value="${d.from}"> <span class="hint">to</span> <input type="time" id="pcTo" value="${d.to}"></div></div>
+    <div class="form-row"><div class="lbl">Content filter${help("Blocks categories of sites for this device via DNS. Moderate blocks adult content; Strict also enforces Safe Search.")}</div><div class="ctl"><select id="pcFilter"><option ${d.filter==='None'?'selected':''}>None</option><option ${d.filter==='Moderate'?'selected':''}>Moderate</option><option ${d.filter==='Strict'?'selected':''}>Strict</option></select></div></div>
+    <div class="form-actions"><button class="btn primary" id="pcSave"><svg style="width:15px;height:15px"><use href="#i-check"/></svg> Save schedule</button></div>`;
+  box.querySelectorAll("[data-day]").forEach(b=>b.addEventListener("click",()=>{
+    const i=+b.dataset.day; d.days[i]=!d.days[i]; b.classList.toggle("on",d.days[i]); buildParental();
+  }));
+  $("pcPause").addEventListener("click",()=>{d.paused=!d.paused;buildParental();pcEditor();toast((d.paused?'Paused':'Resumed')+" internet · "+d.name);});
+  $("pcFrom").addEventListener("change",e=>d.from=e.target.value);
+  $("pcTo").addEventListener("change",e=>d.to=e.target.value);
+  $("pcFilter").addEventListener("change",e=>d.filter=e.target.value);
+  $("pcSave").addEventListener("click",()=>toast("Schedule saved · "+d.name));
+}
+
+/* ---------- WAN wizard ----------
+   Mirrors how the real on-device build would behave:
+   - devices come from a live source (mock of `ubus network.device status`)
+   - protocols come from installed handler packages (mock of /lib/netifd/proto + luci-proto-*) */
+const wiz={step:1,dev:"eth1",proto:"dhcp"};
+let wanDevices=[{id:"eth1",name:"Ethernet WAN port",kind:"ethernet",link:"up",driver:"built-in"}];
+let installedProtos=["dhcp","pppoe","static"];
+const protoCatalog={
+ dhcp:{label:"Automatic (DHCP)",pkg:"built-in",kinds:["ethernet"],icon:"i-wan",desc:"Your provider assigns the address automatically. Most common."},
+ pppoe:{label:"PPPoE",pkg:"luci-proto-ppp",kinds:["ethernet"],icon:"i-plug",desc:"DSL / fiber needing a username and password."},
+ static:{label:"Static IP",pkg:"built-in",kinds:["ethernet"],icon:"i-lan",desc:"A fixed address your ISP gave you."},
+ qmi:{label:"QMI (cellular)",pkg:"luci-proto-qmi",kinds:["cellular"],icon:"i-wan",desc:"LTE / 5G modems using the QMI control protocol."},
+ mbim:{label:"MBIM (cellular)",pkg:"luci-proto-mbim",kinds:["cellular"],icon:"i-wan",desc:"LTE modems using the MBIM protocol."},
+};
+const devIcon={ethernet:"i-lan",cellular:"i-wan"};
+function firstProtoFor(devId){
+  const d=wanDevices.find(x=>x.id===devId); const kind=d?d.kind:"ethernet";
+  return Object.keys(protoCatalog).find(p=>protoCatalog[p].kinds.includes(kind)&&installedProtos.includes(p))||null;
+}
+function renderWanDevices(){
+  const box=$("wanDevices"); box.innerHTML="";
+  wanDevices.forEach(d=>{
+    const lk=d.link==="up"?'<span class="linkchip link-up">link up</span>':'<span class="linkchip link-down">no link</span>';
+    box.insertAdjacentHTML("beforeend",
+     `<div class="devrow2 ${d.id===wiz.dev?'sel':''}" data-dev="${d.id}" tabindex="0" role="button">
+        <span class="ic"><svg><use href="#${devIcon[d.kind]}"/></svg></span>
+        <span class="dn"><b>${d.name}</b><small>${d.id} · driver: ${d.driver}</small></span>
+        ${lk}<span class="rdot"></span></div>`);
+  });
+  box.querySelectorAll("[data-dev]").forEach(r=>{
+    const pick=()=>{wiz.dev=r.dataset.dev;wiz.proto=firstProtoFor(wiz.dev);renderWanDevices();};
+    r.addEventListener("click",pick);
+    r.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();pick();}});
+  });
+}
+function detectBanner(id,name){
+  $("wanDetectBanner").innerHTML=`<div class="detectbar"><svg><use href="#i-check"/></svg><span><b>New interface detected: <span class="mono">${id}</span></b> — ${name}. It appeared automatically from a hotplug event, no reboot.</span><button class="btn primary" style="margin-left:auto;padding:6px 13px" id="useDetected">Use for internet</button></div>`;
+  $("useDetected").addEventListener("click",()=>{wiz.dev=id;wiz.proto=firstProtoFor(id);renderWanDevices();toast("Selected "+id+" as the WAN device");});
+}
+function addDevice(dev,label){
+  if(wanDevices.some(d=>d.id===dev.id)){toast(label+" already connected");return;}
+  wanDevices.push(dev); detectBanner(dev.id,dev.name); renderWanDevices();
+}
+$("simRndis").addEventListener("click",()=>addDevice({id:"usb0",name:"USB tether (RNDIS)",kind:"ethernet",link:"up",driver:"kmod-usb-net-rndis"},"USB tether"));
+$("simDongle").addEventListener("click",()=>addDevice({id:"eth2",name:"USB-Ethernet adapter",kind:"ethernet",link:"up",driver:"kmod-usb-net-asix"},"USB-Ethernet adapter"));
+$("simLte").addEventListener("click",()=>addDevice({id:"wwan0",name:"LTE modem",kind:"cellular",link:"up",driver:"kmod-usb-net-qmi-wwan"},"LTE modem"));
+function renderWanProtos(){
+  const box=$("wanProtos"); box.innerHTML="";
+  const d=wanDevices.find(x=>x.id===wiz.dev); const kind=d?d.kind:"ethernet";
+  box.insertAdjacentHTML("beforeend",`<div class="hint" style="margin-bottom:14px">Protocols for <b>${d?d.name:''}</b> (<span class="mono">${wiz.dev}</span>). The list reflects the protocol handler packages installed on the router.</div>`);
+  Object.keys(protoCatalog).filter(p=>protoCatalog[p].kinds.includes(kind)).forEach(p=>{
+    const c=protoCatalog[p];
+    if(installedProtos.includes(p)){
+      box.insertAdjacentHTML("beforeend",`<div class="rcard ${wiz.proto===p?'sel':''}" data-proto="${p}"><div class="ic"><svg><use href="#${c.icon}"/></svg></div><div><div class="rt">${c.label}</div><div class="rd">${c.desc}</div></div><span class="rdot"></span></div>`);
+    }else{
+      box.insertAdjacentHTML("beforeend",`<div class="rcard proto-un"><div class="ic"><svg><use href="#${c.icon}"/></svg></div><div><div class="rt">${c.label} <span class="statechip st-sched">not installed</span></div><div class="rd">${c.desc} Needs <span class="mono">${c.pkg}</span>.</div></div><button class="btn" style="margin-left:auto;padding:7px 13px" data-install="${p}">Install</button></div>`);
+    }
+  });
+  box.querySelectorAll("[data-proto]").forEach(r=>r.addEventListener("click",()=>{wiz.proto=r.dataset.proto;renderWanProtos();}));
+  box.querySelectorAll("[data-install]").forEach(b=>b.addEventListener("click",()=>{
+    const p=b.dataset.install; installedProtos.push(p); wiz.proto=p;
+    toast("Installed "+protoCatalog[p].pkg+" (simulated)"); renderWanProtos();
+  }));
+}
+function wizFields(){
+  const p=wiz.proto;
+  if(p==="dhcp") return `<div class="hint" style="padding:8px 0 16px">Nothing to enter — your provider assigns everything automatically. You can optionally set a hostname.</div>
+    <div class="form-row"><div class="lbl">Hostname<small>Optional, shown to your ISP</small></div><div class="ctl"><input type="text" value="UnTangled-Router"></div></div>`;
+  if(p==="pppoe") return `
+    <div class="form-row"><div class="lbl">Username${help("The PPPoE sign-in name from your ISP, often an email-style address.")}</div><div class="ctl"><input type="text" placeholder="name@isp.net"></div></div>
+    <div class="form-row"><div class="lbl">Password</div><div class="ctl"><input type="password" placeholder="From your ISP"></div></div>
+    <div class="form-row"><div class="lbl">Service name<small>Optional</small></div><div class="ctl"><input type="text" placeholder="Leave blank unless required"></div></div>`;
+  if(p==="static") return `
+    <div class="form-row"><div class="lbl">IP address${help("The fixed public address your ISP assigned to this connection.")}</div><div class="ctl"><input type="text" placeholder="e.g. 203.0.113.42"></div></div>
+    <div class="form-row"><div class="lbl">Subnet mask</div><div class="ctl"><input type="text" value="255.255.255.0"></div></div>
+    <div class="form-row"><div class="lbl">Gateway</div><div class="ctl"><input type="text" placeholder="e.g. 203.0.113.1"></div></div>`;
+  if(p==="qmi"||p==="mbim") return `
+    <div class="form-row"><div class="lbl">APN${help("The access point name from your mobile carrier, e.g. 'internet'. Required for the SIM to get online.")}</div><div class="ctl"><input type="text" placeholder="e.g. internet"></div></div>
+    <div class="form-row"><div class="lbl">SIM PIN<small>Optional</small></div><div class="ctl"><input type="text" placeholder="PIN"></div></div>
+    <div class="form-row"><div class="lbl">Authentication</div><div class="ctl"><select><option>None</option><option>PAP</option><option>CHAP</option></select></div></div>`;
+  return `<div class="hint">Go back and choose a protocol first.</div>`;
+}
+function wizReview(){
+  const dns=$("wizDns").value, v6=$("wizV6").checked?"Enabled":"Disabled", mtu=$("wizMtu").value;
+  const d=wanDevices.find(x=>x.id===wiz.dev);
+  return `<div class="kv"><span class="l">WAN interface</span><span class="r">${wiz.dev} — ${d?d.name:''}</span></div>
+    <div class="kv"><span class="l">Protocol</span><span class="r">${wiz.proto?protoCatalog[wiz.proto].label:'—'}</span></div>
+    <div class="kv"><span class="l">DNS servers</span><span class="r">${dns}</span></div>
+    <div class="kv"><span class="l">IPv6</span><span class="r">${v6}</span></div>
+    <div class="kv"><span class="l">MTU</span><span class="r">${mtu}</span></div>
+    <div class="hint" style="padding-top:14px">Press Apply to activate these settings.</div>`;
+}
+function renderWizard(){
+  document.querySelectorAll("#stepper .step").forEach(s=>{const n=+s.dataset.s;s.classList.toggle("active",n===wiz.step);s.classList.toggle("done",n<wiz.step);});
+  ["1","2","3","4","5","done"].forEach(k=>$("wstep-"+k).classList.remove("active"));
+  if(wiz.step===1) renderWanDevices();
+  if(wiz.step===2) renderWanProtos();
+  if(wiz.step===3) $("wizFields").innerHTML=wizFields();
+  if(wiz.step===5) $("wizReview").innerHTML=wizReview();
+  $("wstep-"+wiz.step).classList.add("active");
+  $("wizBack").style.visibility=wiz.step>1?"visible":"hidden";
+  $("wizNext").textContent=wiz.step===5?"Apply":"Next";
+  $("wizNav").style.display="flex";
+}
+$("wizBack").addEventListener("click",()=>{if(wiz.step>1){wiz.step--;renderWizard();}});
+$("wizNext").addEventListener("click",()=>{
+  if(wiz.step===2 && !wiz.proto){toast("Choose a protocol to continue");return;}
+  if(wiz.step<5){wiz.step++;renderWizard();}
+  else{ ["1","2","3","4","5"].forEach(k=>$("wstep-"+k).classList.remove("active"));
+    document.querySelectorAll("#stepper .step").forEach(s=>s.classList.add("done"));
+    $("wstep-done").classList.add("active"); $("wizNav").style.display="none";
+    toast("Internet settings applied (simulated)"); }
+});
+$("wizRestart").addEventListener("click",()=>{wiz.step=1;renderWizard();});
+
+/* ---------- Wi-Fi radios (auto-detected, like NICs but via iwinfo) ---------- */
+let radios=[
+  {id:"phy0",band:"5 GHz radio",driver:"mt7915e",info:"Auto · 80 MHz"},
+  {id:"phy1",band:"2.4 GHz radio",driver:"mt7915e",info:"Auto · 20 MHz"},
+];
+function renderRadios(){
+  const box=$("radioList"); box.innerHTML="";
+  radios.forEach(r=>box.insertAdjacentHTML("beforeend",
+    `<div class="devrow2" style="cursor:default"><span class="ic"><svg><use href="#i-wifi"/></svg></span><span class="dn"><b>${r.band}</b><small>${r.id} · driver: ${r.driver}</small></span><span class="linkchip link-up">${r.info}</span></div>`));
+}
+$("simWifi").addEventListener("click",()=>{
+  if(radios.some(r=>r.id==="phy2")){toast("USB Wi-Fi adapter already connected");return;}
+  radios.push({id:"phy2",band:"2.4 GHz radio (USB)",driver:"rt2800usb",info:"Auto · 40 MHz"});
+  $("wifiDetectBanner").innerHTML=`<div class="detectbar"><svg><use href="#i-check"/></svg><span><b>New radio detected: <span class="mono">phy2</span></b> — USB Wi-Fi adapter (<span class="mono">rt2800usb</span>). Enumerated from iwinfo, no reboot.</span></div>`;
+  renderRadios();
+});
+
+/* ---------- Add interface (created, not detected; gated by installed handler) ---------- */
+const ifaceTypes=[
+  {id:"wireguard",label:"WireGuard VPN",pkg:"luci-proto-wireguard + kmod-wireguard",installed:false,icon:"i-vpn",desc:"Modern, fast VPN. You create a wg0 interface and add peers — it never auto-appears."},
+  {id:"relay",label:"Relay bridge (relayd)",pkg:"luci-proto-relay + relayd",installed:false,icon:"i-wifi",desc:"Layer-3 pseudo-bridge for repeater / client (WISP) mode, used when true WDS bridging isn't available upstream."},
+  {id:"openvpn",label:"OpenVPN tunnel",pkg:"openvpn-openssl + kmod-tun",installed:false,icon:"i-vpn",desc:"Classic SSL VPN. Creates a tun interface."},
+  {id:"vlan",label:"VLAN (802.1q)",pkg:"kmod-8021q",installed:true,icon:"i-lan",desc:"Tagged sub-interface such as eth0.10. Handler already present."},
+];
+function renderIfaceTypes(){
+  const box=$("ifaceTypeList"); box.innerHTML="";
+  ifaceTypes.forEach(t=>{
+    if(t.installed){
+      box.insertAdjacentHTML("beforeend",`<div class="rcard" style="cursor:default"><div class="ic"><svg><use href="#${t.icon}"/></svg></div><div><div class="rt">${t.label}</div><div class="rd">${t.desc}</div></div><button class="btn primary" style="margin-left:auto;padding:7px 14px" data-create="${t.id}">Create</button></div>`);
+    }else{
+      box.insertAdjacentHTML("beforeend",`<div class="rcard proto-un"><div class="ic"><svg><use href="#${t.icon}"/></svg></div><div><div class="rt">${t.label} <span class="statechip st-sched">not installed</span></div><div class="rd">${t.desc} Needs <span class="mono">${t.pkg}</span>.</div></div><button class="btn" style="margin-left:auto;padding:7px 14px" data-inst="${t.id}">Install</button></div>`);
+    }
+  });
+  box.querySelectorAll("[data-inst]").forEach(b=>b.addEventListener("click",()=>{const t=ifaceTypes.find(x=>x.id===b.dataset.inst);t.installed=true;toast("Installed "+t.pkg.split(' ')[0]+" (simulated)");renderIfaceTypes();}));
+  box.querySelectorAll("[data-create]").forEach(b=>b.addEventListener("click",()=>{const t=ifaceTypes.find(x=>x.id===b.dataset.create);toast("Created "+t.label+" interface (simulated)");$("addIfaceModal").classList.remove("show");}));
+}
+const aiModal=$("addIfaceModal");
+$("addIfaceBtn").addEventListener("click",()=>{renderIfaceTypes();aiModal.classList.add("show");});
+$("aiClose").addEventListener("click",()=>aiModal.classList.remove("show"));
+aiModal.addEventListener("click",e=>{if(e.target===aiModal)aiModal.classList.remove("show");});
+
+/* ---------- Extend Wi-Fi (consumer repeater flow; relayd hidden) ---------- */
+const nearby=[
+  {ssid:"HomeFiber-5G",sig:4,lock:true},
+  {ssid:"HomeFiber",sig:3,lock:true},
+  {ssid:"Neighbour 2.4G",sig:2,lock:true},
+  {ssid:"Cafe Guest",sig:1,lock:false},
+];
+const ext={step:"scan",net:null};
+function sigBars(n){return `<span class="sig" style="color:var(--accent)">`+[1,2,3,4].map(i=>`<i class="${i<=n?'on':''}" style="height:${i*3+2}px"></i>`).join("")+`</span>`;}
+function renderExtend(){
+  const b=$("extBody");
+  if(ext.step==="scan"){
+    b.innerHTML=`<div class="ext-head"><div class="devicon"><svg><use href="#i-ext"/></svg></div><div><b style="font-size:15px">Choose a network to extend</b><div class="hint">Nearby Wi-Fi networks UnTangled can see.</div></div><button class="btn" id="extRescan" style="margin-left:auto">Rescan</button></div>`
+      + nearby.map((n,i)=>`<div class="ext-net" data-net="${i}" tabindex="0" role="button">${sigBars(n.sig)}<span class="nm"><b>${n.ssid}</b></span>${n.lock?'<svg style="width:15px;height:15px;color:var(--muted)"><use href="#i-lock"/></svg>':'<span class="hint">open</span>'}</div>`).join("");
+    b.querySelectorAll("[data-net]").forEach(r=>{
+      const go=()=>{ext.net=nearby[+r.dataset.net];ext.step=ext.net.lock?"pass":"connecting";renderExtend();if(ext.step==="connecting")doConnect();};
+      r.addEventListener("click",go);
+      r.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();go();}});
+    });
+    $("extRescan").addEventListener("click",()=>toast("Scanning… found "+nearby.length+" networks"));
+  }
+  else if(ext.step==="pass"){
+    b.innerHTML=`<div class="ext-head"><div class="devicon"><svg><use href="#i-wifi"/></svg></div><div><b style="font-size:15px">Connect to ${ext.net.ssid}</b><div class="hint">Enter the password for this network.</div></div></div>
+      <div class="ctl" style="margin-bottom:4px"><input type="password" id="extPass" placeholder="Wi-Fi password" style="min-width:260px;flex:1"><button class="btn" id="extShow" type="button">Show</button></div>
+      <div class="form-actions" style="border:0;padding-top:16px"><button class="btn" id="extBack2">Back</button><button class="btn primary" id="extConnect">Connect</button></div>`;
+    $("extShow").addEventListener("click",function(){const p=$("extPass"),s=p.type==="password";p.type=s?"text":"password";this.textContent=s?"Hide":"Show";});
+    $("extBack2").addEventListener("click",()=>{ext.step="scan";renderExtend();});
+    $("extConnect").addEventListener("click",()=>{ext.step="connecting";renderExtend();doConnect();});
+  }
+  else if(ext.step==="connecting"){
+    b.innerHTML=`<div style="text-align:center;padding:44px 10px"><div class="devicon" style="width:58px;height:58px;margin:0 auto 16px"><svg><use href="#i-wifi"/></svg></div><b style="font-size:16px">Connecting to ${ext.net.ssid}…</b><div class="hint" style="margin-top:6px">This takes a few seconds.</div></div>`;
+  }
+  else if(ext.step==="done"){
+    b.innerHTML=`<div style="text-align:center"><div class="big-ic" style="margin:0 auto 12px"><svg><use href="#i-check"/></svg></div>
+        <h3 style="margin:0 0 4px;font-size:18px">Your Wi-Fi now reaches further</h3>
+        <div class="hint">Devices near UnTangled now join <b>${ext.net.ssid}</b> and get internet through it.</div></div>
+      <div class="ext-flow">
+        <div class="fn"><div class="devicon"><svg><use href="#d-router"/></svg></div>Home router<br><span class="mono">${ext.net.ssid}</span></div>
+        <span class="ar">→</span>
+        <div class="fn"><div class="devicon"><svg><use href="#i-wifi"/></svg></div>UnTangled<br>extending</div>
+        <span class="ar">→</span>
+        <div class="fn"><div class="devicon"><svg><use href="#i-clients"/></svg></div>Your devices</div>
+      </div>
+      <div style="text-align:center"><button class="btn" id="extRedo">Extend a different network</button></div>
+      <details class="adv"><summary>Advanced details</summary><div class="advb">UnTangled joined <span class="mono">${ext.net.ssid}</span> as a Wi-Fi client on <span class="mono">phy0</span>, then set up a relay bridge (<span class="mono">relayd</span>) so your wired and wireless devices share that same network — no second Wi-Fi name, no separate subnet to manage. If the upstream router supports WDS, UnTangled uses a true bridge instead. You didn't have to choose — UnTangled picked the method that works.</div></details>`;
+    $("extRedo").addEventListener("click",()=>{ext.step="scan";ext.net=null;renderExtend();});
+  }
+}
+function doConnect(){
+  const go=()=>{ext.step="done";renderExtend();toast("Connected to "+ext.net.ssid);};
+  if(reduceMotion) go(); else setTimeout(go,1100);
+}
+
+/* ---------- Network Protection (Safety) ---------- */
+const npFeatures=[
+  {id:"ads",title:"Block ads & trackers",desc:"Removes most ads and hidden trackers for every device, automatically.",on:true,note:"Blocking 61,000+ domains"},
+  {id:"malware",title:"Block dangerous sites",desc:"Stops known phishing, scam and malware websites before they load.",on:true,note:"Threat feeds updated daily"},
+  {id:"safe",title:"Safe Search",desc:"Forces Google, Bing and YouTube into their safe modes.",on:false,note:""},
+  {id:"adult",title:"Block adult content",desc:"Blocks adult websites across the whole network.",on:false,note:""},
+];
+function renderNP(){
+  const box=$("npCards"); box.innerHTML="";
+  npFeatures.forEach(f=>box.insertAdjacentHTML("beforeend",
+    `<div class="gcard ${f.on?'':'off'}"><div class="gc-top"><b>${f.title}</b><label class="toggle"><input type="checkbox" ${f.on?'checked':''} data-np="${f.id}"><span class="track"></span><span class="knob"></span></label></div><div class="hint">${f.desc}</div>${f.note?`<div class="gc-meta"><span>${f.note}</span></div>`:''}</div>`));
+  box.querySelectorAll("[data-np]").forEach(t=>t.addEventListener("change",function(){
+    const f=npFeatures.find(x=>x.id===this.dataset.np); f.on=this.checked;
+    this.closest(".gcard").classList.toggle("off",!f.on);
+    toast((f.on?"Turned on: ":"Turned off: ")+f.title);
+  }));
+}
+
+/* ---------- VPN (remote access, WireGuard hidden behind a QR) ---------- */
+function qrSvg(seed,modules=25,px=7){
+  let h=0; for(let i=0;i<seed.length;i++)h=(h*31+seed.charCodeAt(i))>>>0;
+  const rnd=()=>{h=(h*1103515245+12345)>>>0;return (h>>>16)/65535;};
+  const size=modules*px; let r=`<rect width="${size}" height="${size}" fill="#ffffff"/>`;
+  const inBox=(R,C,r0,c0)=>R>=r0&&R<r0+7&&C>=c0&&C<c0+7;
+  const finderZone=(R,C)=>inBox(R,C,0,0)||inBox(R,C,0,modules-7)||inBox(R,C,modules-7,0);
+  for(let R=0;R<modules;R++)for(let C=0;C<modules;C++){
+    if(finderZone(R,C))continue;
+    if(rnd()>0.55) r+=`<rect x="${C*px}" y="${R*px}" width="${px}" height="${px}" fill="#15282f"/>`;
+  }
+  const fp=(R,C)=>`<rect x="${C*px}" y="${R*px}" width="${7*px}" height="${7*px}" fill="#15282f"/><rect x="${(C+1)*px}" y="${(R+1)*px}" width="${5*px}" height="${5*px}" fill="#ffffff"/><rect x="${(C+2)*px}" y="${(R+2)*px}" width="${3*px}" height="${3*px}" fill="#15282f"/>`;
+  r+=fp(0,0)+fp(0,modules-7)+fp(modules-7,0);
+  return `<svg viewBox="0 0 ${size} ${size}" width="190" height="190" style="border-radius:12px;border:1px solid var(--line)" role="img" aria-label="WireGuard QR code">${r}</svg>`;
+}
+const vpn={section:"server",serverProto:"wireguard",wgOn:false,ovpnOn:false,devices:[],ovpnDevices:[],clients:[]};
+function curDevices(){ return vpn.serverProto==="wireguard"?vpn.devices:vpn.ovpnDevices; }
+function vpnSeg(){
+  return `<div class="seg" style="margin-bottom:18px">
+    <button class="${vpn.section==="server"?"active":""}" data-vsec="server">Server · let devices in</button>
+    <button class="${vpn.section==="client"?"active":""}" data-vsec="client">Client · connect out</button></div>`;
+}
+function serverView(){
+  const label=vpn.serverProto==="wireguard"?"WireGuard":"OpenVPN";
+  const port=vpn.serverProto==="wireguard"?"UDP 51820":"UDP 1194";
+  const on=vpn.serverProto==="wireguard"?vpn.wgOn:vpn.ovpnOn;
+  const protoSeg=`<div class="seg" style="margin-bottom:16px">
+    <button class="${vpn.serverProto==="wireguard"?"active":""}" data-vproto="wireguard">WireGuard</button>
+    <button class="${vpn.serverProto==="openvpn"?"active":""}" data-vproto="openvpn">OpenVPN</button></div>`;
+  if(!on) return protoSeg+`<div class="ext-head"><div class="devicon"><svg><use href="#i-vpn"/></svg></div><div><b style="font-size:15px">${label} server is off</b><div class="hint">Turn it on so your phone or laptop can reach home securely.</div></div></div><button class="btn primary" id="vpnOn" type="button">Turn on ${label}</button>`;
+  const adv=vpn.serverProto==="wireguard"
+    ? `<details class="adv"><summary>Advanced details</summary><div class="advb">WireGuard server on UDP 51820. Each device is a peer with its own keys; the QR encodes that device's config for the WireGuard app.</div></details>`
+    : `<details class="adv"><summary>Advanced details</summary><div class="advb">OpenVPN server on UDP 1194 (tun). Each device gets a signed <span class="mono">.ovpn</span> profile to import into the OpenVPN app.</div></details>`;
+  return protoSeg+`<div class="ext-head"><div class="devicon"><svg><use href="#i-vpn"/></svg></div><div><b style="font-size:15px">${label} server is on</b><div class="hint">Add each device that should be able to connect.</div></div><span class="pill" style="margin-left:auto"><span class="dot"></span> ${port}</span></div>
+    <div id="vpnList"></div>
+    <div class="ctl" style="margin-top:10px"><input type="text" id="vpnName" placeholder="Device name (e.g. My phone)" style="flex:1;min-width:220px"><button class="btn primary" id="vpnAdd" type="button">Add device</button></div>${adv}`;
+}
+function clientView(){
+  const rows=vpn.clients.length
+    ? vpn.clients.map((c,i)=>`<div class="devrow2" style="cursor:default"><span class="ic"><svg><use href="#i-vpn"/></svg></span><span class="dn"><b>${c.name}</b><small>${c.proto==="wireguard"?"WireGuard":"OpenVPN"} · ${c.status}</small></span><label class="toggle"><input type="checkbox" ${c.status==="connected"?"checked":""} data-vconn="${i}"><span class="track"></span><span class="knob"></span></label><button class="btn" style="padding:6px 12px;margin-left:8px" data-vcdel="${i}">Remove</button></div>`).join("")
+    : `<div class="hint" style="padding:6px 0 10px">No VPN connections yet. Add one to route this router's traffic through a provider.</div>`;
+  return `<div class="ext-head"><div class="devicon"><svg><use href="#i-vpn"/></svg></div><div><b style="font-size:15px">Connect to a VPN provider</b><div class="hint">This router dials out as a client. Turn a connection on to route traffic through it.</div></div></div>
+    <div id="vpnClientList">${rows}</div>
+    <div style="border-top:1px solid var(--line-soft);margin-top:14px;padding-top:14px">
+      <div class="form-row" style="grid-template-columns:140px 1fr;padding:10px 0"><div class="lbl">Name</div><div class="ctl"><input type="text" id="vpnCName" placeholder="e.g. Office VPN"></div></div>
+      <div class="form-row" style="grid-template-columns:140px 1fr;padding:10px 0"><div class="lbl">Type</div><div class="ctl"><select id="vpnCProto"><option value="wireguard">WireGuard config</option><option value="openvpn">OpenVPN (.ovpn)</option></select></div></div>
+      <div class="form-row" style="grid-template-columns:140px 1fr;padding:10px 0;border:0"><div class="lbl">Config<span class="help" tabindex="0" role="note" aria-label="Help">?<span class="tip">Import the file your provider gave you, or paste a WireGuard config.</span></span></div><div class="ctl"><label class="btn" style="cursor:pointer">Import file<input type="file" style="display:none"></label><span class="hint">or paste the config</span></div></div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn primary" id="vpnCAdd" type="button">Add connection</button></div>
+    </div>
+    <details class="adv"><summary>Advanced details</summary><div class="advb">Client connections are WireGuard interfaces or OpenVPN (tun) client profiles in <span class="mono">/etc/config/network</span>. You can route all traffic, or only certain devices, through a connection.</div></details>`;
+}
+function renderVpn(){
+  const b=$("vpnBody");
+  b.innerHTML=vpnSeg()+(vpn.section==="server"?serverView():clientView());
+  document.querySelectorAll("[data-vsec]").forEach(x=>x.onclick=()=>{vpn.section=x.dataset.vsec;renderVpn();});
+  document.querySelectorAll("[data-vproto]").forEach(x=>x.onclick=()=>{vpn.serverProto=x.dataset.vproto;renderVpn();});
+  const on=$("vpnOn"); if(on) on.onclick=()=>{ if(vpn.serverProto==="wireguard")vpn.wgOn=true; else vpn.ovpnOn=true; renderVpn(); toast((vpn.serverProto==="wireguard"?"WireGuard":"OpenVPN")+" server is on"); };
+  const add=$("vpnAdd"); if(add) add.onclick=()=>{ const n=($("vpnName").value||"").trim()||("Device "+(curDevices().length+1)); const d={name:n,created:"just now"}; curDevices().push(d); renderVpn(); if(vpn.serverProto==="wireguard") showQr(d); else toast("Exported "+n+".ovpn (simulated)"); };
+  renderVpnList();
+  const cadd=$("vpnCAdd"); if(cadd) cadd.onclick=()=>{ const n=($("vpnCName").value||"").trim()||"VPN connection"; const p=$("vpnCProto").value; vpn.clients.push({name:n,proto:p,status:"disconnected"}); renderVpn(); toast("Added "+n); };
+  document.querySelectorAll("[data-vconn]").forEach(x=>x.onchange=()=>{ const c=vpn.clients[+x.dataset.vconn]; c.status=x.checked?"connected":"disconnected"; toast(c.name+" "+c.status); });
+  document.querySelectorAll("[data-vcdel]").forEach(x=>x.onclick=()=>{ const n=vpn.clients[+x.dataset.vcdel].name; vpn.clients.splice(+x.dataset.vcdel,1); renderVpn(); toast("Removed "+n); });
+}
+function renderVpnList(){
+  const l=$("vpnList"); if(!l)return;
+  const ds=curDevices(), wg=vpn.serverProto==="wireguard";
+  if(!ds.length){l.innerHTML=`<div class="hint" style="padding:6px 0 10px">No devices yet. Add one — you'll get a ${wg?"QR code to scan":"config file to import"}.</div>`;return;}
+  l.innerHTML=ds.map((d,i)=>`<div class="devrow2" style="cursor:default"><span class="ic"><svg><use href="#d-phone"/></svg></span><span class="dn"><b>${d.name}</b><small>added ${d.created}</small></span><button class="btn" style="padding:6px 12px" data-vdev="${i}">${wg?"Show QR":"Export .ovpn"}</button><button class="btn" style="padding:6px 12px" data-vddel="${i}">Remove</button></div>`).join("");
+  l.querySelectorAll("[data-vdev]").forEach(x=>x.onclick=()=>{ const d=curDevices()[+x.dataset.vdev]; if(wg) showQr(d); else toast("Exported "+d.name+".ovpn (simulated)"); });
+  l.querySelectorAll("[data-vddel]").forEach(x=>x.onclick=()=>{ const ds2=curDevices(); const n=ds2[+x.dataset.vddel].name; ds2.splice(+x.dataset.vddel,1); renderVpn(); toast("Removed "+n); });
+}
+function showQr(d){
+  $("qrTitle").textContent="Connect "+d.name;
+  $("qrBody").innerHTML=`<div style="text-align:center">${qrSvg("untangled-"+d.name+"-wg-peer")}</div><p class="hint" style="text-align:center;margin:14px 0 0;line-height:1.6">Open the <b>WireGuard</b> app on ${d.name} and scan this code. It can then reach your home network from anywhere.</p>`;
+  $("qrModal").classList.add("show");
+}
+$("qrDone").addEventListener("click",()=>$("qrModal").classList.remove("show"));
+$("qrModal").addEventListener("click",e=>{if(e.target===$("qrModal"))$("qrModal").classList.remove("show");});
+
+/* ---------- Port forwarding (Open access to a device) ---------- */
+const pfPresets={
+  game:{label:"Game console",port:3074,proto:"TCP/UDP",icon:"d-game"},
+  camera:{label:"Security camera",port:8080,proto:"TCP",icon:"d-tv"},
+  web:{label:"Web server",port:443,proto:"TCP",icon:"d-desktop"},
+  remote:{label:"Remote desktop",port:3389,proto:"TCP",icon:"d-desktop"},
+  custom:{label:"Custom",port:0,proto:"TCP",icon:"i-lan"},
+};
+let pfRules=[{preset:"game",dev:"ps5",port:3074,on:true}];
+function renderPf(){
+  const b=$("pfBody");
+  if(!pfRules.length){b.innerHTML=`<div class="hint" style="padding:8px 0">Nothing is open yet. Press “Open access” to let a device be reached from the internet.</div>`;return;}
+  b.innerHTML=pfRules.map((r,i)=>{
+    const p=pfPresets[r.preset], c=clients.find(x=>x.id===r.dev);
+    return `<div class="devrow2" style="cursor:default"><span class="ic"><svg><use href="#${p.icon}"/></svg></span>
+      <span class="dn"><b>${c?c.name:"Device"} — ${p.label}</b><small>reachable at 203.0.113.42:${r.port} · ${c?c.ip:""}</small></span>
+      <label class="toggle"><input type="checkbox" ${r.on?"checked":""} data-pfon="${i}"><span class="track"></span><span class="knob"></span></label>
+      <button class="btn" style="padding:6px 12px;margin-left:8px" data-pfdel="${i}">Remove</button></div>`;
+  }).join("");
+  b.querySelectorAll("[data-pfon]").forEach(t=>t.addEventListener("change",function(){pfRules[+this.dataset.pfon].on=this.checked;toast(this.checked?"Access opened":"Access paused");}));
+  b.querySelectorAll("[data-pfdel]").forEach(bt=>bt.addEventListener("click",()=>{pfRules.splice(+bt.dataset.pfdel,1);renderPf();toast("Access removed");}));
+}
+const pfState={preset:"game",dev:clients[0].id,port:3074,proto:"TCP/UDP"};
+function renderPfModal(){
+  const body=$("pfModalBody");
+  const presets=Object.keys(pfPresets).map(k=>`<button type="button" class="day" style="width:auto;height:auto;padding:9px 13px;${pfState.preset===k?"border-color:var(--accent);background:var(--accent-soft);color:var(--accent-deep)":""}" data-pfpreset="${k}">${pfPresets[k].label}</button>`).join("");
+  const devOpts=clients.map(c=>`<option value="${c.id}" ${pfState.dev===c.id?"selected":""}>${c.name} (${c.ip})</option>`).join("");
+  const tail = pfState.preset==="custom"
+    ? `<div class="form-row"><div class="lbl">Port${help("The external port number people connect to. 1&ndash;65535, and not already used by another rule.")}</div><div class="ctl"><input type="text" id="pfPort" value="${pfState.port||""}" style="min-width:120px"></div></div><div class="form-row"><div class="lbl">Protocol${help("TCP suits most apps. Use UDP for some games/VoIP, or TCP/UDP to cover both.")}</div><div class="ctl"><select id="pfProto"><option>TCP</option><option>UDP</option><option selected>TCP/UDP</option></select></div></div>`
+    : `<div class="hint" style="padding:12px 0 2px">People will reach it at <b class="mono">203.0.113.42:${pfPresets[pfState.preset].port}</b> (${pfPresets[pfState.preset].proto}).</div>`;
+  body.innerHTML=`<p style="margin:0 0 10px;color:var(--ink-dim);font-size:13px">What do you want to open access to?</p>
+    <div class="days" style="margin-bottom:14px">${presets}</div>
+    <div class="form-row" style="padding-top:4px"><div class="lbl">Which device?${help("The device on your network that should receive the incoming connections. It keeps a fixed address so the rule stays valid.")}</div><div class="ctl"><select id="pfDev">${devOpts}</select></div></div>${tail}`;
+  body.querySelectorAll("[data-pfpreset]").forEach(b=>b.addEventListener("click",()=>{
+    pfState.preset=b.dataset.pfpreset;
+    if(pfState.preset!=="custom"){pfState.port=pfPresets[pfState.preset].port;pfState.proto=pfPresets[pfState.preset].proto;}
+    else pfState.port="";
+    renderPfModal();
+  }));
+  $("pfDev").addEventListener("change",e=>pfState.dev=e.target.value);
+  if(pfState.preset==="custom"){$("pfPort").addEventListener("input",e=>pfState.port=e.target.value);$("pfProto").addEventListener("change",e=>pfState.proto=e.target.value);}
+}
+$("pfAdd").addEventListener("click",()=>{pfState.preset="game";pfState.dev=clients[0].id;pfState.port=pfPresets.game.port;pfState.proto=pfPresets.game.proto;renderPfModal();$("pfModal").classList.add("show");});
+$("pfCancel").addEventListener("click",()=>$("pfModal").classList.remove("show"));
+$("pfModal").addEventListener("click",e=>{if(e.target===$("pfModal"))$("pfModal").classList.remove("show");});
+$("pfCreate").addEventListener("click",()=>{
+  pfRules.push({preset:pfState.preset,dev:pfState.dev,port:pfState.port||pfPresets[pfState.preset].port||0,on:true});
+  $("pfModal").classList.remove("show"); renderPf();
+  const c=clients.find(x=>x.id===pfState.dev); toast("Opened access to "+(c?c.name:"device"));
+});
+
+/* ---------- Software ---------- */
+const packages=[
+ {name:"banip", desc:"IP address blocking & threat feeds", state:"update", cur:"0.9.8", avail:"0.9.9", size:"58 KB"},
+ {name:"nftables", desc:"Netfilter firewall userspace", state:"update", cur:"1.0.9-1", avail:"1.0.9-2", size:"142 KB"},
+ {name:"dnsmasq-full", desc:"DNS forwarder and DHCP server", state:"update", cur:"2.90-3", avail:"2.90-4", size:"318 KB"},
+ {name:"wireguard-tools", desc:"WireGuard control utilities", state:"update", cur:"1.0.2-2", avail:"1.0.2-3", size:"26 KB"},
+ {name:"firewall4", desc:"nftables-based firewall", state:"installed", cur:"2024-09-15", size:"96 KB"},
+ {name:"hostapd-common", desc:"Wi-Fi access point daemon", state:"installed", cur:"2024-07-20", size:"210 KB"},
+ {name:"odhcpd", desc:"DHCPv6 and router advertisement server", state:"installed", cur:"2024-08-01", size:"74 KB"},
+ {name:"rpcd", desc:"ubus RPC backend for the UI", state:"installed", cur:"2024-06-10", size:"41 KB"},
+ {name:"uhttpd", desc:"Web server serving this interface", state:"installed", cur:"2024-05-22", size:"63 KB"},
+ {name:"adblock", desc:"DNS-based ad and tracker blocking", state:"available", avail:"4.1.5", size:"72 KB"},
+ {name:"sqm-scripts", desc:"Smart queue management (cake)", state:"available", avail:"1.5.1", size:"38 KB"},
+ {name:"openvpn-openssl", desc:"OpenVPN server and client", state:"available", avail:"2.6.9", size:"490 KB"},
+ {name:"ddns-scripts", desc:"Dynamic DNS updater", state:"available", avail:"2.8.2", size:"29 KB"},
+];
+let swFilter="update";
+function renderSoftware(){
+  const q=($("swSearch").value||"").toLowerCase(), rows=$("swRows"); rows.innerHTML="";
+  const list=packages.filter(p=>p.state===swFilter && (p.name.includes(q)||p.desc.toLowerCase().includes(q)));
+  if(!list.length){rows.innerHTML=`<tr><td colspan="4" style="color:var(--muted);padding:22px">No packages match.</td></tr>`;return;}
+  list.forEach(p=>{
+    let ver,action,cls="btn";
+    if(p.state==="update"){ver=`<span class="mono" style="color:var(--muted)">${p.cur}</span> <span style="color:var(--muted)">→</span> <span class="mono" style="color:var(--good)">${p.avail}</span>`;action="Update";cls="btn primary";}
+    else if(p.state==="installed"){ver=`<span class="mono">${p.cur}</span>`;action="Remove";}
+    else{ver=`<span class="mono">${p.avail}</span>`;action="Install";cls="btn primary";}
+    const tr=document.createElement("tr"); tr.style.cursor="default";
+    tr.innerHTML=`<td><b style="font-weight:600">${p.name}</b><small style="display:block;color:var(--muted);font-size:11.5px">${p.desc}</small></td><td>${ver}</td><td class="mono">${p.size}</td><td style="text-align:right"><button class="${cls}" style="padding:7px 15px">${action}</button></td>`;
+    tr.querySelector("button").addEventListener("click",()=>toast(action+" · "+p.name+" (simulated)"));
+    rows.appendChild(tr);
+  });
+}
+document.querySelectorAll("#screen-software [data-filter]").forEach(t=>t.addEventListener("click",()=>{
+  document.querySelectorAll("#screen-software [data-filter]").forEach(x=>x.classList.remove("active"));
+  t.classList.add("active"); swFilter=t.dataset.filter; renderSoftware();
+}));
+$("swSearch").addEventListener("input",renderSoftware);
+$("fwCheck").addEventListener("click",()=>toast("Firmware is up to date (simulated)"));
+$("swRefresh").addEventListener("click",()=>toast("Package list refreshed (simulated)"));
+
+/* ---------- Administration (config profiles + backup) ---------- */
+let profiles=[
+  {name:"Factory defaults",date:"baseline",locked:true},
+  {name:"Home setup",date:"2026-10-28 19:04"},
+  {name:"Before guest event",date:"2026-10-31 08:12"},
+];
+const changeLog=[
+  {what:"Wireless 5 GHz password changed",when:"2 minutes ago"},
+  {what:"Parental schedule updated — iPhone 15 Pro",when:"1 hour ago"},
+  {what:"Port forwarding added — PlayStation 5",when:"yesterday"},
+];
+function renderAdmin(){
+  const box=$("profList"); box.innerHTML=""; $("profCount").textContent=profiles.length+" saved";
+  profiles.forEach((p,i)=>box.insertAdjacentHTML("beforeend",
+    `<div class="devrow2" style="cursor:default"><span class="ic"><svg><use href="#i-admin"/></svg></span><span class="dn"><b>${p.name}</b><small>${p.date}</small></span><button class="btn" style="padding:6px 12px" data-prestore="${i}">Restore</button>${p.locked?'':`<button class="btn" style="padding:6px 12px" data-pdel="${i}">Delete</button>`}</div>`));
+  box.querySelectorAll("[data-prestore]").forEach(b=>b.addEventListener("click",()=>toast("Restored profile: "+profiles[+b.dataset.prestore].name)));
+  box.querySelectorAll("[data-pdel]").forEach(b=>b.addEventListener("click",()=>{const n=profiles[+b.dataset.pdel].name;profiles.splice(+b.dataset.pdel,1);renderAdmin();toast("Deleted "+n);}));
+  const cl=$("changeList"); cl.innerHTML="";
+  changeLog.forEach((c,i)=>cl.insertAdjacentHTML("beforeend",
+    `<div class="devrow2" style="cursor:default"><span class="ic"><svg><use href="#i-log"/></svg></span><span class="dn"><b style="font-weight:500">${c.what}</b><small>${c.when}</small></span><button class="btn" style="padding:6px 12px" data-undo="${i}">Undo</button></div>`));
+  cl.querySelectorAll("[data-undo]").forEach(b=>b.addEventListener("click",()=>toast("Undid: "+changeLog[+b.dataset.undo].what)));
+}
+$("profSave").addEventListener("click",()=>{const n=($("profName").value||"").trim()||("Snapshot "+(profiles.length+1));profiles.push({name:n,date:"just now"});$("profName").value="";renderAdmin();toast("Saved profile: "+n);});
+$("admExport").addEventListener("click",()=>toast("Backup created. In the on-device build this downloads a .tar.gz."));
+$("admImport").addEventListener("change",function(){const f=this.files&&this.files[0];$("admImportName").textContent=f?f.name:"No file chosen";if(f)toast("Ready to restore from "+f.name);});
+
+/* ---------- Command palette (Ctrl/Cmd-K) ---------- */
+function buildCmdIndex(){
+  const pages=[["map","Network Map","i-map"],["wireless","Wireless","i-wifi"],["guest","Guest Network","i-guest"],
+    ["traffic","Traffic Monitor","i-qos"],["parental","Parental Controls","i-kids"],["extend","Extend Wi-Fi","i-ext"],
+    ["aiprotect","Network Protection","i-shield"],["vpn","Access home (VPN)","i-vpn"],["wan","Internet Setup","i-wan"],
+    ["portfwd","Port Forwarding","i-port"],["admin","Administration","i-admin"],["software","Software","i-pkg"]
+  ].map(p=>({label:p[1],icon:p[2],cat:"Page",run:()=>navTo(p[0])}));
+  const actions=[
+    {label:"Reboot router",icon:"i-power",cat:"Action",run:()=>$("rebootModal").classList.add("show")},
+    {label:"Toggle dark / light theme",icon:"i-moon",cat:"Action",run:()=>$("themeBtn").click()},
+    {label:"Add a VPN device",icon:"i-vpn",cat:"Action",run:()=>{navTo("vpn");vpn.section="server";if(!vpn.wgOn)vpn.wgOn=true;renderVpn();}},
+    {label:"Open access to a device",icon:"i-port",cat:"Action",run:()=>{navTo("portfwd");$("pfAdd").click();}},
+    {label:"Save a configuration profile",icon:"i-admin",cat:"Action",run:()=>navTo("admin")},
+  ];
+  const devices=clients.map(c=>({label:c.name,icon:c.type,cat:"Device",sub:c.ip,run:()=>{navTo("map");selectDevice(c.id);}}));
+  return pages.concat(actions,devices);
+}
+let CMD=[], cmdActive=0, cmdFiltered=[];
+function openCmd(){if(!CMD.length)CMD=buildCmdIndex();$("cmdInput").value="";cmdFilter();$("cmdModal").classList.add("show");setTimeout(()=>$("cmdInput").focus(),30);}
+function closeCmd(){$("cmdModal").classList.remove("show");}
+function cmdFilter(){
+  const q=($("cmdInput").value||"").toLowerCase().trim();
+  cmdFiltered=CMD.filter(x=>!q||x.label.toLowerCase().includes(q)||x.cat.toLowerCase().includes(q)||(x.sub&&x.sub.includes(q)));
+  cmdActive=0; renderCmd();
+}
+function renderCmd(){
+  const box=$("cmdResults");
+  if(!cmdFiltered.length){box.innerHTML=`<div class="cmd-empty">No matches.</div>`;return;}
+  box.innerHTML=cmdFiltered.map((x,i)=>`<div class="cmd-item ${i===cmdActive?'active':''}" data-ci="${i}"><span class="ci"><svg><use href="#${x.icon}"/></svg></span><span class="ct"><b>${x.label}</b>${x.sub?` <span class="cat" style="text-transform:none;letter-spacing:0">· ${x.sub}</span>`:''}</span><span class="cat">${x.cat}</span></div>`).join("");
+  box.querySelectorAll("[data-ci]").forEach(el=>{
+    el.addEventListener("mousemove",()=>{cmdActive=+el.dataset.ci;updateCmdActive();});
+    el.addEventListener("click",()=>runCmd(+el.dataset.ci));
+  });
+}
+function updateCmdActive(){document.querySelectorAll("#cmdResults .cmd-item").forEach((el,i)=>el.classList.toggle("active",i===cmdActive));}
+function runCmd(i){const x=cmdFiltered[i];if(!x)return;closeCmd();x.run();}
+$("cmdBtn").addEventListener("click",openCmd);
+$("cmdInput").addEventListener("input",cmdFilter);
+$("cmdModal").addEventListener("click",e=>{if(e.target===$("cmdModal"))closeCmd();});
+document.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&(e.key==="k"||e.key==="K")){e.preventDefault();$("cmdModal").classList.contains("show")?closeCmd():openCmd();return;}
+  if(!$("cmdModal").classList.contains("show"))return;
+  if(e.key==="Escape"){closeCmd();}
+  else if(e.key==="ArrowDown"){e.preventDefault();cmdActive=Math.min(cmdFiltered.length-1,cmdActive+1);updateCmdActive();scrollCmdActive();}
+  else if(e.key==="ArrowUp"){e.preventDefault();cmdActive=Math.max(0,cmdActive-1);updateCmdActive();scrollCmdActive();}
+  else if(e.key==="Enter"){e.preventDefault();runCmd(cmdActive);}
+});
+function scrollCmdActive(){const el=document.querySelectorAll("#cmdResults .cmd-item")[cmdActive];if(el)el.scrollIntoView({block:"nearest"});}
+
+/* ---------- Navigation ---------- */
+const stubMeta={};
+const realScreens=new Set(["map","devices","mesh","wireless","guest","traffic","usage","parental","extend","aiprotect","vpn","wan","ddns","qos","dualwan","upnp","portfwd","firewall","dmz","lan","ipv6","admin","log","usb","firmware","software"]);
+/* ---------- Devices ---------- */
+const devState={};
+clients.forEach(c=>{devState[c.id]={reserved:false,ip:c.ip,blocked:false};});
+if(devState.print)devState.print.reserved=true;
+if(devState.ps5)devState.ps5.reserved=true;
+function buildDevices(){
+  const tb=$("devRows"); if(!tb) return; tb.innerHTML="";
+  clients.forEach(c=>{
+    const st=devState[c.id];
+    const fix=st.reserved
+      ? `<div class="fixip"><input class="ipin" type="text" value="${st.ip}" data-ip="${c.id}" spellcheck="false"><button class="btn sm" data-save="${c.id}">Save</button><button class="btn sm ghost" data-unres="${c.id}" title="Remove fixed IP">✕</button></div>`
+      : `<button class="btn sm" data-res="${c.id}">Reserve ${c.ip}</button>`;
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td><div class="cname"><span class="mi"><svg><use href="#${c.type}"/></svg></span><span><b>${c.name}</b><small class="mono">${c.mac}</small></span></div></td>
+      <td><span class="bandchip ${bandClass[c.band]}">${bandName[c.band]}</span><div class="hint mono" style="margin-top:3px">${c.ip}</div></td>
+      <td>${fix}</td>
+      <td style="text-align:center"><label class="toggle"><input type="checkbox" data-block="${c.id}" ${st.blocked?"checked":""}><span class="track"></span><span class="knob"></span></label></td>
+      <td style="text-align:right"><button class="btn sm" data-wake="${c.id}"><svg><use href="#i-power"/></svg> Wake</button></td>`;
+    tb.appendChild(tr);
+  });
+  $("devCount").textContent=clients.length+" total";
+  tb.querySelectorAll("[data-res]").forEach(b=>b.onclick=()=>{const id=b.dataset.res;devState[id].reserved=true;buildDevices();toast("Fixed IP "+devState[id].ip+" set");});
+  tb.querySelectorAll("[data-unres]").forEach(b=>b.onclick=()=>{devState[b.dataset.unres].reserved=false;buildDevices();toast("Fixed IP removed");});
+  tb.querySelectorAll("[data-save]").forEach(b=>b.onclick=()=>{const id=b.dataset.save,inp=tb.querySelector('input[data-ip="'+id+'"]');devState[id].ip=inp.value;toast("Fixed IP "+inp.value+" saved");});
+  tb.querySelectorAll("[data-block]").forEach(cb=>cb.onchange=()=>{devState[cb.dataset.block].blocked=cb.checked;toast(cb.checked?"Device blocked from the internet":"Device unblocked");});
+  tb.querySelectorAll("[data-wake]").forEach(b=>b.onclick=()=>toast("Wake signal sent (simulated)"));
+}
+buildDevices();
+
+/* ---------- Scheduled reboot ---------- */
+(function(){
+  const on=$("schedOn"),when=$("schedWhen"),save=$("schedSave");
+  if(!on) return;
+  on.addEventListener("change",()=>{when.style.display=on.checked?"":"none";});
+  save.addEventListener("click",()=>toast(on.checked?"Scheduled reboot saved":"Scheduled reboot turned off"));
+})();
+
+/* ---------- Usage History chart ---------- */
+(function(){
+  const el=$("usgChart"); if(!el) return;
+  const days=[6.2,8.1,5.4,9.9,12.3,7.7,4.1,10.5,13.8,9.2,6.6,11.1,14.8,8.3,5.9,12.7,10.0,7.4,9.1,13.2];
+  const peak=Math.max.apply(null,days)||1;
+  el.innerHTML=days.map((v,i)=>{
+    const d=new Date(); d.setDate(d.getDate()-(days.length-1-i));
+    const lbl=String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0");
+    const h=Math.max(1,Math.round(v/peak*100));
+    return '<div class="bar-wrap" title="'+lbl+': '+v.toFixed(1)+' GB"><div class="bar"><i style="height:'+h+'%"></i></div><span class="bl">'+lbl+'</span></div>';
+  }).join("");
+})();
+
+/* ---------- Dynamic DNS ---------- */
+(function(){
+  const addBtn=$("ddnsAddBtn"),panel=$("ddnsAddPanel"),cancel=$("ddnsCancel");
+  if(!addBtn) return;
+  addBtn.addEventListener("click",()=>{panel.style.display="";addBtn.style.display="none";});
+  cancel.addEventListener("click",()=>{panel.style.display="none";addBtn.style.display="";});
+})();
+
+/* ---------- QoS ---------- */
+(function(){
+  const on=$("qosOn"),fields=$("qosFields");
+  if(!on) return;
+  on.addEventListener("change",()=>{fields.style.display=on.checked?"":"none";});
+})();
+
+/* ---------- Dual WAN ---------- */
+(function(){
+  const mode=$("dwMode"),pair=$("dwPair");
+  if(!mode) return;
+  mode.addEventListener("change",()=>{pair.style.display=mode.value==="off"?"none":"";});
+})();
+
+/* ---------- UPnP ---------- */
+(function(){
+  const on=$("upnpOn"),sec=$("upnpSecure");
+  if(!on) return;
+  on.addEventListener("change",()=>{sec.style.display=on.checked?"":"none";});
+})();
+
+/* ---------- Firmware ---------- */
+(function(){
+  const file=$("fwFile"),name=$("fwName"),btn=$("fwBtn"),keepRow=$("fwKeepRow");
+  if(!file) return;
+  let verified=false;
+  file.addEventListener("change",()=>{
+    const f=file.files&&file.files[0];
+    name.textContent=f?f.name:"No file chosen";
+    btn.disabled=!f; verified=false; btn.textContent="Upload & verify"; keepRow.style.display="none";
+  });
+  btn.addEventListener("click",()=>{
+    if(!verified){verified=true;btn.textContent="Flash now";keepRow.style.display="";toast("Image verified for RT-AX88U (simulated)");}
+    else{toast("Flashing started — router will reboot (simulated)");btn.disabled=true;}
+  });
+})();
+
+function navTo(screen){
+  document.querySelectorAll(".nav-item").forEach(b=>b.classList.toggle("active",b.dataset.screen===screen));
+  document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
+  let target=screen;
+  if(!realScreens.has(screen)){
+    const m=stubMeta[screen]; target="stub";
+    $("stubCrumb").textContent=m.crumb; $("stubTitle").textContent=m.name; $("stubName").textContent=m.name;
+    $("stubDesc").textContent=m.desc; $("stubIcon").innerHTML=`<use href="#${m.icon}"/>`;
+  }
+  $("screen-"+target).classList.add("active");
+  $("main").scrollTop=0; closeSidebar();
+}
+document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>navTo(b.dataset.screen)));
+
+const sidebar=$("sidebar"), scrim=$("scrim");
+function closeSidebar(){sidebar.classList.remove("open");scrim.classList.remove("show");}
+$("hamburger").addEventListener("click",()=>{sidebar.classList.toggle("open");scrim.classList.toggle("show");});
+scrim.addEventListener("click",closeSidebar);
+
+/* ---------- Wireless ---------- */
+const wlData={"5":{ssid:"Nebula-5G",title:"5 GHz — Wireless Settings"},"24":{ssid:"Nebula-2.4G",title:"2.4 GHz — Wireless Settings"}};
+let curBand="5";
+document.querySelectorAll("#screen-wireless .seg button").forEach(t=>t.addEventListener("click",()=>{
+  document.querySelectorAll("#screen-wireless .seg button").forEach(x=>x.classList.remove("active"));
+  t.classList.add("active"); curBand=t.dataset.band;
+  $("wlTitle").textContent=wlData[curBand].title; $("wlSsid").value=wlData[curBand].ssid;
+}));
+$("wlShow").addEventListener("click",function(){const p=$("wlPass"),s=p.type==="password";p.type=s?"text":"password";this.textContent=s?"Hide":"Show";});
+$("wlPass").addEventListener("input",()=>{const v=$("wlPass").value,s=$("wlStrength");let l=v.length<8?["Weak","var(--crit)"]:v.length<12?["Fair","var(--warn)"]:["Strong","var(--good)"];s.textContent=l[0];s.style.color=l[1];});
+$("wlApply").addEventListener("click",()=>{wlData[curBand].ssid=$("wlSsid").value;toast("Wireless settings applied to "+bandName[curBand]);});
+$("wlReset").addEventListener("click",()=>{$("wlSsid").value=wlData[curBand].ssid;toast("Changes reverted");});
+$("guestApply").addEventListener("click",()=>toast("Guest network changes applied"));
+document.querySelectorAll("[data-guest]").forEach(t=>t.addEventListener("change",function(){this.closest(".gcard").classList.toggle("off",!this.checked);}));
+
+/* ---------- Reboot modal ---------- */
+const modal=$("rebootModal");
+$("rebootBtn").addEventListener("click",()=>modal.classList.add("show"));
+$("rbCancel").addEventListener("click",()=>modal.classList.remove("show"));
+modal.addEventListener("click",e=>{if(e.target===modal)modal.classList.remove("show");});
+$("rbOk").addEventListener("click",()=>{modal.classList.remove("show");toast("Rebooting… (simulated)");});
+
+/* ---------- Toast ---------- */
+function toast(msg){
+  const el=document.createElement("div"); el.className="toast";
+  el.innerHTML=`<svg><use href="#i-check"/></svg><span>${msg}</span>`;
+  $("toasts").appendChild(el);
+  setTimeout(()=>{el.style.opacity="0";el.style.transform="translateX(20px)";setTimeout(()=>el.remove(),250);},2600);
+}
+window.toast=toast;
+
+/* ---------- Live tiles ---------- */
+let cpu=14,mem=38,temp=54;
+function tick(){
+  cpu=Math.max(4,Math.min(92,cpu+(Math.random()*16-8)));
+  mem=Math.max(30,Math.min(70,mem+(Math.random()*6-3)));
+  temp=Math.max(48,Math.min(64,temp+(Math.random()*2-1)));
+  $("tileCpu").innerHTML=Math.round(cpu)+'<small>%</small>'; $("barCpu").style.width=cpu+"%";
+  $("tileMem").innerHTML=Math.round(mem)+'<small>%</small>'; $("barMem").style.width=mem+"%";
+  $("tileTemp").innerHTML=Math.round(temp)+'<small>°C</small>';
+}
+
+/* ---------- Traffic chart ---------- */
+const cv=$("trafficChart"), ctx=cv.getContext("2d");
+const N=60; let down=[],up=[],dv=120,uv=18,peak=0;
+function rw(v,max,min,step){return Math.max(min,Math.min(max,v+(Math.random()*step*2-step)));}
+function seed(){for(let i=0;i<N;i++){dv=rw(dv,160,2,40);uv=rw(uv,40,0,10);down.push(dv);up.push(uv);}}
+function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+function drawChart(){
+  const W=cv.width,H=cv.height,padL=46,padB=22,padT=12,padR=10,gw=W-padL-padR,gh=H-padT-padB;
+  ctx.clearRect(0,0,W,H);
+  const maxV=Math.max(60,Math.ceil(Math.max(...down,...up)/40)*40);
+  ctx.font="12px ui-monospace,Menlo,Consolas,monospace"; ctx.textBaseline="middle";
+  const lineC=css('--line'), muted=css('--muted');
+  for(let i=0;i<=4;i++){const y=padT+gh*(i/4),val=Math.round(maxV*(1-i/4));
+    ctx.strokeStyle=lineC;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
+    ctx.fillStyle=muted;ctx.textAlign="right";ctx.fillText(val,padL-8,y);}
+  ctx.textAlign="center";ctx.fillStyle=muted;ctx.fillText("Mbps · now",W-padR-34,H-8);ctx.fillText("-60s",padL+14,H-8);
+  const X=i=>padL+gw*(i/(N-1)),Y=v=>padT+gh*(1-v/maxV);
+  const acc=css('--accent'),good=css('--good');
+  function series(arr,stroke,fa,fb){
+    ctx.beginPath();ctx.moveTo(X(0),Y(arr[0]));for(let i=1;i<N;i++)ctx.lineTo(X(i),Y(arr[i]));
+    ctx.lineTo(X(N-1),padT+gh);ctx.lineTo(X(0),padT+gh);ctx.closePath();
+    const g=ctx.createLinearGradient(0,padT,0,padT+gh);g.addColorStop(0,fa);g.addColorStop(1,fb);ctx.fillStyle=g;ctx.fill();
+    ctx.beginPath();ctx.moveTo(X(0),Y(arr[0]));for(let i=1;i<N;i++)ctx.lineTo(X(i),Y(arr[i]));
+    ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.lineJoin="round";ctx.stroke();
+    ctx.beginPath();ctx.arc(X(N-1),Y(arr[N-1]),3.5,0,7);ctx.fillStyle=stroke;ctx.fill();
+  }
+  series(down,acc,"rgba(15,181,196,.26)","rgba(15,181,196,0)");
+  series(up,good,"rgba(23,178,106,.20)","rgba(23,178,106,0)");
+}
+window._chartReady=true;
+function trafficTick(){
+  dv=rw(down[N-1],160,2,34);uv=rw(up[N-1],40,0,8);
+  down.push(dv);down.shift();up.push(uv);up.shift();peak=Math.max(peak,dv);
+  $("tDown").innerHTML=dv.toFixed(1)+'<small> Mbps</small>';
+  $("tUp").innerHTML=uv.toFixed(1)+'<small> Mbps</small>';
+  $("tPeak").innerHTML=peak.toFixed(1)+'<small> Mbps</small>';
+  drawChart();
+}
+
+/* ---------- Init ---------- */
+(function(){let t="light";try{t=localStorage.getItem(THEME_KEY)||"light";}catch(e){}setTheme(t);})();
+function renderLog(){
+  const box=$("logbox"); if(!box)return;
+  const lv=(t,c)=>`<span style="flex:0 0 auto;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 7px;border-radius:999px;min-width:54px;text-align:center;background:${c.bg};color:${c.fg}">${t}</span>`;
+  const info={bg:"var(--panel-2)",fg:"var(--muted)"}, warn={bg:"rgba(247,144,9,.16)",fg:"#b45309"}, err={bg:"rgba(240,68,56,.14)",fg:"#b42318"};
+  const rows=[
+    ["09:42:11","info","netifd: Interface 'wan' is now up"],
+    ["09:42:11","info","dnsmasq[1]: using nameserver 1.1.1.1#53"],
+    ["09:42:13","notice","hostapd: wlan0: AP-STA-CONNECTED a4:83:e7:2c:19:f0"],
+    ["09:43:02","warn","kernel: wlan1: disassociated due to inactivity"],
+    ["09:43:05","info","dhcp: DHCPACK(br-lan) 192.168.1.145 iphone-15-pro"],
+    ["09:44:20","err","banip: download of feed 'doh' failed, retrying"],
+    ["09:44:48","info","firewall: reloading rules"],
+    ["09:45:01","notice","cron.info: crond: USER root pid 20931 cmd /usr/sbin/adblock"],
+  ];
+  const chip=l=> l==="err"?lv("err",err): l==="warn"?lv("warning",warn): l==="notice"?lv("notice",info):lv("info",info);
+  box.innerHTML=rows.map(r=>`<div style="display:flex;gap:12px;align-items:baseline;padding:5px 16px;font-size:12.5px;border-bottom:1px solid var(--line-soft)"><span style="color:var(--muted);flex:0 0 auto;font-size:11.5px">${r[0]}</span>${chip(r[1])}<span style="color:var(--ink);white-space:pre-wrap">${r[2]}</span></div>`).join("");
+}
+buildTopology(); buildClientTable(); buildTalkers(); buildParental(); pcEditor(); renderWizard(); renderRadios(); renderExtend(); renderNP(); renderVpn(); renderPf(); renderAdmin(); renderLog(); renderSoftware();
+seed(); drawChart(); selectDevice("router");
+$("tDown").innerHTML=down[N-1].toFixed(1)+'<small> Mbps</small>';
+$("tUp").innerHTML=up[N-1].toFixed(1)+'<small> Mbps</small>';
+peak=Math.max(...down); $("tPeak").innerHTML=peak.toFixed(1)+'<small> Mbps</small>';
+if(!reduceMotion){setInterval(tick,1800);setInterval(trafficTick,1000);}
+</script>
+</body>
+</html>

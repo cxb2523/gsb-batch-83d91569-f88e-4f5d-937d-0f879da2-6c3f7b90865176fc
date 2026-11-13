@@ -1,0 +1,6 @@
+{
+  "plugins": [
+    { "id": "mesh", "entry": "mesh/mesh.js" },
+    { "id": "ping", "entry": "ping/ping.js" }
+  ]
+}

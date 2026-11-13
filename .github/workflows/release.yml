@@ -1,0 +1,314 @@
+name: Release packages
+
+# Build the UnTangled OpenWRT packages and publish them to a GitHub Release.
+#
+# Trigger: push a version tag, e.g.
+#     git tag v0.2.0 && git push origin v0.2.0
+# The workflow builds both package formats and attaches them to the release:
+#   * .ipk  (opkg)  — OpenWRT stable (23.05 and 24.10),  built with the 23.05.5 SDK
+#   * .apk  (apk)   — OpenWRT snapshot (main) only,        built with the snapshot SDK
+# Each format yields three packages: `untangled` (core), `untangled-full` (meta) and `untangled-mesh`.
+#
+# You can also run it by hand from the Actions tab (workflow_dispatch) to get
+# the artifacts without cutting a release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to create the GitHub Release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.fmt }} (OpenWRT ${{ matrix.release }})
+    runs-on: ubuntu-latest
+    # Experimental legs (snapshot) may fail as upstream main moves; don't let
+    # that fail the job or block the stable release.
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Stable: opkg/.ipk. apk does not exist in any released OpenWRT yet
+          # (23.05 and 24.10 are both ipk-only). PKGARCH:=all, so a single .ipk
+          # built on the oldest supported release installs on all stable
+          # OpenWRT (23.05 through 24.10).
+          - release: '23.05.5'
+            arch: 'x86_64-23.05.5'
+            fmt: ipk
+          # Snapshot (unreleased main): the only line that uses apk. Best-effort
+          # so a snapshot-side breakage never blocks the stable .ipk release.
+          - release: 'snapshot'
+            arch: 'x86_64-snapshot'
+            fmt: apk
+            experimental: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Full history so manual (workflow_dispatch) runs can read the latest
+          # release tag for the package version — see "Determine package version".
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the SPA
+        run: npm run build
+
+      - name: Determine package version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            # strip a leading "v" from the tag: v0.2.0 -> 0.2.0
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Manual run (workflow_dispatch): rebuild the LATEST RELEASED version
+            # so a site-only redeploy never regresses the feed to an older
+            # package. Fall back to the Makefile if no tag exists yet.
+            VERSION="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//')"
+            [ -n "$VERSION" ] || VERSION="$(sed -n 's/^PKG_VERSION:=//p' openwrt/Makefile)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building UnTangled ${VERSION} (${{ matrix.fmt }})"
+
+      - name: Assemble the SDK feed
+        run: |
+          set -eux
+          # The gh-action-sdk mounts FEED_DIR as an OpenWRT package feed and
+          # looks for a package directory named after the package. Build a
+          # clean feed containing just our package: Makefile + files + the
+          # freshly built SPA under files/www/untangled/.
+          rm -rf feed
+          mkdir -p feed/untangled
+          cp openwrt/Makefile feed/untangled/Makefile
+          cp -r openwrt/files feed/untangled/files
+          cp -r openwrt/files-mesh feed/untangled/files-mesh   # untangled-mesh package payload
+          cp -r openwrt/files-full feed/untangled/files-full   # untangled-full payload (HTTPS uci-defaults)
+          mkdir -p feed/untangled/files/www/untangled
+          cp -r dist/. feed/untangled/files/www/untangled/
+          # Stamp the version derived above into the package Makefile.
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${{ steps.ver.outputs.version }}/" feed/untangled/Makefile
+          grep '^PKG_VERSION' feed/untangled/Makefile
+
+      - name: Build packages (OpenWRT SDK)
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}
+          FEED_DIR: ${{ github.workspace }}/feed
+          FEEDNAME: untangled
+          # One source package `untangled`; its compile emits all three .ipk/.apk
+          # (untangled, untangled-full, untangled-mesh). Listing the sub-package
+          # names here fails: the SDK runs `make package/<name>/compile` per name
+          # and only the source dir `untangled` is a valid target.
+          PACKAGES: untangled
+          # Our feed is assembled fresh (not a git checkout), so the action's
+          # init-script shfmt check — which runs `git diff` inside the feed —
+          # errors out (exit 128) and is misreported as "not formatted". We ship
+          # no *.init scripts, so the check is moot; disable it explicitly.
+          NO_SHFMT_CHECK: 1
+          V: s
+          # Signing + feed index. The action writes KEY_BUILD -> key-build (usign,
+          # signs the opkg `Packages` index) and PRIVATE_KEY -> private-key.pem
+          # (EC prime256v1; the snapshot build derives public-key.pem from it
+          # and signs the apk packages + packages.adb). INDEX=1 runs
+          # `make package/index` so the feed is installable. Both secrets are
+          # optional: when unset the action simply builds unsigned.
+          INDEX: 1
+          KEY_BUILD: ${{ secrets.USIGN_KEY }}
+          PRIVATE_KEY: ${{ secrets.APK_KEY }}
+
+      - name: Collect built packages and feed
+        env:
+          HAVE_APK_KEY: ${{ secrets.APK_KEY != '' }}
+        run: |
+          set -eux
+          FMT='${{ matrix.fmt }}'
+          # Namespace by format so the two artifacts merge without colliding.
+          mkdir -p "out/$FMT/pkgs" "out/$FMT/feed"
+          # The SDK writes our feed to bin/packages/<arch>/untangled/. With
+          # INDEX=1 that directory is a complete, installable package feed:
+          #   ipk: Packages, Packages.gz, Packages.sig (usign), *.ipk
+          #   apk: packages.adb (signed), *.apk (each individually signed)
+          # Copy the whole directory for the feed, and the bare packages for
+          # the GitHub Release assets. PKGARCH:=all -> architecture-independent.
+          FEED_DIR="$(find bin/packages -type d -name untangled | head -n1)"
+          [ -n "$FEED_DIR" ] || { echo "::error::feed dir not found under bin/packages"; exit 1; }
+          cp -r "$FEED_DIR"/. "out/$FMT/feed/"
+          find "$FEED_DIR" -type f \( -name 'untangled*.ipk' -o -name 'untangled*.apk' \) \
+            -exec cp -v {} "out/$FMT/pkgs/" \;
+          # Signing is silent when the secrets are absent (the SDK just builds
+          # unsigned, or apk signs with a throwaway key). Surface that in the run
+          # summary so an unsigned release never ships unnoticed.
+          if [ "$FMT" = ipk ]; then
+            [ -f "$FEED_DIR/Packages.sig" ] \
+              || echo "::warning title=Unsigned opkg feed::no Packages.sig — the USIGN_KEY repository secret is empty or not visible to this job"
+          else
+            # The index is compressed, so we cannot grep the signature; the
+            # failure mode that matters is an empty/invisible secret.
+            [ "$HAVE_APK_KEY" = true ] \
+              || echo "::warning title=apk feed signed with a throwaway key::the APK_KEY repository secret is empty or not visible to this job"
+          fi
+          echo "--- feed ---";  ls -l "out/$FMT/feed"
+          echo "--- pkgs ---";  ls -l "out/$FMT/pkgs"
+          # Fail loudly if the SDK produced nothing (e.g. feed not picked up).
+          if [ -z "$(ls -A "out/$FMT/pkgs")" ]; then
+            echo "::error::No packages were produced; check the SDK build log above."
+            exit 1
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: untangled-${{ matrix.fmt }}
+          path: out
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Download all built packages
+        uses: actions/download-artifact@v7
+        with:
+          path: dist-packages
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lR dist-packages
+
+      - name: Create / update the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-packages/*/pkgs/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## UnTangled ${{ github.ref_name }}
+
+            A modern web interface for OpenWRT (an alternative to LuCI).
+
+            **Install:**
+
+            ```sh
+            # Stable OpenWRT (23.05 and 24.10) — opkg / .ipk:
+            opkg install ./untangled_*.ipk       # core, HTTP only
+            opkg install ./untangled-full_*.ipk  # + HTTPS, Wi-Fi scan, firmware/backup
+
+            # OpenWRT snapshot (main) — apk / .apk:
+            apk add ./untangled-*.apk            # core, HTTP only
+            apk add ./untangled-full-*.apk       # full feature set
+            ```
+
+            **Which file do I download?** On **stable** OpenWRT (23.05 / 24.10)
+            use the **`.ipk`** files; the **`.apk`** files are only for OpenWRT
+            **snapshot**. In both cases, **`-full` is the one to install** — it
+            pulls in the core UI plus HTTPS, Wi-Fi scan, firmware upgrade and
+            Wake-on-LAN.
+
+            > Heads-up: the `untangled-full` file is tiny (~1 KB) while
+            > `untangled` (core) is ~90 KB. That's expected — the core holds the
+            > actual interface; `-full` is just a short list that tells the
+            > router to install the core **plus** the extras. Small file, full
+            > install. (The long `_all` in the names means "works on any router
+            > model"; don't rename the files — the package manager needs them.)
+
+            **Prefer the signed package feed** (one-time setup, then normal
+            `opkg`/`apk` installs and upgrades, no manual downloads):
+            https://bidhata.github.io/untangled/ — instructions and public
+            keys are on that page.
+
+            The single `.ipk` set works on every current stable release
+            (`PKGARCH:=all`). The `.apk` set is only for OpenWRT **snapshot**,
+            which is the only line that uses apk; it is built best-effort and
+            may be absent if a snapshot build broke. See the repository README
+            for post-install ACL setup.
+
+  pages:
+    name: Publish package feed (GitHub Pages)
+    needs: build
+    runs-on: ubuntu-latest
+    # Deploy on release tags, and on manual runs so the landing site can be
+    # updated without cutting a release (the feed is rebuilt at the latest
+    # released version — see "Determine package version").
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    # Job-level permissions replace the workflow's. Pages deploys via OIDC.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout (for public keys + site page)
+        uses: actions/checkout@v5
+
+      - name: Download built feeds
+        uses: actions/download-artifact@v7
+        with:
+          path: dist-packages
+          merge-multiple: true
+
+      - name: Assemble the feed site
+        run: |
+          set -eux
+          mkdir -p _site
+          # Each feed dir is a complete signed repository as emitted by the SDK
+          # (INDEX=1): stable = ipk (Packages + Packages.sig), snapshot = apk
+          # (signed packages.adb + individually signed .apk).
+          [ -d dist-packages/ipk/feed ] && cp -r dist-packages/ipk/feed _site/stable
+          [ -d dist-packages/apk/feed ] && cp -r dist-packages/apk/feed _site/snapshot
+          # Public signing keys are committed under keys/ (private halves live
+          # only in repository Secrets). Skip gracefully if not yet added.
+          if [ -d keys ]; then
+            mkdir -p _site/keys
+            cp keys/*.pub keys/*.pem _site/keys/ 2>/dev/null || true
+          fi
+          # Landing site (site/ = page, logo, OG image), the screenshots it
+          # embeds, and the clickable UX prototype as a live in-browser demo.
+          [ -d site ] && cp -r site/. _site/
+          [ -d docs/screenshots ] && { mkdir -p _site/screenshots; cp docs/screenshots/*.png _site/screenshots/; }
+          [ -f ui-prototype/index.html ] && { mkdir -p _site/demo; cp ui-prototype/index.html _site/demo/index.html; }
+          # Serve files verbatim (no Jekyll processing of Packages.gz etc.).
+          touch _site/.nojekyll
+          ls -lR _site
+
+      # ONE-TIME MANUAL SETUP: GitHub Pages must be enabled on the repository
+      # with Source = "GitHub Actions" (Settings -> Pages -> Build and
+      # deployment). The workflow token can deploy to an existing Pages site
+      # but is NOT allowed to create one (configure-pages' `enablement: true`
+      # fails with "Resource not accessible by integration").
+      # ALSO ONE-TIME: enabling Pages auto-creates the `github-pages`
+      # environment with a policy that only lets `main` deploy, so this
+      # tag-triggered job is rejected ("Tag v* is not allowed to deploy to
+      # github-pages due to environment protection rules"). Add a deployment
+      # rule for tags matching `v*` under Settings -> Environments ->
+      # github-pages. Then re-run this job (or push the next tag).
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v5

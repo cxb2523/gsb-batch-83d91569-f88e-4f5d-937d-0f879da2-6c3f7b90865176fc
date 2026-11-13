@@ -1,0 +1,11 @@
+#!/bin/sh
+# untangled-full: serve the UI over HTTPS by default.
+# uhttpd creates a self-signed certificate on start when px5g is installed
+# (cert/key paths come from the stock /etc/config/uhttpd). We only turn on the
+# HTTP->HTTPS redirect when an HTTPS listener is configured, so a box without
+# one can never be locked out of the plain-HTTP UI.
+[ -n "$(uci -q get uhttpd.main.listen_https)" ] || exit 0
+uci -q set uhttpd.main.redirect_https='1'
+uci -q commit uhttpd
+/etc/init.d/uhttpd restart 2>/dev/null
+exit 0

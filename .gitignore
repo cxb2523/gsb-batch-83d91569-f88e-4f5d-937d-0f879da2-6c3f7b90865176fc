@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+# Local copy of the SDK feed the release workflow assembles (CI recreates it)
+feed/
+
+# Caches
+.vite/
+.cache/
+coverage/
+
+# Env & secrets
+.env
+.env.*
+*.local
+
+# Local GitHub token for release automation (never commit — pushing it to a
+# public repo triggers GitHub secret-scanning auto-revocation). Source it with
+# `. .gh_token` to get GH_TOKEN into the shell.
+.gh_token
+
+# Package-signing PRIVATE keys — never commit. Only the public halves
+# (keys/*.pub, keys/*.pem) belong in the repo; private keys live in
+# GitHub Actions Secrets (USIGN_KEY, APK_KEY).
+keys/*.key
+keys/*.key.pem
+key-build
+key-build.pub.tmp
+private-key.pem
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Reporter-supplied screenshots dropped into docs/ for triage. These show real
+# networks (SSIDs, IPs, device names) and aren't referenced by the repo — keep
+# them local so `git add -A` can't sweep them into a public repo.
+docs/image.webp
+docs/image.png
+docs/image.jpg
+docs/image.jpeg
+
+# AI-assistant working notes (handoff/memory for coding assistants). Kept local, not published.
+docs/HANDOFF.md
+docs/CODEBASE_MEMORY.md
+
+# EGM review reports (AI-generated review artifacts). Local only.
+docs/egm/

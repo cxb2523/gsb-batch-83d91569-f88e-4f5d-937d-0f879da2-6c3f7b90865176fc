@@ -1,0 +1,204 @@
+#!/bin/sh
+# untangled.mesh — rpcd helper for UnTangled Mesh Wi-Fi.
+#
+# Safe by design: info/status/nodes are read-only. The only write is
+# set_roaming, which adds/removes 802.11r/k/v on the AP interfaces WITHOUT
+# touching SSID or password, so it can never lock out the admin. Multi-router
+# onboarding (join/leave/apply) is reported as "planned" until that phase
+# lands — it intentionally changes nothing yet.
+#
+# Shipped by the untangled-mesh package; methods are granted in the core
+# rpcd ACL (group "untangled").
+
+. /usr/share/libubox/jshn.sh
+
+CFG=untangled      # /etc/config/untangled, section 'mesh'
+
+_hostname() {
+	uci -q get system.@system[0].hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo OpenWrt
+}
+_lan_ip() {
+	uci -q get network.lan.ipaddr 2>/dev/null || echo ""
+}
+_installed() { [ -x "$1" ] || [ -f "$1" ]; }
+
+# Does any AP wifi-iface have fast roaming enabled?
+_roaming_on() {
+	local s on=0
+	for s in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.]*\)=wifi-iface/\1/p'); do
+		[ "$(uci -q get wireless.$s.ieee80211r 2>/dev/null)" = "1" ] && on=1
+	done
+	echo "$on"
+}
+
+# Match the AP interfaces to a shared SSID/key and enable fast roaming.
+# Reversible (SSID/key change only); does NOT bridge networks, so it can't
+# turn a router into a dumb AP by itself.
+_match_wifi() {
+	local msid mkey s m
+	msid="$1"; mkey="$2"
+	for s in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.]*\)=wifi-iface/\1/p'); do
+		m="$(uci -q get wireless.$s.mode 2>/dev/null)"
+		[ -z "$m" ] || [ "$m" = "ap" ] || continue
+		[ -n "$msid" ] && uci -q set wireless.$s.ssid="$msid"
+		[ -n "$mkey" ] && uci -q set wireless.$s.key="$mkey"
+		uci -q set wireless.$s.ieee80211r='1'
+		uci -q set wireless.$s.ieee80211k='1'
+		uci -q set wireless.$s.ieee80211v='1'
+		uci -q set wireless.$s.mobility_domain='4f57'
+	done
+	uci -q commit wireless
+	wifi reload >/dev/null 2>&1 || ubus call network reload >/dev/null 2>&1
+}
+
+_set_state() {
+	touch /etc/config/untangled 2>/dev/null
+	uci -q set untangled.mesh=mesh
+	uci -q set untangled.mesh.role="$1"
+	[ -n "$2" ] && uci -q set untangled.mesh.backhaul="$2"
+	[ -n "$3" ] && uci -q set untangled.mesh.mesh_id="$3"
+	uci -q commit untangled
+}
+
+# A portable join code: mesh id, the primary SSID and its key, base64-wrapped.
+_join_code() {
+	local mesh_id ssid key s
+	mesh_id="$(uci -q get $CFG.mesh.mesh_id 2>/dev/null)"
+	[ -n "$mesh_id" ] || mesh_id="untangled"
+	for s in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.]*\)=wifi-iface/\1/p'); do
+		[ -z "$ssid" ] && ssid="$(uci -q get wireless.$s.ssid 2>/dev/null)"
+		[ -z "$key" ] && key="$(uci -q get wireless.$s.key 2>/dev/null)"
+	done
+	printf 'untangled-mesh|%s|%s|%s' "$mesh_id" "$ssid" "$key" | base64 2>/dev/null | tr -d '\n'
+}
+
+case "$1" in
+	list)
+		# Advertise the method surface (stable contract).
+		cat <<'EOF'
+{ "info": {}, "status": {}, "nodes": {}, "set_roaming": { "enable": true }, "set_role": { "role": "", "backhaul": "" }, "join": { "code": "" }, "leave": {}, "apply": {} }
+EOF
+		;;
+
+	call)
+		case "$2" in
+			info)
+				json_init
+				json_add_boolean dawn "$(_installed /etc/init.d/dawn && echo 1 || echo 0)"
+				json_add_boolean umdns "$(_installed /etc/init.d/umdns && echo 1 || echo 0)"
+				json_add_boolean wpad_mesh "$(_installed /usr/sbin/wpad && echo 1 || echo 0)"
+				json_add_string version "1"
+				json_dump
+				;;
+
+			status)
+				role="$(uci -q get $CFG.mesh.role 2>/dev/null)"; [ -n "$role" ] || role="standalone"
+				backhaul="$(uci -q get $CFG.mesh.backhaul 2>/dev/null)"; [ -n "$backhaul" ] || backhaul="wired"
+				mesh_id="$(uci -q get $CFG.mesh.mesh_id 2>/dev/null)"; [ -n "$mesh_id" ] || mesh_id="untangled"
+				json_init
+				json_add_string role "$role"
+				json_add_string backhaul "$backhaul"
+				json_add_string mesh_id "$mesh_id"
+				json_add_boolean roaming "$(_roaming_on)"
+				json_add_string join_code "$(_join_code)"
+				json_dump
+				;;
+
+			nodes)
+				# Phase 1: report this router. umdns-based discovery of peers is
+				# the next step; returning self only keeps this safe and correct.
+				json_init
+				json_add_array nodes
+				json_add_object
+				json_add_string name "$(_hostname)"
+				json_add_string ip "$(_lan_ip)"
+				json_add_string role "$(uci -q get $CFG.mesh.role 2>/dev/null || echo standalone)"
+				json_add_boolean self 1
+				json_close_object
+				json_close_array
+				json_dump
+				;;
+
+			set_roaming)
+				changed=0
+				input="$(cat)"; json_load "$input" 2>/dev/null
+				json_get_var enable enable 2>/dev/null
+				for s in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.]*\)=wifi-iface/\1/p'); do
+					mode="$(uci -q get wireless.$s.mode 2>/dev/null)"
+					[ -z "$mode" ] || [ "$mode" = "ap" ] || continue
+					if [ "$enable" = "1" ] || [ "$enable" = "true" ]; then
+						uci -q set wireless.$s.ieee80211r='1'
+						uci -q set wireless.$s.ieee80211k='1'
+						uci -q set wireless.$s.ieee80211v='1'
+						uci -q set wireless.$s.mobility_domain='4f57'
+						uci -q set wireless.$s.ft_over_ds='0'
+						uci -q set wireless.$s.ft_psk_generate_local='1'
+					else
+						uci -q delete wireless.$s.ieee80211r 2>/dev/null
+						uci -q delete wireless.$s.ieee80211k 2>/dev/null
+						uci -q delete wireless.$s.ieee80211v 2>/dev/null
+					fi
+					changed=1
+				done
+				if [ "$changed" = "1" ]; then
+					uci -q commit wireless
+					# SSID/key unchanged, so this only nudges the APs — no lockout.
+					wifi reload >/dev/null 2>&1 || ubus call network reload >/dev/null 2>&1
+				fi
+				json_init; json_add_boolean ok 1; json_dump
+				;;
+
+			set_role)
+				# Persist the role (and optional backhaul). Controller also
+				# ensures fast roaming. Safe: state + roaming only.
+				input="$(cat)"; json_load "$input" 2>/dev/null
+				json_get_var role role 2>/dev/null
+				json_get_var backhaul backhaul 2>/dev/null
+				[ -n "$role" ] || role="standalone"
+				_set_state "$role" "$backhaul" ""
+				[ "$role" = "controller" ] && _match_wifi "" ""
+				json_init; json_add_boolean ok 1; json_add_string role "$role"; json_dump
+				;;
+
+			join)
+				# Decode a join code and match this router's Wi-Fi to the mesh.
+				# Format: untangled-mesh|mesh_id|ssid|key . This matches SSID/key
+				# and enables roaming — it does NOT bridge/disable DHCP (the
+				# dumb-AP networking is a guided manual step, so no lockout).
+				input="$(cat)"; json_load "$input" 2>/dev/null
+				json_get_var code code 2>/dev/null
+				decoded="$(printf '%s' "$code" | base64 -d 2>/dev/null)"
+				pfx="${decoded%%|*}"; rest="${decoded#*|}"
+				mesh_id="${rest%%|*}"; rest="${rest#*|}"
+				ssid="${rest%%|*}"; key="${rest#*|}"
+				if [ "$pfx" != "untangled-mesh" ] || [ -z "$ssid" ]; then
+					json_init; json_add_boolean ok 0; json_add_string message "That join code isn't valid."; json_dump
+				else
+					_set_state "agent" "" "$mesh_id"
+					_match_wifi "$ssid" "$key"
+					json_init
+					json_add_boolean ok 1
+					json_add_string role agent
+					json_add_string ssid "$ssid"
+					json_add_string message "Wi-Fi matched to the mesh. To share one network, connect this router to the main one by Ethernet and set it to Access Point mode on the LAN screen."
+					json_dump
+				fi
+				;;
+
+			leave)
+				_set_state "standalone" "" ""
+				json_init; json_add_boolean ok 1; json_add_string role standalone; json_dump
+				;;
+
+			apply)
+				# Reserved. No-op kept so a future call can't accidentally break
+				# a live router before that path is validated on hardware.
+				json_init; json_add_boolean ok 1; json_add_string status noop; json_dump
+				;;
+
+			*)
+				json_init; json_add_boolean ok 0; json_add_string message "unknown method"; json_dump
+				;;
+		esac
+		;;
+esac

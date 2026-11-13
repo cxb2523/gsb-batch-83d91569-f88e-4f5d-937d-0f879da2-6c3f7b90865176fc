@@ -1,0 +1,307 @@
+{
+  "untangled": {
+    "description": "UnTangled web interface - administrative access. uci is unrestricted (it is a router admin UI); file/exec grants are path-scoped to exactly what the UI calls.",
+    "read": {
+      "ubus": {
+        "session": [
+          "access",
+          "get",
+          "list"
+        ],
+        "uci": [
+          "get",
+          "state"
+        ],
+        "network.device": [
+          "status"
+        ],
+        "network.interface": [
+          "dump"
+        ],
+        "network.interface.*": [
+          "status"
+        ],
+        "network.wireless": [
+          "status"
+        ],
+        "iwinfo": [
+          "devices",
+          "info",
+          "scan",
+          "assoclist"
+        ],
+        "system": [
+          "board",
+          "info"
+        ],
+        "luci-rpc": [
+          "getNetworkDevices",
+          "getHostHints",
+          "getDHCPLeases",
+          "getWirelessDevices"
+        ],
+        "log": [
+          "read"
+        ],
+        "file": [
+          "read"
+        ],
+        "untangled.mesh": [
+          "info",
+          "status",
+          "nodes"
+        ],
+        "hostapd.*": [
+          "get_clients"
+        ]
+      },
+      "uci": [
+        "*"
+      ],
+      "file": {
+        "/etc/crontabs/root": [
+          "read"
+        ],
+        "/proc/mounts": [
+          "read"
+        ],
+        "/tmp/untangled-backup.tar.gz": [
+          "read"
+        ],
+        "/proc/*/mounts": [
+          "read"
+        ]
+      },
+      "cgi-io": {
+        "download": [
+          "read"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "uci": [
+          "add",
+          "set",
+          "delete",
+          "order",
+          "commit",
+          "apply",
+          "confirm",
+          "rollback"
+        ],
+        "network": [
+          "reload",
+          "restart"
+        ],
+        "network.interface.*": [
+          "up",
+          "down"
+        ],
+        "network.wireless": [
+          "up",
+          "down"
+        ],
+        "rpc-sys": [
+          "upgrade_test",
+          "upgrade_start",
+          "upgrade_clean"
+        ],
+        "file": [
+          "exec",
+          "write"
+        ],
+        "luci": [
+          "setPassword"
+        ],
+        "session": [
+          "destroy"
+        ],
+        "untangled.mesh": [
+          "set_roaming",
+          "set_role",
+          "join",
+          "leave",
+          "apply"
+        ]
+      },
+      "uci": [
+        "*"
+      ],
+      "file": {
+        "/etc/crontabs/root": [
+          "write"
+        ],
+        "/etc/openvpn/*.ovpn": [
+          "write"
+        ],
+        "/tmp/firmware.img": [
+          "write"
+        ],
+        "/tmp/untangled-restore.tar.gz": [
+          "write"
+        ],
+        "/etc/init.d/firewall reload": [
+          "exec"
+        ],
+        "/etc/init.d/cron enable": [
+          "exec"
+        ],
+        "/etc/init.d/cron restart": [
+          "exec"
+        ],
+        "/etc/init.d/uhttpd reload": [
+          "exec"
+        ],
+        "/etc/init.d/mwan3 restart": [
+          "exec"
+        ],
+        "/etc/init.d/miniupnpd restart": [
+          "exec"
+        ],
+        "/etc/init.d/miniupnpd stop": [
+          "exec"
+        ],
+        "/etc/init.d/miniupnpd enable": [
+          "exec"
+        ],
+        "/etc/init.d/ksmbd restart": [
+          "exec"
+        ],
+        "/etc/init.d/ksmbd reload": [
+          "exec"
+        ],
+        "/etc/init.d/ksmbd enable": [
+          "exec"
+        ],
+        "/etc/init.d/minidlna restart": [
+          "exec"
+        ],
+        "/etc/init.d/minidlna stop": [
+          "exec"
+        ],
+        "/etc/init.d/minidlna enable": [
+          "exec"
+        ],
+        "/etc/init.d/ddns reload": [
+          "exec"
+        ],
+        "/etc/init.d/sqm restart": [
+          "exec"
+        ],
+        "/sbin/reboot": [
+          "exec"
+        ],
+        "/sbin/sysupgrade -b /tmp/untangled-backup.tar.gz": [
+          "exec"
+        ],
+        "/sbin/sysupgrade -r /tmp/untangled-restore.tar.gz": [
+          "exec"
+        ],
+        "/bin/rm -f /tmp/untangled-backup.tar.gz": [
+          "exec"
+        ],
+        "/usr/bin/etherwake -i *": [
+          "exec"
+        ],
+        "/usr/bin/ether-wake -i *": [
+          "exec"
+        ],
+        "/usr/bin/vnstat --json": [
+          "exec"
+        ],
+        "/usr/sbin/nlbw -c json -g ip,mac -o rx_bytes": [
+          "exec"
+        ],
+        "/usr/bin/apk list --installed": [
+          "exec"
+        ],
+        "/usr/bin/apk list -I": [
+          "exec"
+        ],
+        "/bin/opkg list-installed": [
+          "exec"
+        ],
+        "/usr/sbin/tailscale status --json": [
+          "exec"
+        ],
+        "/usr/sbin/tailscale up --accept-routes --timeout=5s": [
+          "exec"
+        ],
+        "/usr/sbin/tailscale down": [
+          "exec"
+        ],
+        "/usr/bin/tailscale status --json": [
+          "exec"
+        ],
+        "/usr/bin/tailscale up --accept-routes --timeout=5s": [
+          "exec"
+        ],
+        "/usr/bin/tailscale down": [
+          "exec"
+        ],
+        "/bin/ping -c 3 -w 5 [!-]*": [
+          "exec"
+        ]
+      },
+      "cgi-io": {
+        "upload": [
+          "write"
+        ]
+      }
+    }
+  },
+  "untangled-readonly": {
+    "description": "UnTangled - read-only (dashboards, status, logs). No file access; uci limited to 'system' so no credentials are readable.",
+    "read": {
+      "ubus": {
+        "session": [
+          "access",
+          "get",
+          "list"
+        ],
+        "uci": [
+          "get",
+          "state"
+        ],
+        "network.device": [
+          "status"
+        ],
+        "network.interface": [
+          "dump"
+        ],
+        "network.interface.*": [
+          "status"
+        ],
+        "network.wireless": [
+          "status"
+        ],
+        "iwinfo": [
+          "devices",
+          "info",
+          "assoclist"
+        ],
+        "system": [
+          "board",
+          "info"
+        ],
+        "luci-rpc": [
+          "getNetworkDevices",
+          "getHostHints",
+          "getDHCPLeases",
+          "getWirelessDevices"
+        ],
+        "log": [
+          "read"
+        ],
+        "hostapd.*": [
+          "get_clients"
+        ]
+      },
+      "uci": [
+        "system"
+      ]
+    },
+    "write": {}
+  }
+}
