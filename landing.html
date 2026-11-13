@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2scraper — Montblanc Scraper</title>
+<meta name="description" content="Open-source Montblanc (montblanc.com) scraper — three engines, JSON/CSV, category listings, keyword searches and product pages with every variant's own price. No account, key or proxy needed.">
+<style>
+  :root{
+    --bg:#0F1419;
+    --panel:#171D24;
+    --panel-2:#131920;
+    --line:#26303B;
+    --text:#D8DEE6;
+    --muted:#8792A0;
+    --accent:#4A9EE8;
+    --grade:#37C978;
+    --warn:#E8B94A;
+    --mono:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans:'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); line-height:1.6;}
+  a{color:var(--accent); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .wrap{max-width:1000px; margin:0 auto; padding:0 24px;}
+
+  header.topbar{border-bottom:1px solid var(--line); background:var(--panel-2);}
+  .topbar-inner{display:flex; align-items:center; justify-content:space-between;
+                padding:16px 24px; max-width:1000px; margin:0 auto; gap:16px; flex-wrap:wrap;}
+  .logo{font-family:var(--mono); font-weight:700; font-size:14px; letter-spacing:.05em;}
+  .logo span{color:var(--muted);}
+  nav a{color:var(--muted); font-family:var(--mono); font-size:12.5px; margin-left:20px;}
+  nav a:hover{color:var(--accent);}
+
+  .hero{padding:72px 0 56px; border-bottom:1px solid var(--line);}
+  .hero h1{font-size:40px; line-height:1.15; margin:0 0 18px; letter-spacing:-.02em;}
+  .hero .lede{font-size:18px; color:var(--text); max-width:70ch; margin:0 0 14px;}
+  .hero .sub{font-size:16px; color:var(--muted); max-width:70ch; margin:0 0 28px;}
+  .cta{display:inline-block; background:var(--accent); color:#06121D; font-weight:600;
+       padding:11px 20px; border-radius:6px; font-size:15px;}
+  .cta:hover{text-decoration:none; filter:brightness(1.08);}
+  .cta.secondary{background:transparent; color:var(--text); border:1px solid var(--line); margin-left:10px;}
+
+  section{padding:52px 0; border-bottom:1px solid var(--line);}
+  h2{font-size:25px; margin:0 0 16px; letter-spacing:-.01em;}
+  h3{font-size:17px; margin:26px 0 8px;}
+  p{max-width:74ch;}
+  .muted{color:var(--muted);}
+
+  .callout{background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--grade);
+           border-radius:6px; padding:20px 22px; margin:22px 0; max-width:78ch;}
+  .callout.warn{border-left-color:var(--warn);}
+  .callout p:last-child{margin-bottom:0;}
+
+  pre{background:var(--panel-2); border:1px solid var(--line); border-radius:6px;
+      padding:16px 18px; overflow-x:auto; font-family:var(--mono); font-size:13px;
+      color:var(--text); line-height:1.5;}
+  code{font-family:var(--mono); font-size:.92em; color:var(--text);}
+  p code, li code, td code{background:var(--panel); border:1px solid var(--line);
+                           border-radius:4px; padding:1px 5px;}
+
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; margin-top:22px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:18px 20px;}
+  .card h3{margin:0 0 8px; font-size:15px;}
+  .card p{margin:0; font-size:14px; color:var(--muted);}
+
+  .table-scroll{overflow-x:auto; margin-top:18px;}
+  table{border-collapse:collapse; width:100%; min-width:520px; font-size:14.5px;}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{color:var(--muted); font-weight:600; font-size:12.5px; text-transform:uppercase; letter-spacing:.04em;}
+  .yes{color:var(--grade); font-weight:600;}
+  .no{color:var(--warn); font-weight:600;}
+
+  ul{max-width:76ch;}
+  li{margin-bottom:7px;}
+
+  footer{padding:36px 0 56px; color:var(--muted); font-size:14px;}
+  footer p{max-width:74ch;}
+
+  @media (max-width:640px){
+    .hero{padding:48px 0 40px;}
+    .hero h1{font-size:30px;}
+    .cta.secondary{margin-left:0; margin-top:10px;}
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="logo">2scraper<span> / montblanc-scraper</span></div>
+    <nav>
+      <a href="#measured">What was measured</a>
+      <a href="#traps">Site behaviour</a>
+      <a href="#products">2Captcha</a>
+      <a href="https://github.com/2scraper/montblanc-scraper">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Montblanc Scraper</h1>
+    <p class="lede">Open-source Montblanc scraper for montblanc.com — three engines,
+      your own infrastructure by default, and 2Captcha's paid products only where they
+      actually buy you something.</p>
+    <p class="sub">Category listings, keyword searches and full product pages: name, sku,
+      price, currency, stock, collection, colour, images and every variant of a product with
+      its own price — into JSON or CSV.</p>
+    <a class="cta" href="https://github.com/2scraper/montblanc-scraper">View source on GitHub</a>
+    <a class="cta secondary" href="https://github.com/2scraper/montblanc-scraper#readme">Read the README</a>
+  </div>
+</div>
+
+<section id="measured">
+  <div class="wrap">
+    <h2>What was actually measured</h2>
+
+    <div class="callout">
+      <p><strong>You do not need an account, a key or a proxy to scrape this site.</strong></p>
+      <p>Measured on 2026-09-17 from a bare datacenter address (Hetzner, Helsinki) with no
+        credentials configured at all: category listings, keyword searches and product pages
+        <strong>all answered HTTP 200</strong>. No reCAPTCHA, hCaptcha, Turnstile, DataDome,
+        PerimeterX, Incapsula, Kasada or AWS WAF markers appeared on any capture, and there is no
+        <code>data-sitekey</code> anywhere on the site.</p>
+    </div>
+
+    <p>We say that plainly instead of selling around it. What the paid products buy on this site
+      is <strong>a specific market</strong>: Montblanc serves every market from one host with the
+      locale in the URL path, and it <strong>sets prices per market rather than converting
+      them</strong> — one backpack was EUR 2000 on <code>en-fi</code>, EUR 1900 on
+      <code>de-de</code>, GBP 1700 on <code>en-gb</code> and USD 1990 on <code>en-us</code>. Two
+      of those share a currency and still disagree. They also buy volume from many addresses,
+      and not having to run a browser at all.</p>
+
+    <div class="table-scroll">
+      <table>
+        <tr><th>Page kind</th><th>From a datacenter IP, no key, no proxy</th></tr>
+        <tr><td>Category listing</td><td class="yes">HTTP 200</td></tr>
+        <tr><td>Keyword search</td><td class="yes">HTTP 200</td></tr>
+        <tr><td>Product page</td><td class="yes">HTTP 200</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>What you get</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Three engines, one schema</h3>
+        <p>Playwright (primary, with parallel page fetching), Selenium and Puppeteer via
+          pyppeteer — identical rows and exit codes — plus a browserless client for 2Captcha's
+          Scraping Browser API.</p>
+      </div>
+      <div class="card">
+        <h3>Three modes</h3>
+        <p>A category listing, a keyword search, or a single product page — and that last one
+          emits one row per variant, so a sixteen-nib Meisterst&uuml;ck is sixteen rows.</p>
+      </div>
+      <div class="card">
+        <h3>Structured data first</h3>
+        <p>Reads Montblanc's own <code>ItemList</code> and <code>ProductGroup</code>, enriched
+          from the site's tile attributes, with a URL-pattern fallback — no fragile CSS-class
+          scraping.</p>
+      </div>
+      <div class="card">
+        <h3>JSON, CSV and a sidecar</h3>
+        <p>One stable row schema, plus a <code>.meta.json</code> per run recording the market,
+          the ordering, the site's own totals and which pages failed by number.</p>
+      </div>
+      <div class="card">
+        <h3>Honest diffs</h3>
+        <p><code>diff_runs.py</code> refuses a comparison across markets, modes or orderings,
+          because each changes which products are in the file.</p>
+      </div>
+      <div class="card">
+        <h3>A canary with no secrets</h3>
+        <p>A real 3-page scrape runs daily from a bare CI runner — which is also what keeps the
+          claim above honest.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="traps">
+  <div class="wrap">
+    <h2>Traps it already handles</h2>
+
+    <h3>1. A product page publishes <code>ProductGroup</code>, not <code>ItemList</code></h3>
+    <p>Point a listing parser at one and it silently returns the &ldquo;you may also
+      like&rdquo; carousel as the page's products.</p>
+
+    <h3>2. Stock cannot be read from the structured data</h3>
+    <p><code>availability</code> said InStock on 192 of 192 rows measured, while the tiles said
+      sold-out on 7 of 384. The tile is what this scraper reads.</p>
+
+    <h3>3. &ldquo;From &euro;515&rdquo; is a minimum, not a price</h3>
+    <p>A variant group's price range is recorded as a minimum and labelled
+      <code>price_source: "dom_range"</code>.</p>
+
+    <h3>4. The edge refuses HTTP client libraries by killing the connection</h3>
+    <p><code>requests</code> reports that as a read timeout, which looks exactly like a slow
+      network and is not one.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Get started</h2>
+    <pre>git clone https://github.com/2scraper/montblanc-scraper.git
+cd montblanc-scraper
+pip install -r requirements.txt -r requirements-playwright.txt
+playwright install chromium
+
+python playwright_scraper.py \
+    --url "https://www.montblanc.com/en-us/writing-instruments" \
+    --pages 3 --format both</pre>
+    <p class="muted">No key, no proxy, no account. Output lands in
+      <code>montblanc_products.json</code>, <code>montblanc_products.csv</code> and a
+      <code>.meta.json</code> sidecar.</p>
+  </div>
+</section>
+
+<section id="products">
+  <div class="wrap">
+    <h2>Built on 2Captcha</h2>
+    <p>Captcha solving, the Scraping Browser API, proxies and fingerprints — four
+      separately-billed products behind one key. On this site they are optional, and the README
+      says so in the first section rather than the last.</p>
+    <p style="margin-top:18px;"><a href="https://2captcha.com">2captcha.com</a></p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>MIT licensed. Not affiliated with or endorsed by Montblanc.
+      Rate limits, terms of service and the legality of scraping in your jurisdiction are your
+      responsibility as the operator.</p>
+    <p><a href="https://github.com/2scraper/montblanc-scraper">github.com/2scraper/montblanc-scraper</a>
+      &nbsp;·&nbsp; <a href="https://2captcha.com">2captcha.com</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

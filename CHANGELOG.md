@@ -1,0 +1,526 @@
+# Changelog
+
+All notable changes to this project are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and versions follow [Semantic Versioning](https://semver.org/) as closely as a
+CLI toolkit can. A PATCH release means fixes — it does not promise that every
+flag and default is frozen, so a behaviour-changing default can appear in one.
+When it does, the release notes lead with it.
+
+## [Unreleased]
+
+### Changed
+
+- CI only: the scheduled canary now starts at 04:07 UTC (Mondays) instead of 05:40, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.
+- CI only: the whole canary, free and paid jobs alike, now runs weekly (Mondays 05:40 UTC) and on a manual dispatch; the daily schedule is removed.
+- README: the "Related scrapers" list is complete again, and the Tests section describes the canary's Scraping Browser job and why it fails rather than skips without its secret.
+
+### Fixed
+
+- `--mode product`: a product with no variants no longer names itself in `variant_of` and `base_sku`. As observed on 2026-11-05, Montblanc now publishes such a product as a `ProductGroup` whose only variant is the product itself, where it used to publish a plain `Product`; both shapes now give one row with `variant_of` and `base_sku` empty. Real variant groups are unchanged.
+- Tests only: the README column-count check read a sibling repository's column count in "Related scrapers" as a claim about this schema and failed. It now ignores that section and still checks the rest of the README.
+
+## [0.2.0] — 2026-10-16
+
+> **Behaviour changes.** A URL Montblanc answers with HTTP 404 (or its own
+> error page) now ends exit **5** with `stop_reason: not_found`, not exit 4
+> "zero products". `--pages 0`, `--concurrency 0` and a negative `--delay`,
+> `--retry-delay` or `--proxy-block-retries` are now usage errors (exit 2),
+> as is a negative `--retries` on the Scraper API client. CSV cells that
+> begin with `=`, `+`, `-`, `@`, a tab or a line break now carry a leading
+> `'` (CSV only; the sidecar counts them as `csv_cells_escaped`). Output
+> files are replaced atomically; a new file gets the mode your umask gives,
+> an existing one keeps its own. `.env.example` now ships `MONTBLANC_URL`
+> commented out.
+
+### Fixed
+
+- **The pyppeteer and Selenium engines crashed with no proxy.** A blocked
+  page, or (pyppeteer) a page that failed to load repeatedly, reached
+  `pool.current` / `pool.advance` with `pool` set to None: `AttributeError`,
+  exit 1, where the run should have reported exit 3 or 5. Both now take the
+  Playwright engine's form: rotate only with a pool, otherwise re-fetch
+  through the same path after a pause. An offline check drives each
+  engine's real `_fetch_one_page` with a fake session and no pool.
+- **`MONTBLANC_URL` overrode the command line.** Set (as `.env.example`
+  shipped it), it silently replaced the category `--category` asked for
+  (exit 0, the wrong category) and turned `--query` and `--locale` into
+  usage errors. The engines now record what was typed before the
+  environment fills anything in; a builder flag wins over the environment's
+  URL, and only a typed `--url` conflicts with it.
+- **A mistyped URL was reported as an empty catalogue.** The browser engines
+  threw away the navigation's HTTP status, and the site's 404 page (which
+  references its own assets) classified as "served, no products": exit 4.
+  Playwright and pyppeteer now pass the status to the classifier, the
+  site's error page is recognised by its structure for Selenium (checked on
+  four locales), and `not_found` is its own terminal state: not retried,
+  not blocked, exit 5.
+- **The Scraper API client never detected a block.** It compared the
+  `(state, detail)` tuple to `"blocked"`, which can never be equal, so a
+  refusal fell through to exit 4. It now reads the state, and reports a 404
+  as exit 5.
+- **A failed write destroyed the previous output.** `write_json`,
+  `write_csv` and the sidecar opened their target with `"w"`, truncating it
+  before writing; a write that raised halfway left a 0-byte `out.json` or
+  an invalid sidecar. All three now write a temp file in the same directory
+  and rename it into place.
+- **CSV cells were written as formulas.** A product text starting with `=`
+  (or `+ - @`, tab, CR, LF) is now prefixed with `'` in the CSV.
+- **The credential scan could scan nothing and pass.** Its exclusions were
+  tested against the ABSOLUTE path, so a clone under a directory named
+  `venv` or `.venv-…` skipped every file and printed "nothing
+  credential-shaped". It now uses paths relative to the repo, fails when it
+  scanned 0 files, and also reads `.env.*` copies, JSON, HTML, CSV and
+  `--dump-html` page files.
+- `.gitignore` now covers `X.pageN` dumps, a capture saved at the top of the
+  tree, and common scratch directories (`live/`, `out/`, `tmp/`, …).
+- The README described exit 5 as "remote API error"; it now says what the
+  code does (the content was never obtained). Credentials of a Scraping
+  Browser profile are no longer said to last "about a day": an expired one
+  answers HTTP 401, and that is what the docs now say.
+- The canary no longer asserts on stock (`in_stock` not constant) or on the
+  category's size; it checks that the result count is read. Its Scraping
+  Browser job now FAILS with an error naming `MONTBLANC_CDP_ENDPOINT` when
+  the secret is missing instead of skipping green.
+- References to private development notes were removed from code comments,
+  workflows and this changelog, and a suite check keeps them out.
+- The test matrix now includes Python 3.13, which the badge already claimed.
+
+### Shipped in 0.1.3 / 0.1.4 but missing from their notes
+
+- **The Scraper API path sent `waitFor` in a form the live API rejects,
+  and read the wrong field as the target's status.** Measured 2026-09-23
+  against `scraper.2captcha.com/tasks/sync`: `waitFor` sent as a
+  JSON-encoded string (what this client built for every `--wait-*` flag)
+  is answered HTTP 422 "params.waitFor must be an object" and is still
+  billed ($0.0005); the same request with an object gets HTTP 200. It is
+  now an object. And the response's `status` is the API's own verdict
+  ("success"), not the target site's HTTP code, which is `http_code` —
+  so a target 403 or 503 never reached the page classifier. The target
+  status is now read from `http_code` (falling back to `status` only if
+  that is an integer). Pinned by an offline check that drives the real
+  client with `requests.post` stubbed; verified by control (red with the
+  old client).
+- **The Selenium and Puppeteer engines' "blocked" message described another
+  site.** It said a datacenter address was what gets refused (measured
+  2026-09-16, before this repo existed), pointed at a `--mode profile` this
+  repo does not have, and recorded `blocked_by: "cloudflare (hard block)"`
+  where the Playwright engine records `"edge refusal"` — so the three engines
+  disagreed on `stop_reason` for the same page. Both now say what the
+  Playwright engine says: an ordinary datacenter address is served here, so
+  check the User-Agent first, then try another exit.
+- The Playwright engine's no-pool re-fetch log line claimed a re-fetch "is
+  often what clears it" on this site, and a comment cited a 403-from-a-
+  datacenter measurement. Neither was measured on Montblanc; both removed.
+- `--dump-html` help in all three engines pointed at a `TROUBLESHOOTING.md`
+  that does not exist; it now points at the README's "Traps that look like
+  bugs". The question issue template had the same dead link.
+- `captcha_solver.py`'s module docstring and its "what is not here" note
+  described another site's Cloudflare gate. They now state what was measured
+  here: no challenge of any kind, Akamai present in the headers only.
+- The bug-report and site-changed issue templates were another site's, with
+  its URLs, its bot manager and its columns. Rewritten for montblanc.com from
+  the README.
+- `landing.html` described a business directory (grades, accreditation,
+  complaint counts, a 15-page cap). Rewritten from `landing.md`.
+- `requirements.txt` named another repo in its header; `.dockerignore`
+  listed another repo's output prefix instead of `montblanc_products.*`.
+- A few comments that compared with a sibling's site without naming it as a
+  sibling now name `bbb-scraper`; one smoke-test docstring said "BBB has not
+  been measured" where it meant this site.
+
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+- `captcha_solver.py`'s docstring pointed at a "No DataDome solver" section
+  that does not exist in this repo (it came with the copied core). Removed.
+
+## [0.1.4] — 2026-10-07
+
+> **v0.1.3's captcha-budget fix was incomplete in two of the three engines.**
+> It reached Playwright and only ONE of the two call sites in pyppeteer and
+> Selenium, so one page could still buy two solves there against a limit of
+> one. If you are on v0.1.3 and use `--solve-captcha` with those engines,
+> take this one.
+
+### Fixed
+
+- **The pre-classification `handle_captcha_if_present` call is now budgeted
+  in pyppeteer and Selenium too.** The patch that rewrote the call sites
+  matched on surrounding text that differs between engines, so it landed in
+  one of three.
+
+### How it got out, which is the part worth reading
+
+v0.1.3 passed locally with 463 green checks and went **red in CI**. The
+check that catches this was gated behind `_import_engine`, and the venv
+those checks ran in has neither pyppeteer nor Selenium installed — so for
+exactly the two engines that were broken, it SKIPPED. `engine-smoke`, which
+installs each driver in its own venv, failed on both.
+
+The check reads source text off disk and never needed the import at all. It
+now runs unconditionally, with two further source assertions (a budget
+exists; no bare counter survives beside it), and the planted gap is red
+locally. Controlled by re-creating the exact state CI failed on.
+
+That is one rule twice over in one release: *when a check resolves something
+before testing it, ask what it does when the resolution fails.* This one
+stayed silent about the single loudest thing it could have said — and the
+release was announced before CI had confirmed it, which is what let a red
+commit carry a tag.
+
+### Note on the previous section
+
+The `[0.1.3]` entry below is left exactly as the tag published it. A
+released section is history that anyone can check with
+`git show v0.1.3:CHANGELOG.md`, so the correction belongs here rather than
+edited into it.
+
+## [0.1.3] — 2026-10-07
+
+> **`--mode product` was broken for most of the catalogue in v0.1.0-v0.1.2.**
+> A product with no variants publishes a plain JSON-LD `Product`, and the
+> parser handled only `ProductGroup`, so those pages returned ZERO rows.
+> Measured over 14 product URLs taken from a live listing on 2026-10-07:
+> **14 of 14** were the plain shape and all 14 parsed to nothing. The two
+> listing modes were unaffected.
+
+Five defects, all from a third-party audit, all reproduced here before being
+fixed and all controlled afterwards.
+
+### Fixed
+
+- **A product with no variants now parses** (was: 0 rows). `ProductGroup`
+  and plain `Product` go through the same row builder, so the two shapes
+  cannot drift in what they populate. Experience taught "a detail page may publish
+  a different type than the listing"; the correction is that a detail page
+  publishes a different type **depending on the product**, so counting the
+  blocks on one captured page answers for that page and not for the route.
+
+  It stayed hidden because both captured product pages happened to be
+  variant groups AND the canary pinned a 16-variant Meisterstück — a fixture
+  that picks the lucky case is a guard that cannot fail. The canary
+  now runs both shapes.
+
+- **A parse failure after page 1 reported a COMPLETE run.** The state was
+  set on every page and consulted on page 1 only, so the identical fault
+  came out as `parser_found_nothing` on page 1 and as `no_new_products` —
+  which IS a complete stop reason — on page 2. A run logged "failure in THIS
+  parser" and then exited 0 saying the catalogue had ended. `parse_failed`
+  now makes a page not-`ok`, which is the one predicate the page-1 branch,
+  the sequential loop and the concurrent workers already share, and all
+  three route their reason through one `_failure_reason` helper. A mid-run
+  parse failure now keeps its rows and reports `partial`, exit 6.
+
+- **One page could buy three captcha solves against a budget of one.**
+  `handle_captcha_if_present` runs twice per attempt and only the second
+  call was counted, so the uncounted one repeated on every block-retry.
+  Reproduced with the solver stubbed: **3 invocations, `SOLVES_PER_PAGE =
+  1`**. Both call sites now spend from one `_SolveBudget`, checked BEFORE
+  each purchase, and it does not reset on rotation — a fresh exit is a
+  reason to re-fetch, not a fresh allowance. This is the familiar "a policy
+  constant nothing reads" with a bill attached, and the same defect was
+  found family-wide.
+
+- **`--retries 0` skipped the navigation and blamed the site.**
+  `range(1, 0 + 1)` is empty, so the engine never called `goto`, then read
+  `about:blank` — 39 bytes, no assets — classified it as blocked and printed
+  advice about changing exits for a request it had never sent. Values below
+  1 are now refused at the CLI, along with `--pages 0`.
+
+- **`diff_runs.py` diffed runs it could not vouch for.** Two problems:
+  a missing sidecar SKIPPED the completeness guard rather than being a
+  refusal — so the check was silently disabled for exactly the files least
+  able to prove they are complete, and a failed run writes no sidecar on
+  purpose; and nothing compared the SELECTION, so a
+  `writing-instruments` run against a `bags` run of the same market and
+  ordering reported "3 added, 3 removed" with exit 0. Both now refuse, and
+  two runs of one listing at different page offsets still compare.
+
+### Tests
+
+463 offline checks. Every new one was controlled by planting the fault, and
+one of those controls paid for itself immediately: the first `--retries`
+check searched the SOURCE for its own error message, so disabling the guard
+while leaving the message in place kept the suite GREEN. It now invokes the
+parser and asserts the exit. That is the rule — a control is only as good
+as the edit it actually made — catching a check that tested a sentence
+rather than a behaviour.
+
+### Not changed, with reasons
+
+- **One shared fetch loop across the three engines**. A fair
+  recommendation and the page-2 bug is evidence for it — three copies of the
+  loop is why the parse-failure state reached one of three paths. But the family
+  states the per-engine loop as the family's design and binance-scraper is
+  the only repo that has unified it, so this is a family-wide decision
+  rather than a montblanc defect. Routing all three paths through
+  `_failure_reason` and `_SolveBudget` takes the specific divergences out
+  without rewriting the architecture under an audit's recommendation.
+- **Flat module names** (`output_writer`, `product_parser`, …) preventing
+  two scrapers in one environment. True, and deliberate family-wide: the family
+  documents a flat collection of scripts with one venv per repo.
+- **`complete` on a one-page run.** Correct as it stands: the sidecar
+  already records `total_results` and `pages_available`, so a reader can
+  tell a complete PAGE from a complete catalogue. The word describes the
+  request, which was settled earlier.
+
+## [0.1.2] — 2026-09-18
+
+> **Correction to v0.1.0 and v0.1.1.** Both said "no challenge of any kind
+> appeared — zero reCAPTCHA, Turnstile, DataDome, PerimeterX … markers". That
+> is true, and it reads as "this site has no bot management", which is FALSE.
+> Montblanc runs **Akamai Bot Manager**. It simply never challenged us.
+
+### Fixed
+
+- **The README now names the protection that is actually here.** Prompted by
+  a plain question — "did we meet a captcha, and which one?" — answered by
+  measuring rather than by re-reading the code (a plain
+  question has twice been the cheapest bug-finding tool available).
+
+  The captcha count holds and got stronger: **0 markers of any vendor across
+  37 captures totalling 21.7 MB**, including not one occurrence of the
+  literal word *captcha*, and 0 `data-sitekey`.
+
+  But the marker scan reads HTML BODIES, and this site's bot management is
+  in the RESPONSE HEADERS: `_abck` and `bm_sz` cookies on every response,
+  `ak_p` server-timing, `x-akamai-transformed`, with Cloudflare in the chain
+  too (`cf-ray`, `server: cloudflare`). A body-only scan reports a clean
+  page and is not wrong — it is just not looking where the answer is. This
+  is the lesson "'no challenge rendered' is not 'no captcha configured'" with the
+  evidence one layer out from where that section looks for it.
+
+  What was measured is that Bot Manager **never challenged**: `_abck` came
+  back with its `~-1~` validation field on all three consecutive fetches, so
+  no challenge was issued and no validation occurred. The honest claim is
+  "it did not challenge this kind of address today", not "there is nothing
+  here" — and volume, a worse-scored ASN or a policy change can each turn
+  that around.
+
+- **A stray `country-id` (Indonesia) in `env_config.py`'s endpoint example**,
+  inherited verbatim from tokopedia-scraper. Now `country-de`, which is a
+  market this repo actually discusses.
+
+### Added
+
+- A check pinning the finding in both directions: `_abck`, `bm_sz`, `ak_p`
+  and `x-akamai-transformed` must stay OUT of `BOT_CHALLENGE_MARKERS` (they
+  are on every GOOD response, so matching them would report a served
+  catalogue as blocked — the same mistake `akamai` itself would be), AND the
+  README must keep naming the bot manager, so "no captcha markers" can never
+  quietly become "no bot management". Both directions controlled.
+
+### Verified, not changed
+
+A full secret audit, since the repo is public:
+
+- **49 blobs across 75 objects** that have ever existed in this history —
+  nothing credential-shaped. Every `user:pass@`-shaped hit is a documentation
+  placeholder or a masking-test fixture.
+- **Zero 32-hex strings** anywhere in history.
+- **No `.env` was ever committed** — only `.env.example`.
+- **No repo secrets are set**, so nothing could leak through CI; the public
+  workflow logs carry no credential shapes either.
+- **Published artifacts are data only** (14 KB listing, 1.5 KB product) — no
+  `*_debug.html` page dump was ever uploaded.
+- Release notes, description, topics and the org-profile commit: clean.
+
+## [0.1.1] — 2026-09-18
+
+A pass back over the family's rules, one by one, checking each claim against
+the repo rather than against memory. It found one missing signal, one
+coverage floor that fires on correct data, and three pieces of stale
+presentation.
+
+### Added
+
+- **A served page that links to products and parses to ZERO rows now says so
+  by name**. It reports `stop_reason: parser_found_nothing`, is
+  excluded from `COMPLETE_STOP_REASONS`, and the canary fails on it by name.
+  Reported as plain "0 products" it would send the reader to check the URL
+  when the thing that moved is the parser. The exit code is unchanged —
+  the catalogue question really was answered — so only the status and the
+  reason carry the distinction.
+
+  Also check such a signal CAN fire before adding it: here it
+  can, because the tile fallback needs a `data-pid` element as well as a
+  product href, so markup that loses its tiles while keeping its links lands
+  exactly there.
+
+### Fixed
+
+- **`image_url` is no longer in the 99% coverage floor.** Montblanc's own
+  ItemList can name a product it renders no tile for, and such an entry
+  carries `"image": null` and `"brand": null` in the JSON-LD as well — so
+  there is nothing on the page to read. Measured: 1 row of 92 on a four-page
+  live run (`MB127852M`). The floor was firing on correct data, which is the
+  behaviour that teaches readers to ignore floors. The figure is still
+  reported on every page.
+- **The repo description was 29 words**, against the 15–25 the family notes
+  ask for. Now 23.
+- **A stale check count inherited from a sibling repo** (`~339 checks`) was
+  sitting in `pyproject.toml`, already wrong on arrival — the trap exactly.
+  Removed rather than updated: `python3 smoke_test.py` prints the real one.
+
+### Measured
+
+Negative results, recorded because "we did not implement it" and "the site
+has none" are different facts and only the second justifies the omission.
+All on 2026-09-17/18:
+
+- **No captcha is wired on this site at all** — 0 `data-sitekey`, 0
+  `*_SITE_KEY`, 0 `<captcha-*>` elements, 0 reCAPTCHA/Turnstile/hCaptcha
+  references across listing, product and home pages. That is stronger than
+  "no challenge was rendered", which is all a sibling repo could say.
+- **No `<link rel="next">` on any listing kind**, so the selector layer of
+  the family's three-layer pagination rule is unavailable here and the
+  remaining two (a verified `start`/`sz` convention, and the data running
+  out) are the whole of it.
+- **No cents-dash prices** (`349,– €`) on `en-fi`, `de-de` or `en-us`, and
+  **no instalment text inside any price node** — so neither guard is ported.
+- **Headless and headful both work**: 2/2 and 2/2, 24 rows either way. This
+  site does not discriminate, unlike foodpanda where headless was 0/4.
+- **`--concurrency 3` verified live** across four pages: rows merged in page
+  order, `(page, position)` and `sku` unique, `status: complete`.
+
+## [0.1.0] — 2026-09-17
+
+First release. Scrapes montblanc.com through Playwright, Selenium, pyppeteer
+or the 2Captcha Scraping Browser API, in three modes, with one row schema.
+
+### The headline, because it decides whether you need to buy anything
+
+**You do not need a 2Captcha account to scrape this site.** Measured
+2026-09-17 from a bare datacenter address (Hetzner, Helsinki, AS24940) with no
+key, no proxy and no fingerprinting: category listings, keyword searches and
+product pages all answered HTTP 200. No reCAPTCHA, hCaptcha, Turnstile,
+DataDome, PerimeterX, Incapsula, Kasada or AWS WAF markers appeared on any
+capture, and there is no `data-sitekey` anywhere on the site.
+
+What the paid products buy here is a *specific market* (prices are set per
+market), volume from many addresses, and not having to run a browser — not
+access. The daily canary runs with no secrets and is expected to be green,
+which is what keeps that claim from going stale silently.
+
+### Added
+
+- **Three modes, one schema.** `--mode category` (default), `--mode search`,
+  and `--mode product`, which emits **one row per variant** out of the page's
+  `ProductGroup` — a sixteen-nib Meisterstück is sixteen rows, each with its
+  own sku and price. A listing row cannot answer "what does the Medium nib
+  cost"; these can.
+- **Four engines that agree.** Playwright (primary, with `--concurrency`),
+  pyppeteer, Selenium, and a Scraper API client needing no local browser. All
+  three local engines were run live and returned identical output: the same
+  25 skus for `/en-fi/bags/backpacks`, with identical prices, currencies,
+  stock flags and titles, and the same `status`, `stop_reason` and page
+  counts.
+- **`--sort`, and it disagrees with the site on purpose.** Montblanc's own
+  default is a merchandising rule, and page 1 under it shares **0 of 24**
+  products with page 1 under price-ascending. The default here is
+  `price-asc`, the only ordering stable enough for a multi-page run or a
+  price diff; `--sort recommended` reproduces a visitor's view. The ordering
+  is a COLUMN, because it decides which products are in the file rather than
+  how they are arranged, and `diff_runs.py` refuses to compare across it.
+- **`--locale`, and it is not cosmetic.** Montblanc serves every market from
+  one host with the locale in the path and **sets prices per market rather
+  than converting them**: one backpack was EUR 2000 on `en-fi`, EUR 1900 on
+  `de-de`, GBP 1700 on `en-gb` and USD 1990 on `en-us`. Two of those share a
+  currency and still disagree, so `locale` is on every row and `diff_runs.py`
+  refuses a cross-market comparison.
+- **Pagination planned from the site's own arithmetic.** `start`/`sz` on the
+  listing URL, verified against the site's own sort links rather than
+  guessed, and clamped to the `result-count` page 1 prints. There is no page
+  cap: `/en-fi/writing-instruments` states 280 results and 240 + 24 + 16 =
+  280 exactly, so a run that walks a category to the end holds all of it.
+- **A sidecar per run** recording `total_results`, `pages_available`,
+  `page_size`, `locale`, `sort_requested` and `site_default_sort`, plus which
+  pages failed by number.
+
+### Site-shaped traps this release already handles
+
+Each of these was hit while building, and each returns a wrong answer that
+looks right:
+
+- **A product page publishes `ProductGroup`, not `ItemList`.** Point the
+  listing parser at one and it finds no structured data — and then its tile
+  fallback returned the *"you may also like"* carousel as **18 products with
+  prices**, in silence. `parse_products` now refuses a detail page on the
+  page's own evidence.
+- **`in_stock` cannot be read from the structured data.**
+  `offers.availability` was `InStock` on **192 of 192** listing rows — a
+  template default — while the tiles' own `item_available` was `soldout` on
+  **7 of 384**. Stock is read from the tile, and left `null` where there is
+  no tile rather than filled with the default.
+- **A "From €515" range is not a price.** The JSON-LD omits `offers.price`
+  for variant groups (14 of 192 rows); the DOM renders a minimum over the
+  group instead. It is recorded with `price_source: "dom_range"` so a
+  consumer can exclude it from a comparison.
+- **The JSON-LD and the tile can spell one product two ways.** A listing
+  entry's URL said `MB132288M` while its tile said `data-pid="MB132288VG"`.
+  Joined on the full sku they never meet, and 3 of 71 rows on one live run
+  silently lost `image_url`, `in_stock`, `collection` and `color` while
+  looking fine. The join falls back to the base id, and refuses when two
+  tiles share one base rather than guessing.
+- **The refusal is not a page and not a status code.** The edge kills the
+  connection for a request whose User-Agent names an HTTP client library:
+  `curl` sees an HTTP/2 INTERNAL_ERROR, `requests` sees a **ReadTimeout**,
+  which is indistinguishable from a slow network. Measured refused: no UA,
+  `curl/8.5.0`, `python-requests/2.31.0`, `Python-urllib/3.11`,
+  `Go-http-client/2.0`. Measured served: `Mozilla/5.0`, `Wget/1.21`,
+  `Scrapy/2.11`, and the literal string `foo`. The browser engines never meet
+  it; `page_flow.classify_transport_error` names it for anything that does.
+- **`akamai` is not a block marker.** The site is Akamai-fronted and
+  references `akamaihd.net` on every page it serves, so a bare `akamai`
+  marker would report a served catalogue as blocked. Counted on known-good
+  pages before the set was written. `cf-turnstile` is absent too, for the
+  reason it is absent across this family: 2Captcha's own Scraping Browser
+  auto-solve extension injects it into every page it loads.
+- **The result-count noun is localised and the number is not.** en-fi writes
+  "280 Results" and en-us writes "281 **Items**". The first version matched a
+  list of nouns and reported `total_results: null` on the very first US run;
+  it now matches the digits and ignores the word.
+- **The locale list from the site's own country selector is incomplete by
+  exactly one** — it omits whichever market you are browsing from. Used as an
+  allowlist it refused `en-fi`, the market the site geo-redirects a Finnish
+  visitor to, with a reason that was false. The check is now the URL shape,
+  and an unlisted locale warns rather than refuses.
+- **The site never reports which ordering it applied.** Its `ruleId` and its
+  checked sort radio are both the category's *default* on every request,
+  whatever was asked for, while the results demonstrably change. The `sort`
+  column records the request; the default goes in the sidecar under
+  `site_default_sort`. An earlier version read `ruleId` as the applied sort
+  and warned on every page of every run.
+
+### Columns this site does not have
+
+The family's rule is that a column null on every row should not exist, and
+that removing one needs the measurement written down. Counted over 384 tiles
+on eight categories plus two product pages:
+
+- `original_price`, `discount_pct`, `lowest_price_30d` — 0 strike-price
+  nodes, 0 `discount`, 0 `price-standard` anywhere. `/en-fi/sale` and
+  `/en-fi/outlet` are both HTTP 404: Montblanc is a full-price house, so
+  there is no reduction to disclose and no EU Omnibus 30-day low either.
+- `rating`, `review_count` — 0 `aggregateRating`, 0 `ratingValue`,
+  0 `reviewCount` on a listing, a bag page or a pen page. No review system.
+- `ean`, `gtin`, `mpn` — absent from every JSON-LD block.
+- `engraved` — `item_engraved` was False on 384 of 384 tiles, a constant.
+
+### Tests
+
+395 offline checks, no network and no engine library required. Fixtures are
+cut from real captures taken 2026-09-17, and each was verified to parse to
+identical values to its untrimmed original before being committed. Every new
+check was controlled by planting the fault and confirming the suite went red —
+which caught two checks that were passing for the wrong reason, one because
+its fixture carried no carousel and one because its "escaped" fixture
+contained a marker verbatim.
+
+[0.2.0]: https://github.com/2scraper/montblanc-scraper/releases/tag/v0.2.0
+[0.1.4]: https://github.com/2scraper/montblanc-scraper/releases/tag/v0.1.4
+[0.1.3]: https://github.com/2scraper/montblanc-scraper/releases/tag/v0.1.3
+[0.1.2]: https://github.com/2scraper/montblanc-scraper/releases/tag/v0.1.2
+[0.1.1]: https://github.com/2scraper/montblanc-scraper/releases/tag/v0.1.1
+[0.1.0]: https://github.com/2scraper/montblanc-scraper/releases/tag/v0.1.0

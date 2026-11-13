@@ -1,0 +1,130 @@
+name: Bug report
+description: The scraper ran but the result was wrong, empty, or it crashed.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: never paste an API key, a proxy password or a
+        full `ws://user:pass@...` endpoint into a public issue.** The scrapers
+        mask credentials in their own logs, but raw HTML dumps and the Scraper
+        API's `x-debug` header do not. Replace them with `***`.
+
+        Two things answer most reports faster than we can:
+
+        - **Everything exit 3?** Unusual here: an ordinary datacenter
+          address was served normally (measured 2026-09-17, no proxy, no
+          key). Check the User-Agent first — Montblanc's edge kills the
+          connection for `curl`, `python-requests` and other HTTP-client
+          UAs, and `requests` reports that as a read timeout. Then try a
+          different exit with `--proxy` or `--cdp-endpoint`.
+        - **Zero products?** You may be on a page that has none — a
+          `/discover/` landing page, or one page past the end of a listing.
+          It answers 200 with nothing on it, which is exit 4 and a correct
+          answer. If the page visibly has products, the log says
+          `parser_found_nothing` and that is our bug: file a site-change
+          report.
+        - **A price of "From $515"?** That is a minimum over a variant
+          group, recorded with `price_source: "dom_range"`. Use
+          `--mode product` for each variant's own price. See the README's
+          "Traps that look like bugs".
+        - **Different prices for the same product?** Montblanc sets prices
+          per market (the locale in the URL path), not by conversion — two
+          markets in the same currency can disagree. The row's `locale`
+          says which market answered.
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine
+      options:
+        - playwright_scraper.py
+        - puppeteer_scraper.py
+        - selenium_scraper.py
+        - scraper_api_client.py
+        - fingerprint_client.py
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser_route
+    attributes:
+      label: How was the browser reached
+      options:
+        - A browser the script launched itself
+        - A remote browser over --cdp-endpoint
+        - No browser (scraper_api_client.py over plain HTTP)
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >-
+        `echo $?` straight after the run. These mean specific things — 3 is a
+        challenge page, 4 is "ran fine, found nothing", 124 is a self-imposed
+        timeout. The table is in the README.
+      placeholder: "4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command
+      description: With credentials replaced by `***`.
+      render: shell
+      placeholder: |
+        python3 playwright_scraper.py \
+          --url "https://www.montblanc.com/en-us/writing-instruments" \
+          --pages 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        The whole run, not just the last line — the useful detail is usually
+        upstream of the error. Credentials replaced by `***`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: >-
+        70 rows across 3 pages, as the README's example run shows.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run and paste:
+        ```
+        python3 -c "import sys, platform; print(sys.version, platform.platform())"
+        pip list 2>/dev/null | grep -Ei "playwright|pyppeteer|selenium|beautifulsoup4|requests|webdriver"
+        python3 smoke_test.py | tail -3
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The offline suite passes on my machine (`python3 smoke_test.py`)
+          required: true
+        - label: I removed every API key, password and credentialled URL from this report
+          required: true

@@ -1,0 +1,3105 @@
+#!/usr/bin/env python3
+"""
+smoke_test.py — the offline suite for montblanc-scraper.
+
+One file of plain functions with inline fixtures. No pytest, no conftest, no
+fixtures directory; `tests/test_smoke.py` wraps this as a
+single pytest test so `pytest` works as an entry point without a second copy
+of the checks.
+
+    python3 smoke_test.py            run everything
+    python3 smoke_test.py -v         print every check as it passes
+
+It must pass with NO engine library installed at all: every
+`import playwright_scraper` / `selenium_scraper` / `puppeteer_scraper` is
+guarded and the skip is RECORDED, because "skipped, engine absent" reads
+identically to a real import error. CI installs each engine in its own venv
+and fails if that engine's group reports a skip.
+
+The fixtures
+------------
+Every one is cut from a real capture taken 2026-09-17 and trimmed to the
+parts the parser reads. Each was verified to parse to IDENTICAL values to
+its untrimmed original before being committed — the trimming
+script asserts field-by-field equality on every row, not merely that the row
+count matched.
+
+    LISTING_HTML         /en-fi/writing-instruments, 3 of its 24 products:
+                         one ordinarily priced, two of the range-priced
+                         variant groups whose JSON-LD carries no price.
+    SOLDOUT_HTML         /en-fi/gifts, which is where the sold-out tiles are.
+                         It exists so `in_stock` can be checked against a
+                         page that really has both values on it.
+    PRODUCT_HTML         a Meisterstück fountain pen: `ProductGroup`, three
+                         of its sixteen variants.
+    GRID_FRAGMENT_HTML   the `Search-UpdateGrid` fragment the site's own
+                         front end calls — tiles with ZERO JSON-LD blocks.
+    CHROMIUM_ERROR_HTML  Chromium's own network-error page, produced by
+                         driving a real browser through a dead proxy. It
+                         carries `<title>www.montblanc.com</title>` — the
+                         site's own hostname — and no vendor marker at all,
+                         which is why positive-asset detection is the only
+                         thing that classifies it correctly.
+
+No personal data appears in any of them: Montblanc publishes products, not
+people, and none of the captures carries a name, a review or a session token.
+`check_fixtures_carry_no_session_material` guards that for the next capture.
+"""
+
+import argparse
+import ast
+import csv
+import inspect
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import asdict, fields
+
+from output_writer import Product
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+FAILURES = []
+PASSED = 0
+SKIPS = []
+VERBOSE = False
+
+
+def check(name, condition, detail=""):
+    """Record a check. `detail` may be any value — it is coerced.
+
+    Coerced rather than required to be a string because a check whose detail
+    is a list is the common case ("got %s", sorted(missing)), and a suite
+    that raises TypeError while REPORTING a failure hides the failure it was
+    about to report. Found by controlling the checks: two of them turned a
+    clean red into an ERROR line that named the wrong problem.
+    """
+    global PASSED
+    if not isinstance(detail, str):
+        detail = repr(detail)
+    if condition:
+        PASSED += 1
+        if VERBOSE:
+            print("  ok   %s" % name)
+    else:
+        FAILURES.append("%s%s" % (name, (" — " + detail) if detail else ""))
+        print("  FAIL %s%s" % (name, (" — " + detail) if detail else ""))
+
+
+def equal(name, got, want):
+    check(name, got == want, "got %r, want %r" % (got, want))
+
+
+def skip(group, reason):
+    SKIPS.append("%s: %s" % (group, reason))
+    print("  SKIP %s — %s" % (group, reason))
+# Captured 2026-11-05 from the live en-us page: the same product as
+# SINGLE_PRODUCT_HTML, now wrapped in a ProductGroup whose one variant is itself.
+# Trimmed to the JSON-LD and the market keys; parses identically to the full page.
+SINGLE_GROUP_HTML = "<!doctype html><html><head><title>Montblanc</title>\n<script>var preloadedData = {\"pg_country\":\"US\",\"pg_language\":\"en\",\"currency\":\"USD\"};</script>\n<script type=\"application/ld+json\">{\"@context\":\"http://schema.org/\",\"@type\":\"ProductGroup\",\"name\":\"Piston Converter StarWalker\",\"description\":\"Piston filling system, suitable for StarWalker collections\",\"sku\":\"MB128502\",\"brand\":{\"@type\":\"Brand\",\"name\":\"montblanc\"},\"image\":[\"https://www.montblanc.com/dw/image/v2/bhdb_prd/on/demandware.static/-/Sites-montblanc-master/default/dwc4adf077/images/all-images/MB128502/ZOI33NRcQe2T7TyO_wuDEg_d21dca94.png?sw=1250&q=90\"],\"url\":\"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\",\"color\":\"BLACK\",\"hasVariant\":[{\"@context\":\"http://schema.org/\",\"@type\":\"Product\",\"name\":\"Piston Converter StarWalker\",\"description\":\"Piston filling system, suitable for StarWalker collections\",\"sku\":\"MB128502\",\"brand\":{\"@type\":\"Brand\",\"name\":\"montblanc\"},\"image\":[\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwc4adf077/images/all-images/MB128502/ZOI33NRcQe2T7TyO_wuDEg_d21dca94.png\"],\"offers\":{\"url\":\"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\",\"@type\":\"Offer\",\"priceCurrency\":\"USD\",\"price\":\"15.00\",\"availability\":\"http://schema.org/InStock\"},\"url\":\"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\",\"color\":\"BLACK\",\"productGroupID\":\"MB128502\",\"material\":\"\"}],\"productGroupID\":\"MB128502\"}</script>\n<script type=\"application/ld+json\">{\"@context\":\"https://schema.org/\",\"@type\":\"BreadcrumbList\",\"itemListElement\":[{\"@type\":\"ListItem\",\"position\":1,\"name\":\"Home\",\"item\":\"https://www.montblanc.com/en-us\"},{\"@type\":\"ListItem\",\"position\":2,\"name\":\"Refills & Stationery\",\"item\":\"https://www.montblanc.com/en-us/refills-stationery\"},{\"@type\":\"ListItem\",\"position\":3,\"name\":\"Notebooks & Stationery\",\"item\":\"https://www.montblanc.com/en-us/refills-stationery/stationery\"},{\"@type\":\"ListItem\",\"position\":4,\"name\":\"Fountain Pen Accessories\",\"item\":\"https://www.montblanc.com/en-us/refills-stationery/stationery/fountain-pen-accessories\"},{\"@type\":\"ListItem\",\"position\":5,\"name\":\"Piston Converter StarWalker\",\"item\":\"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\"}]}</script>\n</head><body><div class=\"product-detail\" data-pid=\"MB128502\"></div>\n</body></html>"
+LISTING_HTML = "<!doctype html><html><head><title>Montblanc</title>\n<script>var preloadedData = {\"pg_country\":\"FI\",\"pg_language\":\"en\",\"currency\":\"EUR\"};</script>\n<script type=\"application/ld+json\">{\"@context\": \"https://schema.org\", \"@type\": \"ItemList\", \"itemListElement\": [{\"@context\": \"https://schema.org\", \"@type\": \"ListItem\", \"position\": 1, \"item\": {\"@type\": \"Product\", \"name\": \"Meisterstück Bloom Gold-Coated Fountain Pen Set\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"url\": \"/en-fi/meisterstuck-bloom-gold-coated-fountain-pen-set-MB138571.html\", \"image\": [\"https://www.montblanc.com/dw/image/v2/BHDB_PRD/on/demandware.static/-/Sites-montblanc-master/default/dw9918751f/images/all-images/MB138571/CaR-3FdeR0SWARuWzN2cyQ_60af8759.png?sw=315&q=90\"], \"offers\": {\"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": 3780, \"availability\": \"http://schema.org/InStock\"}}}, {\"@context\": \"https://schema.org\", \"@type\": \"ListItem\", \"position\": 2, \"item\": {\"@type\": \"Product\", \"name\": \"Meisterstück Platinum-Coated Classique Ballpoint\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"url\": \"/en-fi/meisterstuck-platinum-coated-classique-ballpoint-MB132446M.html\", \"image\": [\"https://www.montblanc.com/dw/image/v2/BHDB_PRD/on/demandware.static/-/Sites-montblanc-master/default/dwf029989e/images/all-images/MB132446/XEsB-x4KRs2NRNfNCsPVXw_bedd9fa8.png?sw=315&q=90\"], \"offers\": {\"@type\": \"AggregateOffer\", \"priceCurrency\": \"EUR\", \"lowPrice\": 515, \"highPrice\": 580, \"availability\": \"http://schema.org/InStock\"}}}, {\"@context\": \"https://schema.org\", \"@type\": \"ListItem\", \"position\": 3, \"item\": {\"@type\": \"Product\", \"name\": \"Meisterstück Gold-Coated Classique Ballpoint\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"url\": \"/en-fi/meisterstuck-gold-coated-classique-ballpoint-MB132453M.html\", \"image\": [\"https://www.montblanc.com/dw/image/v2/BHDB_PRD/on/demandware.static/-/Sites-montblanc-master/default/dwbbb08bc8/images/all-images/MB132453/2044823_ac3458fc.png?sw=315&q=90\"], \"offers\": {\"@type\": \"AggregateOffer\", \"priceCurrency\": \"EUR\", \"lowPrice\": 545, \"highPrice\": 610, \"availability\": \"http://schema.org/InStock\"}}}]}</script>\n</head><body>\n<div class=\"grid-header\">class=\"result-count\">\n        \n    <span>\n        280 Results\n    </span></div>\n<div class=\"grid\" data-page-size=\"24.0\" data-page-number=\"0.0\" data-cfg=\"&quot;ruleId&quot;:&quot;recommended_sv_30d&quot;}\">\n<div class=\"product\" data-pid=\"MB138571\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB138571&quot;,&quot;item_name&quot;:&quot;Meisterstück Bloom Gold-Coated Fountain Pen Set&quot;,&quot;item_brand&quot;:&quot;mtb&quot;,&quot;item_size&quot;:&quot;N/A&quot;,&quot;item_reference&quot;:&quot;MB138571&quot;,&quot;item_available&quot;:&quot;available&quot;,&quot;price&quot;:3780,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dw9918751f/images/all-images/MB138571/CaR-3FdeR0SWARuWzN2cyQ_60af8759.png&quot;,&quot;item_collection&quot;:&quot;Meisterstück&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:false,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;listCategory.pagetemplate.:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Search-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;Red&quot;,&quot;item_sub_collection&quot;:&quot;N/A&quot;,&quot;item_variant&quot;:&quot;Red&quot;,&quot;item_category&quot;:&quot;Fountain Pens&quot;,&quot;item_category_id&quot;:&quot;fountain-pens&quot;,&quot;uniqueEventId&quot;:146}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/meisterstuck-bloom-gold-coated-fountain-pen-set-MB138571.html\" class=\"pdp-link\"></a><div class=\"price\">\n<span class=\"price-container\">\n<span class=\"sales\">\n            \n            € 3,780.00\n\n\n        </span>\n</span>\n</div></div></div>\n<div class=\"product\" data-pid=\"MB132446M\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB132446M&quot;,&quot;item_name&quot;:&quot;Meisterstück Platinum-Coated Classique Ballpoint&quot;,&quot;item_brand&quot;:&quot;mtb&quot;,&quot;item_size&quot;:&quot;N/A&quot;,&quot;item_reference&quot;:&quot;MB132446&quot;,&quot;item_available&quot;:&quot;available&quot;,&quot;price&quot;:&quot;515.00&quot;,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwf029989e/images/all-images/MB132446/XEsB-x4KRs2NRNfNCsPVXw_bedd9fa8.png&quot;,&quot;item_collection&quot;:&quot;Meisterstück&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:false,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;listCategory.pagetemplate.:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Search-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;Black&quot;,&quot;item_sub_collection&quot;:&quot;Precious Resin - Platinum-Coated&quot;,&quot;item_variant&quot;:&quot;Black&quot;,&quot;item_category&quot;:&quot;Ballpoint Pens&quot;,&quot;item_category_id&quot;:&quot;ballpoint-pens&quot;,&quot;uniqueEventId&quot;:465}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/meisterstuck-platinum-coated-classique-ballpoint-MB132446M.html\" class=\"pdp-link\"></a><div class=\"price\">\n<span class=\"range\">\n<span class=\"from-range-text\">From </span>\n<span class=\"value\" content=\"515.00\">\n        € 515.00\n\n\n    </span>\n</span>\n</div></div></div>\n<div class=\"product\" data-pid=\"MB132453M\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB132453M&quot;,&quot;item_name&quot;:&quot;Meisterstück Gold-Coated Classique Ballpoint&quot;,&quot;item_brand&quot;:&quot;mtb&quot;,&quot;item_size&quot;:&quot;N/A&quot;,&quot;item_reference&quot;:&quot;MB132453&quot;,&quot;item_available&quot;:&quot;available&quot;,&quot;price&quot;:&quot;545.00&quot;,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwbbb08bc8/images/all-images/MB132453/2044823_ac3458fc.png&quot;,&quot;item_collection&quot;:&quot;Meisterstück&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:false,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;listCategory.pagetemplate.:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Search-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;Black&quot;,&quot;item_sub_collection&quot;:&quot;Precious Resin - Gold-Coated&quot;,&quot;item_variant&quot;:&quot;Black&quot;,&quot;item_category&quot;:&quot;Ballpoint Pens&quot;,&quot;item_category_id&quot;:&quot;ballpoint-pens&quot;,&quot;uniqueEventId&quot;:882}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/meisterstuck-gold-coated-classique-ballpoint-MB132453M.html\" class=\"pdp-link\"></a><div class=\"price\">\n<span class=\"range\">\n<span class=\"from-range-text\">From </span>\n<span class=\"value\" content=\"545.00\">\n        € 545.00\n\n\n    </span>\n</span>\n</div></div></div>\n</div>\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/img0.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/img1.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/img2.png\">\n</body></html>"
+
+SOLDOUT_HTML = "<!doctype html><html><head><title>Montblanc</title>\n<script>var preloadedData = {\"pg_country\":\"FI\",\"pg_language\":\"en\",\"currency\":\"EUR\"};</script>\n<script type=\"application/ld+json\">{\"@context\": \"https://schema.org\", \"@type\": \"ItemList\", \"itemListElement\": [{\"@context\": \"https://schema.org\", \"@type\": \"ListItem\", \"position\": 1, \"item\": {\"@type\": \"Product\", \"name\": \"Set with Fineliner, Notebook & Cufflinks\", \"url\": \"/en-fi/set-with-fineliner-notebook-cufflinks-MB1003B.html\", \"image\": [\"https://www.montblanc.com/dw/image/v2/BHDB_PRD/on/demandware.static/-/Sites-montblanc-master/default/dwb5ba24ee/images/all-images/MB1003B/MB1003B_1.png?sw=315&q=90\"], \"offers\": {\"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": 100, \"availability\": \"http://schema.org/InStock\"}}}, {\"@context\": \"https://schema.org\", \"@type\": \"ListItem\", \"position\": 2, \"item\": {\"@type\": \"Product\", \"name\": \"Set with Medium Backpack & Mini Wallet\", \"url\": \"/en-fi/set-with-medium-backpack-mini-wallet-MB1009B.html\", \"image\": [\"https://www.montblanc.com/dw/image/v2/BHDB_PRD/on/demandware.static/-/Sites-montblanc-master/default/dw8e55b81b/images/all-images/MB1009B/MB1009B_1.png?sw=315&q=90\"], \"offers\": {\"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": 380, \"availability\": \"http://schema.org/InStock\"}}}]}</script>\n</head><body>\n<div class=\"grid-header\">class=\"result-count\">\n        \n    <span>\n        739 Results\n    </span></div>\n<div class=\"grid\" data-page-size=\"24.0\" data-page-number=\"0\" data-cfg=\"&quot;ruleId&quot;:&quot;recommended_sv_30d&quot;}\">\n<div class=\"product\" data-pid=\"MB1003B\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB1003B&quot;,&quot;item_name&quot;:&quot;Set with Fineliner, Notebook &amp; Cufflinks&quot;,&quot;item_brand&quot;:&quot;&quot;,&quot;item_size&quot;:&quot;N/A&quot;,&quot;item_reference&quot;:&quot;MB1003B&quot;,&quot;item_available&quot;:&quot;soldout&quot;,&quot;price&quot;:&quot;100.00&quot;,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwb5ba24ee/images/all-images/MB1003B/MB1003B_1.png&quot;,&quot;item_collection&quot;:&quot;N/A&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:&quot;N/A&quot;,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;listCategory.pagetemplate.:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Search-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;N/A&quot;,&quot;item_sub_collection&quot;:&quot;N/A&quot;,&quot;item_variant&quot;:&quot;N/A&quot;,&quot;item_category&quot;:&quot;Back to Work&quot;,&quot;item_category_id&quot;:&quot;back-to-work&quot;,&quot;uniqueEventId&quot;:495}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/set-with-fineliner-notebook-cufflinks-MB1003B.html\" class=\"pdp-link\"></a><div class=\"price\">\n<span>\n<span class=\"sales\">\n<span class=\"value\">€ 1.045,00</span>\n</span>\n</span>\n</div></div></div>\n<div class=\"product\" data-pid=\"MB1009B\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB1009B&quot;,&quot;item_name&quot;:&quot;Set with Medium Backpack &amp; Mini Wallet&quot;,&quot;item_brand&quot;:&quot;&quot;,&quot;item_size&quot;:&quot;N/A&quot;,&quot;item_reference&quot;:&quot;MB1009B&quot;,&quot;item_available&quot;:&quot;soldout&quot;,&quot;price&quot;:&quot;380.00&quot;,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dw8e55b81b/images/all-images/MB1009B/MB1009B_1.png&quot;,&quot;item_collection&quot;:&quot;N/A&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:&quot;N/A&quot;,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;listCategory.pagetemplate.:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Search-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;N/A&quot;,&quot;item_sub_collection&quot;:&quot;N/A&quot;,&quot;item_variant&quot;:&quot;N/A&quot;,&quot;item_category&quot;:&quot;Back to Work&quot;,&quot;item_category_id&quot;:&quot;back-to-work&quot;,&quot;uniqueEventId&quot;:745}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/set-with-medium-backpack-mini-wallet-MB1009B.html\" class=\"pdp-link\"></a><div class=\"price\">\n<span>\n<span class=\"sales\">\n<span class=\"value\">€ 2.110,00</span>\n</span>\n</span>\n</div></div></div>\n</div>\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/img0.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/img1.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/img2.png\">\n</body></html>"
+
+PRODUCT_HTML = "<!doctype html><html><head><title>Montblanc</title>\n<script>var preloadedData = {\"pg_country\":\"FI\",\"pg_language\":\"en\",\"currency\":\"EUR\"};</script>\n<script type=\"application/ld+json\">{\"@context\": \"http://schema.org/\", \"@type\": \"ProductGroup\", \"name\": \"Meisterstück Gold-Coated LeGrand Fountain Pen\", \"description\": \"The Meisterstück LeGrand in deep black precious resin with gold-coated details, surmounted by the white star emblem and finished with a handcrafted gold nib, evolves into Montblanc’s design icon.\", \"sku\": \"MB132460\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"image\": [\"https://www.montblanc.com/dw/image/v2/BHDB_PRD/on/demandware.static/-/Sites-montblanc-master/default/dwdb3c668a/images/all-images/MB132460/cZirSB-URi2MKg3AktxGdw_6cd5fb48.png?sw=1250&q=90\"], \"offers\": {\"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-legrand-fountain-pen-MB132460.html\", \"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": \"1000.00\", \"availability\": \"http://schema.org/InStock\"}, \"variesBy\": \"https://schema.org/size\", \"hasVariant\": [{\"@context\": \"http://schema.org/\", \"@type\": \"Product\", \"name\": \"Meisterstück Gold-Coated Classique Fountain Pen\", \"description\": \"The Meisterstück LeGrand in deep black precious resin with gold-coated details, surmounted by the white star emblem and finished with a handcrafted gold nib, evolves into Montblanc’s design icon.\", \"sku\": \"MB132464\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"image\": [\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwb24eabda/images/all-images/MB132580/QZHURSXbpEu0N--PYY-UnQ_2d65f2c5.png\"], \"offers\": {\"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-legrand-fountain-pen-MB132460.html\", \"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": \"850.00\", \"availability\": \"http://schema.org/InStock\"}, \"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-classique-fountain-pen-MB132464.html\", \"size\": \"MTB_WRITING_INSTRUMENT_M\", \"color\": \"BLACK\", \"material\": \"\"}, {\"@context\": \"http://schema.org/\", \"@type\": \"Product\", \"name\": \"Meisterstück Gold-Coated Classique Fountain Pen\", \"description\": \"The Meisterstück LeGrand in deep black precious resin with gold-coated details, surmounted by the white star emblem and finished with a handcrafted gold nib, evolves into Montblanc’s design icon.\", \"sku\": \"MB132579\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"image\": [\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwb24eabda/images/all-images/MB132580/QZHURSXbpEu0N--PYY-UnQ_2d65f2c5.png\"], \"offers\": {\"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-legrand-fountain-pen-MB132460.html\", \"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": \"850.00\", \"availability\": \"http://schema.org/InStock\"}, \"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-classique-fountain-pen-MB132579.html\", \"size\": \"BB\", \"color\": \"BLACK\", \"material\": \"\"}, {\"@context\": \"http://schema.org/\", \"@type\": \"Product\", \"name\": \"Meisterstück Gold-Coated Classique Fountain Pen\", \"description\": \"The Meisterstück LeGrand in deep black precious resin with gold-coated details, surmounted by the white star emblem and finished with a handcrafted gold nib, evolves into Montblanc’s design icon.\", \"sku\": \"MB132578\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"image\": [\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwb24eabda/images/all-images/MB132580/QZHURSXbpEu0N--PYY-UnQ_2d65f2c5.png\"], \"offers\": {\"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-legrand-fountain-pen-MB132460.html\", \"@type\": \"Offer\", \"priceCurrency\": \"EUR\", \"price\": \"850.00\", \"availability\": \"http://schema.org/InStock\"}, \"url\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-classique-fountain-pen-MB132578.html\", \"size\": \"OBB\", \"color\": \"BLACK\", \"material\": \"\"}]}</script>\n<script type=\"application/ld+json\">{\"@context\": \"https://schema.org/\", \"@type\": \"BreadcrumbList\", \"itemListElement\": [{\"@type\": \"ListItem\", \"position\": 1, \"name\": \"Home\", \"item\": \"https://www.montblanc.com/en-fi\"}, {\"@type\": \"ListItem\", \"position\": 2, \"name\": \"Writing Instruments\", \"item\": \"https://www.montblanc.com/en-fi/writing-instruments\"}, {\"@type\": \"ListItem\", \"position\": 3, \"name\": \"Fountain Pens\", \"item\": \"https://www.montblanc.com/en-fi/writing-instruments/fountain-pens\"}, {\"@type\": \"ListItem\", \"position\": 4, \"name\": \"Meisterstück Gold-Coated LeGrand Fountain Pen\", \"item\": \"https://www.montblanc.com/en-fi/meisterstuck-gold-coated-legrand-fountain-pen-MB132460.html\"}]}</script>\n</head><body><div class=\"product-detail\" data-pid=\"MB132460\"></div>\n<section class=\"recommendations\"><h2>You may also like</h2>\n<div class=\"product\" data-pid=\"MB136801\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB136801&quot;,&quot;item_name&quot;:&quot;Ink Bottle, The Legend of Zodiacs The Goat, Red, 50 ml&quot;,&quot;item_brand&quot;:&quot;mtb&quot;,&quot;item_size&quot;:&quot;50 ml&quot;,&quot;item_reference&quot;:&quot;MB136801&quot;,&quot;item_available&quot;:&quot;available&quot;,&quot;price&quot;:55,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dw982fb1ef/images/all-images/MB136801/uccMwncRStSfW8nKV_0jtg_0983294b.png&quot;,&quot;item_collection&quot;:&quot;Fountain Pen&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:false,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;Product pages:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Product-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;Red&quot;,&quot;item_sub_collection&quot;:&quot;Ink Bottle&quot;,&quot;item_variant&quot;:&quot;Red&quot;,&quot;item_category&quot;:&quot;Ink bottles&quot;,&quot;item_category_id&quot;:&quot;ink-bottles&quot;,&quot;uniqueEventId&quot;:32}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/ink-bottle-the-legend-of-zodiacs-the-goat-red-50-ml-MB136801.html\" class=\"pdp-link\"></a><div class=\"product-price price\">\n<span>\n<span class=\"sales\">\n<span class=\"value\" content=\"55.00\"></span>\n        \n\n        € 55.00\n    </span>\n</span>\n</div></div></div>\n<div class=\"product\" data-pid=\"MB136803\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB136803&quot;,&quot;item_name&quot;:&quot;Ink Bottle, Writers Edition Homage to Bram Stoker, Purple, 50 ml&quot;,&quot;item_brand&quot;:&quot;mtb&quot;,&quot;item_size&quot;:&quot;50 ml&quot;,&quot;item_reference&quot;:&quot;MB136803&quot;,&quot;item_available&quot;:&quot;available&quot;,&quot;price&quot;:55,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwdbb0f518/images/all-images/MB136803/Cb0wAF_vSGOpnDByn-jCDg_6fec0c03.png&quot;,&quot;item_collection&quot;:&quot;Fountain Pen&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;N/A&quot;,&quot;item_special_edition&quot;:false,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;Product pages:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Product-Show&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;Purple&quot;,&quot;item_sub_collection&quot;:&quot;Ink Bottle&quot;,&quot;item_variant&quot;:&quot;Purple&quot;,&quot;item_category&quot;:&quot;Ink bottles&quot;,&quot;item_category_id&quot;:&quot;ink-bottles&quot;,&quot;uniqueEventId&quot;:807}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/ink-bottle-writers-edition-homage-to-bram-stoker-purple-50-ml-MB136803.html\" class=\"pdp-link\"></a><div class=\"product-price price\">\n<span>\n<span class=\"sales\">\n<span class=\"value\" content=\"55.00\"></span>\n        \n\n        € 55.00\n    </span>\n</span>\n</div></div></div>\n</section>\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/i0.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/i1.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/i2.png\">\n</body></html>"
+
+SINGLE_PRODUCT_HTML = "<!doctype html><html><head><title>Montblanc</title>\n<script>var preloadedData = {\"pg_country\":\"US\",\"pg_language\":\"en\",\"currency\":\"USD\"};</script>\n<script type=\"application/ld+json\">{\"@context\": \"http://schema.org/\", \"@type\": \"Product\", \"name\": \"Piston Converter StarWalker\", \"description\": \"Piston filling system, suitable for StarWalker collections\", \"sku\": \"MB128502\", \"brand\": {\"@type\": \"Brand\", \"name\": \"montblanc\"}, \"image\": [\"https://www.montblanc.com/dw/image/v2/bhdb_prd/on/demandware.static/-/Sites-montblanc-master/default/dw03a63fbf/images/all-images/MB128502/ZOI33NRcQe2T7TyO_wuDEg_d21dca94.png?sw=1250&q=90\"], \"offers\": {\"url\": \"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\", \"@type\": \"Offer\", \"priceCurrency\": \"USD\", \"price\": \"15.00\", \"availability\": \"http://schema.org/InStock\"}, \"url\": \"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\", \"color\": \"BLACK\"}</script>\n<script type=\"application/ld+json\">{\"@context\": \"https://schema.org/\", \"@type\": \"BreadcrumbList\", \"itemListElement\": [{\"@type\": \"ListItem\", \"position\": 1, \"name\": \"Home\", \"item\": \"https://www.montblanc.com/en-us\"}, {\"@type\": \"ListItem\", \"position\": 2, \"name\": \"Refills & Stationery - Art of The Desk\", \"item\": \"https://www.montblanc.com/en-us/refills-stationery\"}, {\"@type\": \"ListItem\", \"position\": 3, \"name\": \"Stationery\", \"item\": \"https://www.montblanc.com/en-us/refills-stationery/stationery\"}, {\"@type\": \"ListItem\", \"position\": 4, \"name\": \"Fountain Pen Accessories\", \"item\": \"https://www.montblanc.com/en-us/refills-stationery/stationery/fountain-pen-accessories\"}, {\"@type\": \"ListItem\", \"position\": 5, \"name\": \"Piston Converter StarWalker\", \"item\": \"https://www.montblanc.com/en-us/piston-converter-starwalker-MB128502.html\"}]}</script>\n</head><body><div class=\"product-detail\" data-pid=\"MB128502\"></div>\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/i0.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/i1.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/i2.png\">\n</body></html>"
+
+GRID_FRAGMENT_HTML = "<div class=\"product-item-wrapper\" data-position=\"25.0\"><div class=\"product\" data-pid=\"MB223111VG\"><div class=\"product-tile\" data-tracking-click-event=\"select_item\" data-tracking-event-payload=\"{&quot;ecommerce&quot;:{&quot;currency&quot;:&quot;EUR&quot;,&quot;productListItem&quot;:&quot;&quot;,&quot;productListId&quot;:&quot;&quot;,&quot;productListIndex&quot;:&quot;&quot;,&quot;items&quot;:[{&quot;item_id&quot;:&quot;MB223111VG&quot;,&quot;item_name&quot;:&quot;Montblanc Panorama Medium Backpack&quot;,&quot;item_brand&quot;:&quot;mtb&quot;,&quot;item_size&quot;:&quot;N/A&quot;,&quot;item_reference&quot;:&quot;MB223111VG&quot;,&quot;item_available&quot;:&quot;soldout&quot;,&quot;price&quot;:1790,&quot;item_engraved&quot;:false,&quot;item_embossed&quot;:false,&quot;item_personalized&quot;:false,&quot;quantity&quot;:1,&quot;product_image_url&quot;:&quot;https://www.montblanc.com/on/demandware.static/-/Sites-montblanc-master/default/dwdd7ed333/images/all-images/MB223111/0N8L85BORFWgngIKcZIHUQ_0219c0da.png&quot;,&quot;item_collection&quot;:&quot;Technical Fabric&quot;,&quot;item_line&quot;:&quot;N/A&quot;,&quot;item_vertical&quot;:&quot;N/A&quot;,&quot;item_sellable&quot;:&quot;N/A&quot;,&quot;item_material_case&quot;:&quot;N/A&quot;,&quot;item_material_strap&quot;:&quot;N/A&quot;,&quot;item_material_leather&quot;:&quot;Fabric&quot;,&quot;item_special_edition&quot;:false,&quot;item_dial&quot;:&quot;N/A&quot;,&quot;item_adjusted&quot;:&quot;N/A&quot;,&quot;item_list_name&quot;:&quot;listCategory.pagetemplate.otherpages:  - /on/demandware.store/Sites-MontblancROW-Site/en_FI/Search-UpdateGrid&quot;,&quot;item_list_id&quot;:&quot;N/A&quot;,&quot;index&quot;:&quot;N/A&quot;,&quot;item_material_color&quot;:&quot;khaki&quot;,&quot;item_sub_collection&quot;:&quot;City Bags&quot;,&quot;item_variant&quot;:&quot;khaki&quot;,&quot;item_category&quot;:&quot;Backpacks&quot;,&quot;item_category_id&quot;:&quot;backpacks&quot;,&quot;uniqueEventId&quot;:260}]},&quot;name&quot;:&quot;Product List Click&quot;,&quot;event&quot;:&quot;select_item&quot;,&quot;reference&quot;:&quot;Product&quot;}\"><a href=\"/en-fi/montblanc-panorama-medium-backpack-MB223111VG.html\" class=\"pdp-link\"></a><div class=\"price\">\n<span class=\"price-container\">\n<span class=\"sales\">\n            \n            € 1,790.00\n\n\n        </span>\n</span>\n</div></div></div></div>\n<img src=\"https://www.montblanc.com/on/demandware.static/x0.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/x1.png\">\n<img src=\"https://www.montblanc.com/on/demandware.static/x2.png\">"
+
+CHROMIUM_ERROR_HTML = "<html><head><title>www.montblanc.com</title></head><body>: Contacting the system admin Checking the proxy address ERR_PROXY_CONNECTION_FAILED <button id=\"details-button\" class=\"secondary-button text-button </body></html>"
+
+
+# ---------------------------------------------------------------------------
+# The parser, asserted on VALUES rather than on coverage
+# ---------------------------------------------------------------------------
+# A column can be 100% populated and entirely wrong, so every
+# check below pins a figure from the real capture rather than counting
+# non-nulls.
+
+LISTING_URL = "https://www.montblanc.com/en-fi/writing-instruments?start=0&sz=24"
+GIFTS_URL = "https://www.montblanc.com/en-fi/gifts?start=0&sz=24"
+PRODUCT_URL = ("https://www.montblanc.com/en-fi/"
+               "meisterstuck-gold-coated-legrand-fountain-pen-MB132460.html")
+
+
+def check_listing_parses():
+    from product_parser import parse_listing
+    page = parse_listing(LISTING_HTML, LISTING_URL, page=1, sort="price-asc")
+    rows = page.rows
+    equal("listing: row count", len(rows), 3)
+
+    by_sku = {r.sku: r for r in rows}
+    equal("listing: skus", sorted(by_sku), ["MB132446M", "MB132453M", "MB138571"])
+
+    row = by_sku["MB138571"]
+    equal("listing: price is the JSON-LD's own number", row.price, 3780.0)
+    equal("listing: currency is the written ISO code", row.currency, "EUR")
+    equal("listing: price_source names the node", row.price_source, "jsonld")
+    equal("listing: brand", row.brand, "montblanc")
+    equal("listing: locale comes from the URL", row.locale, "en-fi")
+    check("listing: url is absolute", row.url.startswith("https://www.montblanc.com/"),
+          row.url)
+    check("listing: url ends at the product", row.url.endswith("-MB138571.html"), row.url)
+
+
+def check_a_range_is_not_a_price():
+    """The 'From 515' case, which is the site's own second price shape.
+
+    14 of 192 listing rows measured had NO `offers.price` in the JSON-LD, and
+    every one of them was a variant group rendering a range. The number is
+    recorded — it is true and useful — but a consumer comparing prices has to
+    be able to exclude it, so it carries its own `price_source`.
+    """
+    from product_parser import parse_products
+    rows = {r.sku: r for r in parse_products(LISTING_HTML, LISTING_URL)}
+
+    ranged = rows["MB132446M"]
+    equal("range: the minimum is recorded", ranged.price, 515.0)
+    equal("range: price_source says it is a range", ranged.price_source, "dom_range")
+    equal("range: currency still resolves", ranged.currency, "EUR")
+
+    equal("range: the second one too", rows["MB132453M"].price, 545.0)
+    equal("range: and its source", rows["MB132453M"].price_source, "dom_range")
+
+    # The guard that matters: a range must never be indistinguishable from a
+    # price. If this ever starts returning "dom" the column silently begins
+    # claiming that a group's cheapest variant IS the product's price.
+    check("range: no ranged row claims price_source 'jsonld'",
+          all(r.price_source != "jsonld" for r in rows.values()
+              if r.sku.endswith("M")),
+          [r.price_source for r in rows.values() if r.sku.endswith("M")])
+
+
+def check_stock_comes_from_the_tile_not_the_jsonld():
+    """The measurement that decided where `in_stock` is read from.
+
+    `offers.availability` was `InStock` on 192 of 192 listing rows across four
+    categories, while the tiles' own `item_available` was `soldout` on 7 of
+    384. Read from the JSON-LD this column is a constant; read from the tile
+    it is a fact. This fixture is cut from a capture that HAS sold-out rows,
+    which is the only way the check can fail honestly.
+    """
+    from product_parser import parse_products, _ld_offer, _ld_in_stock, ld_blocks
+    from product_parser import _item_list_products
+
+    rows = parse_products(SOLDOUT_HTML, GIFTS_URL)
+    check("stock: the fixture has rows", len(rows) >= 2, len(rows))
+    check("stock: at least one row is out of stock",
+          any(r.in_stock is False for r in rows),
+          [(r.sku, r.in_stock) for r in rows])
+
+    # And the JSON-LD on those SAME rows says in stock — which is the whole
+    # point. If this ever starts agreeing, the site changed and the comment
+    # in output_writer should be re-measured rather than trusted.
+    nodes = _item_list_products(ld_blocks(SOLDOUT_HTML))
+    ld_says = {_ld_in_stock(_ld_offer(n)) for n in nodes}
+    check("stock: the JSON-LD claims in-stock for all of them",
+          ld_says == {True},
+          "JSON-LD availability values: %r (if this is no longer {True}, "
+          "re-measure output_writer's claim)" % (ld_says,))
+
+
+def check_unknown_availability_is_none_not_true():
+    """An allowlist, so a value the site adds later reads as unknown."""
+    from product_parser import _TILE_STOCK
+    equal("stock: available -> True", _TILE_STOCK.get("available"), True)
+    equal("stock: soldout -> False", _TILE_STOCK.get("soldout"), False)
+    equal("stock: anything else -> unknown", _TILE_STOCK.get("preorder"), None)
+
+
+def check_a_detail_page_is_not_a_listing():
+    """The detail-page trap, stated as the failure rather than guarded against.
+
+    A product page publishes `ProductGroup` and no `ItemList`, so the listing
+    parser finds no structured data — and its tile fallback would then return
+    the 'you may also like' carousel as the page's products. Measured on the
+    real pen page before the guard existed: 18 rows, every one of them a
+    neighbour, with prices, in silence.
+    """
+    from product_parser import parse_products, parse_product_detail
+
+    # The fixture CARRIES a recommendation tile, which is what makes this
+    # check able to fail (a guard is only as good as the fixture it runs
+    # against). Controlled by disabling the guard: without the carousel in
+    # the fixture the check stayed GREEN with the fault planted and proved
+    # nothing.
+    from product_parser import _parse_tiles_only
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(PRODUCT_HTML, "html.parser")
+    stealable = _parse_tiles_only(soup, PRODUCT_HTML, base_url=PRODUCT_URL,
+                                  page=1, mode="category", sort=None,
+                                  locale="en-fi", locale_cur="EUR")
+    check("detail: the fixture carries neighbour tiles the fallback WOULD take",
+          len(stealable) >= 2,
+          "without them the next check passes for the wrong reason — "
+          "controlled by disabling both guards, and it stayed green until "
+          "this fixture carried a real carousel")
+    check("detail: and they are NOT the product itself",
+          all(r.sku != "MB132460" for r in stealable),
+          [r.sku for r in stealable])
+
+    equal("detail: the listing parser returns NOTHING on a product page",
+          len(parse_products(PRODUCT_HTML, PRODUCT_URL)), 0)
+    equal("detail: and returns nothing even with no base_url to check",
+          len(parse_products(PRODUCT_HTML, "")), 0)
+    equal("detail: the detail parser returns NOTHING on a listing",
+          len(parse_product_detail(LISTING_HTML, LISTING_URL)), 0)
+
+
+def check_product_detail_is_one_row_per_variant():
+    from product_parser import parse_product_detail
+    rows = parse_product_detail(PRODUCT_HTML, PRODUCT_URL)
+    equal("detail: one row per variant", len(rows), 3)
+    equal("detail: variants have distinct skus", len({r.sku for r in rows}), 3)
+    equal("detail: every row names its group",
+          {r.variant_of for r in rows}, {"MB132460"})
+    equal("detail: mode", {r.mode for r in rows}, {"product"})
+    equal("detail: the variant price, not the group's",
+          sorted({r.price for r in rows}), [850.0])
+    equal("detail: category from the breadcrumb",
+          {r.category for r in rows}, {"Fountain Pens"})
+
+
+def check_a_variant_url_is_its_own_not_the_groups():
+    """The `offers.url` trap, inverted — and it is the quiet kind.
+
+    On this site EVERY variant's `offers.url` is the GROUP's page, while its
+    own `url` is the variant's. Reading `offers.url` makes all sixteen rows
+    of a pen point at one address while their titles, skus and prices all
+    look correct.
+    """
+    from product_parser import parse_product_detail, ld_blocks, _ld_offer
+    rows = parse_product_detail(PRODUCT_HTML, PRODUCT_URL)
+
+    equal("variant urls: all distinct", len({r.url for r in rows}), len(rows))
+    check("variant urls: none is the group's page",
+          all(not r.url.endswith("-MB132460.html") for r in rows),
+          [r.url for r in rows])
+
+    # Pin the trap itself, so a future reader can see WHY the code prefers
+    # `url`: the offers.url really is the group's, on every variant.
+    group = [b for b in ld_blocks(PRODUCT_HTML)
+             if b.get("@type") == "ProductGroup"][0]
+    offer_urls = {_ld_offer(v).get("url") for v in group.get("hasVariant") or []}
+    equal("variant urls: every offers.url IS the group's (the trap)",
+          len(offer_urls), 1)
+
+
+def check_the_internal_nib_code_is_unwrapped():
+    """`MTB_WRITING_INSTRUMENT_M` is the site's constant for exactly one value.
+
+    Every other nib width comes back as a clean two-letter code, so writing
+    the long form through leaves the M nib as the one variant that will not
+    join with its siblings.
+    """
+    from product_parser import _variant_value
+    equal("variant value: the internal constant is unwrapped",
+          _variant_value("MTB_WRITING_INSTRUMENT_M"), "M")
+    equal("variant value: an ordinary code is untouched",
+          _variant_value("OBB"), "OBB")
+    equal("variant value: a human string is untouched",
+          _variant_value("Tweed Blue"), "Tweed Blue")
+    equal("variant value: N/A is absence", _variant_value("N/A"), None)
+
+
+def check_the_tile_join_survives_a_different_variant_suffix():
+    """Measured: the ItemList and the tile can spell one product two ways.
+
+        JSON-LD url   …-MB132288M.html
+        tile          data-pid="MB132288VG"
+
+    Joined on the full sku those never meet, and the row silently loses
+    `image_url`, `in_stock`, `collection` and `color` — 3 of 71 rows on one
+    live run, while the row itself looked fine.
+    """
+    from product_parser import base_id, _by_base, _join_tile
+
+    equal("join: base id strips a variant suffix", base_id("MB132288M"), "MB132288")
+    equal("join: and the other suffix", base_id("MB132288VG"), "MB132288")
+    equal("join: a bare id is its own base", base_id("MB220310"), "MB220310")
+    equal("join: a non-id is None", base_id("not-an-id"), None)
+
+    tiles = {"MB132288VG": "the tile"}
+    by_base = _by_base(tiles)
+    equal("join: exact sku wins",
+          _join_tile("MB132288VG", tiles, by_base), "the tile")
+    equal("join: base id is the fallback",
+          _join_tile("MB132288M", tiles, by_base), "the tile")
+
+    # AMBIGUITY IS REFUSED. Two variants of one product on one page means
+    # picking either would be a guess, so the row keeps the JSON-LD's answer
+    # and the tile columns stay None.
+    two = {"MB132288VG": "first", "MB132288XX": "second"}
+    equal("join: two tiles sharing a base are not guessed between",
+          _join_tile("MB132288M", two, _by_base(two)), None)
+
+
+def check_the_range_rows_still_get_their_tile_columns():
+    """The regression the base-id join exists to prevent, end to end."""
+    from product_parser import parse_products
+    rows = {r.sku: r for r in parse_products(LISTING_HTML, LISTING_URL)}
+    for sku in ("MB132446M", "MB132453M"):
+        row = rows[sku]
+        check("join: %s kept its image" % sku, row.image_url is not None, row.image_url)
+        check("join: %s kept its category" % sku, row.category is not None, row.category)
+
+
+def check_a_tiles_only_page_still_parses():
+    """The `Search-UpdateGrid` fragment: 24 tiles, ZERO JSON-LD blocks.
+
+    Which page kind server-renders its grid decides what "unknown"
+    means, and on this site the two listing kinds disagree. A parser that
+    only reads structured data returns nothing here and calls a served page
+    empty.
+    """
+    from product_parser import parse_products, ld_blocks, detect_page_state
+    equal("fragment: it really has no JSON-LD", len(ld_blocks(GRID_FRAGMENT_HTML)), 0)
+    rows = parse_products(GRID_FRAGMENT_HTML,
+                          "https://www.montblanc.com/en-fi/bags/backpacks")
+    equal("fragment: the tile path still yields a row", len(rows), 1)
+    equal("fragment: with its id", rows[0].sku, "MB223111VG")
+    equal("fragment: and its price", rows[0].price, 1790.0)
+    equal("fragment: read from the DOM", rows[0].price_source, "dom")
+    equal("fragment: classified as content, not empty",
+          detect_page_state(GRID_FRAGMENT_HTML, 200, "")[0], "content")
+
+
+def check_page_and_position_are_threaded_through():
+    from product_parser import parse_products
+    p1 = parse_products(LISTING_HTML, LISTING_URL, page=1)
+    p2 = parse_products(LISTING_HTML, LISTING_URL, page=2)
+    equal("page: page 1 rows say page 1", {r.page for r in p1}, {1})
+    equal("page: page 2 rows say page 2", {r.page for r in p2}, {2})
+    equal("position: restarts at 1 on each page",
+          [r.position for r in p1], [r.position for r in p2])
+    pairs = {(r.page, r.position) for r in p1 + p2}
+    equal("page+position: unique across a two-page run", len(pairs), len(p1) + len(p2))
+
+
+SINGLE_PRODUCT_URL = ("https://www.montblanc.com/en-us/"
+                      "piston-converter-starwalker-MB128502.html")
+
+
+def check_a_product_with_no_variants_still_parses():
+    """The common detail shape, and the one that returned NOTHING.
+
+    Experience taught "a DETAIL page may publish a different JSON-LD type than the
+    listing", and this repo handled `ProductGroup` on that basis. The
+    correction a third-party audit found: a detail page publishes a
+    different type **depending on the product**. A product with no variants
+    publishes a plain `Product`.
+
+    That is not an edge case here. Measured 2026-10-07 over 14 product URLs
+    taken straight from a live `writing-instruments` listing: **14 of 14**
+    were plain `Product`, and all 14 parsed to ZERO rows — so `--mode
+    product` was broken for essentially the whole catalogue.
+
+    It stayed invisible because both captured product pages happened to be
+    variant groups, and because the canary pinned a 16-variant Meisterstück:
+    a fixture that picks the lucky case is a guard that cannot fail.
+    """
+    from product_parser import parse_product_detail, ld_blocks
+
+    types = [b.get("@type") for b in ld_blocks(SINGLE_PRODUCT_HTML)]
+    check("single: the fixture really is a plain Product, not a ProductGroup",
+          "Product" in types and "ProductGroup" not in types, types)
+
+    rows = parse_product_detail(SINGLE_PRODUCT_HTML, SINGLE_PRODUCT_URL)
+    equal("single: it yields exactly one row", len(rows), 1)
+    row = rows[0]
+    equal("single: sku", row.sku, "MB128502")
+    equal("single: price", row.price, 15.0)
+    equal("single: currency", row.currency, "USD")
+    equal("single: in_stock", row.in_stock, True)
+    equal("single: price_source", row.price_source, "jsonld")
+    equal("single: category from the breadcrumb", row.category,
+          "Fountain Pen Accessories")
+    # No group above it, so no `variant_of`. Writing its own sku there would
+    # invent a group that does not exist.
+    equal("single: variant_of is None", row.variant_of, None)
+    equal("single: mode", row.mode, "product")
+
+    # The detail-page guard must still hold in BOTH directions after the widening:
+    # a standalone Product is top-level, while a listing nests its products
+    # inside itemListElement, so this must not start eating listings.
+    from product_parser import parse_products
+    equal("single: the listing parser still finds nothing on it",
+          len(parse_products(SINGLE_PRODUCT_HTML, SINGLE_PRODUCT_URL)), 0)
+    equal("single: the detail parser still finds nothing on a LISTING",
+          len(parse_product_detail(LISTING_HTML, LISTING_URL)), 0)
+    equal("single: and a variant group still yields all its variants",
+          len(parse_product_detail(PRODUCT_HTML, PRODUCT_URL)), 3)
+
+
+def check_a_single_variant_group_is_not_a_variant():
+    """Montblanc changed the plain-product shape on 2026-11-05.
+
+    The page above that published a bare `Product` now publishes a
+    `ProductGroup` with exactly one `hasVariant`, and that variant carries
+    the group's own sku (5 of 5 single-variant pages sampled from the live
+    listing that day). Read as a group, it named itself as its own
+    `variant_of`, inventing a group the bare shape correctly had none of.
+    """
+    from product_parser import parse_product_detail, ld_blocks, \
+        _product_group
+
+    group = _product_group(ld_blocks(SINGLE_GROUP_HTML))
+    check("self-group: the fixture really is a ProductGroup",
+          group is not None, [b.get("@type") for b in ld_blocks(SINGLE_GROUP_HTML)])
+    variants = (group or {}).get("hasVariant") or []
+    equal("self-group: with one variant", len(variants), 1)
+    equal("self-group: whose sku is the group's own",
+          variants[0].get("sku") if variants else None, (group or {}).get("sku"))
+
+    rows = parse_product_detail(SINGLE_GROUP_HTML, SINGLE_PRODUCT_URL)
+    equal("self-group: it yields exactly one row", len(rows), 1)
+    row = rows[0]
+    equal("self-group: sku", row.sku, "MB128502")
+    equal("self-group: price", row.price, 15.0)
+    equal("self-group: currency", row.currency, "USD")
+    equal("self-group: in_stock", row.in_stock, True)
+    equal("self-group: category from the breadcrumb", row.category,
+          "Fountain Pen Accessories")
+    equal("self-group: url", row.url, SINGLE_PRODUCT_URL)
+    equal("self-group: variant_of is None, as for the bare Product",
+          row.variant_of, None)
+    equal("self-group: base_sku is None, as for the bare Product",
+          row.base_sku, None)
+    # The rule must not reach real groups: every variant of a multi-variant
+    # group still names the group.
+    grouped = parse_product_detail(PRODUCT_HTML, PRODUCT_URL)
+    check("self-group: a real variant group still names its group",
+          len(grouped) > 1 and all(r.variant_of for r in grouped),
+          [r.variant_of for r in grouped])
+
+
+def check_a_parse_failure_is_not_ok_on_ANY_page():
+    """The same fault must report the same way wherever it happens.
+
+    `parse_failed` was set on every page and consulted on PAGE 1 ONLY, so:
+
+        page 1   -> stop_reason 'parser_found_nothing'          not complete
+        page 2+  -> 0 rows -> no fresh skus -> 'no_new_products' COMPLETE
+
+    A run that logged "failure in THIS parser" then exited 0 claiming the
+    catalogue had ended. The fix puts the state into `ok`, which is the one
+    predicate the page-1 branch, the sequential loop and the concurrent
+    workers already share.
+    """
+    from output_writer import COMPLETE_STOP_REASONS
+    for module in ENGINES:
+        engine = _import_engine(module)
+        if engine is None:
+            continue
+        outcome = engine.PageOutcome(page_num=2, url="u")
+        outcome.state = "parse_failed"
+        check("%s: a parse failure is NOT ok" % module, not outcome.ok,
+              "ok() ignores the state, so page 2+ reports a complete run")
+        equal("%s: and it is named" % module,
+              engine._failure_reason(outcome), "parser_found_nothing")
+
+        # The other two failure kinds must keep their own names.
+        blocked = engine.PageOutcome(page_num=1, url="u")
+        blocked.blocked_by = "edge refusal"
+        equal("%s: a block is still a block" % module,
+              engine._failure_reason(blocked), "blocked_edge refusal")
+        timeout = engine.PageOutcome(page_num=1, url="u")
+        timeout.load_failed = True
+        equal("%s: a timeout is still a timeout" % module,
+              engine._failure_reason(timeout), "page_load_timeout")
+        good = engine.PageOutcome(page_num=1, url="u")
+        good.state = "content"
+        check("%s: a good page is still ok" % module, good.ok)
+
+        # And no path may spell a failure reason by hand any more.
+        source = open(os.path.join(HERE, module + ".py"), encoding="utf-8").read()
+        equal("%s: one spelling of the failure reason" % module,
+              source.count('f"blocked_{'), 1)
+
+    check("'parser_found_nothing' never counts as complete",
+          "parser_found_nothing" not in COMPLETE_STOP_REASONS)
+
+
+def check_one_solve_budget_covers_every_purchase():
+    """The familiar "a policy constant nothing reads", with a bill attached.
+
+    `handle_captcha_if_present` runs twice per attempt and only the SECOND
+    call was counted, so the uncounted one repeated on every block-retry.
+    Reproduced with the solver stubbed: **3 invocations against
+    `SOLVES_PER_PAGE = 1`**.
+    """
+    import page_flow
+
+    # THE SOURCE CHECK RUNS WHETHER OR NOT THE DRIVER IS INSTALLED.
+    #
+    # It reads text off disk, so needing an import was never justified — and
+    # it cost a red CI: gated behind `_import_engine`, it skipped for
+    # pyppeteer and selenium in a venv that has neither, so a fix that
+    # reached only the Playwright engine passed locally with 463 green
+    # checks and failed in `engine-smoke`, which installs each driver. The
+    # loudest thing the check could say was the one case it stayed silent
+    # about.
+    for module in ENGINES:
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            continue
+        source = open(path, encoding="utf-8").read()
+        budgeted = source.count("budget.spend(lambda: handle_captcha_if_present")
+        total = source.count("handle_captcha_if_present(") - 1   # -1 for the def
+        equal("%s: every handle_captcha_if_present call is budgeted" % module,
+              budgeted, total)
+        check("%s: the engine has a budget to spend from" % module,
+              "_SolveBudget(page_flow.SOLVES_PER_PAGE)" in source)
+        check("%s: no bare counter survives beside it" % module,
+              "solves_bought" not in source)
+
+    # The BEHAVIOURAL half does need the module, so it stays guarded.
+    for module in ENGINES:
+        engine = _import_engine(module)
+        if engine is None:
+            continue
+        calls = {"n": 0}
+        budget = engine._SolveBudget(page_flow.SOLVES_PER_PAGE)
+
+        def solve():
+            calls["n"] += 1
+            return False        # a challenge that the solve did not clear
+
+        # Exactly the loop's shape: both call sites, every block-retry.
+        for _ in range(page_flow.BLOCK_RETRIES_WITHOUT_POOL + 1):
+            budget.spend(solve)
+            budget.spend(solve)
+
+        equal("%s: the solver runs at most SOLVES_PER_PAGE times" % module,
+              calls["n"], page_flow.SOLVES_PER_PAGE)
+        equal("%s: and the budget agrees with what was spent" % module,
+              budget.spent, calls["n"])
+
+
+
+
+def check_retries_must_mean_at_least_one_attempt():
+    """`--retries 0` skipped the navigation and blamed the SITE for it.
+
+    `range(1, 0 + 1)` is empty, so the engine never called `goto`, then read
+    `about:blank` — 39 bytes, no assets — classified it as blocked, and
+    printed advice about changing exits for a request it had not sent.
+    """
+    # Asserted by RUNNING the parser, not by grepping for the message.
+    #
+    # The first version of this check searched the source for the error
+    # string. Controlled by disabling the guard but leaving the string in
+    # place, it stayed GREEN — it was testing that a sentence exists, not
+    # that a value is refused.
+    for module in ENGINES:
+        engine = _import_engine(module)
+        if engine is None:
+            continue
+        for bad in ("0", "-1"):
+            argv = ["prog", "--url",
+                    "https://www.montblanc.com/en-us/writing-instruments",
+                    "--retries", bad]
+            old_argv, old_err = sys.argv, sys.stderr
+            sys.argv, sys.stderr = argv, io.StringIO()
+            try:
+                engine.parse_args()
+            except SystemExit as exc:
+                check("%s refuses --retries %s" % (module, bad),
+                      exc.code != 0, "exited %r" % (exc.code,))
+            except Exception as exc:          # noqa: BLE001
+                check("%s refuses --retries %s" % (module, bad), False,
+                      "raised %s instead of exiting" % type(exc).__name__)
+            else:
+                check("%s refuses --retries %s" % (module, bad), False,
+                      "accepted it — the navigation loop would never run and "
+                      "the page would then be reported as blocked")
+            finally:
+                sys.argv, sys.stderr = old_argv, old_err
+
+        source = open(os.path.join(HERE, module + ".py"), encoding="utf-8").read()
+        check("%s still loops over ATTEMPTS" % module,
+              "range(1, args.retries + 1)" in source)
+
+
+def check_diff_refuses_a_run_it_cannot_vouch_for():
+    """A missing sidecar is a REFUSAL, not a reason to skip the check.
+
+    `_check_comparable` skipped its completeness guard when no sidecar was
+    found — so it was silently disabled for exactly the files that cannot
+    prove they are complete. Two sidecar-less runs diffed clean with exit 0.
+
+    A failed run writes no sidecar ON PURPOSE, so "no sidecar" is a
+    state this repo produces deliberately and the one it must not read as
+    "probably fine".
+    """
+    import diff_runs
+    with tempfile.TemporaryDirectory() as tmp:
+        rows = [asdict(Product(url="u1", sku="MB1", title="t", price=1.0,
+                               currency="EUR", page=1, position=1,
+                               mode="category", locale="en-us",
+                               sort="price-asc"))]
+        old = os.path.join(tmp, "old.json")
+        new = os.path.join(tmp, "new.json")
+        for path in (old, new):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rows, f)
+
+        args = argparse.Namespace(old=old, new=new, force=False)
+        check("diff: two runs with no sidecar are refused",
+              not diff_runs._check_comparable(args),
+              "the completeness guard was skipped for the files least able "
+              "to prove completeness")
+
+        # With complete sidecars naming one listing, it must diff.
+        meta = {"status": "complete", "mode": "category",
+                "pages_completed": 1, "pages_requested": 1,
+                "stop_reason": "completed",
+                "start_url": "https://www.montblanc.com/en-us/writing-instruments"}
+        for path in (old, new):
+            with open(os.path.splitext(path)[0] + ".meta.json", "w",
+                      encoding="utf-8") as f:
+                json.dump(meta, f)
+        check("diff: two complete runs of one listing ARE comparable",
+              diff_runs._check_comparable(args))
+
+
+def check_diff_refuses_two_different_listings():
+    """The fourth axis, and the one this tool missed.
+
+    `mode`, `sort` and `locale` were each guarded because each decides WHICH
+    products end up in the file. So does the SELECTION, and nothing checked
+    it: a `writing-instruments` run against a `bags` run of the same market
+    and ordering reported "3 added, 3 removed" with exit 0 — every line an
+    artefact of comparing two different categories.
+    """
+    import diff_runs
+    with tempfile.TemporaryDirectory() as tmp:
+        def write(name, sku, url):
+            rows = [asdict(Product(url="u", sku=sku, title="t", price=1.0,
+                                   currency="EUR", page=1, position=1,
+                                   mode="category", locale="en-us",
+                                   sort="price-asc"))]
+            path = os.path.join(tmp, name + ".json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rows, f)
+            with open(os.path.join(tmp, name + ".meta.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump({"status": "complete", "mode": "category",
+                           "pages_completed": 1, "pages_requested": 1,
+                           "stop_reason": "completed", "start_url": url}, f)
+            return path
+
+        pens = write("pens", "MBP1",
+                     "https://www.montblanc.com/en-us/writing-instruments")
+        bags = write("bags", "MBB1",
+                     "https://www.montblanc.com/en-us/bags")
+        check("diff: two different categories are refused",
+              not diff_runs._check_comparable(
+                  argparse.Namespace(old=pens, new=bags, force=False)))
+
+        # And the false positive it must NOT produce: two runs of the SAME
+        # listing legitimately carry different paging parameters.
+        a = write("a", "MB1",
+                  "https://www.montblanc.com/en-us/writing-instruments?start=0&sz=24")
+        b = write("b", "MB1",
+                  "https://www.montblanc.com/en-us/writing-instruments?start=24&sz=24")
+        check("diff: the same listing at different offsets still compares",
+              diff_runs._check_comparable(
+                  argparse.Namespace(old=a, new=b, force=False)),
+              "paging parameters are not a change of selection")
+
+
+def check_the_sites_own_arithmetic_is_read():
+    from product_parser import (parse_listing, total_results, pages_available,
+                                applied_page_size, applied_page_number,
+                                page_currency)
+    equal("arithmetic: result-count", total_results(LISTING_HTML), 280)
+    equal("arithmetic: page size", applied_page_size(LISTING_HTML), 24)
+    equal("arithmetic: page number is converted from 0-based",
+          applied_page_number(LISTING_HTML), 1)
+    equal("arithmetic: pages", pages_available(280, 24), 12)
+    equal("arithmetic: currency from the page config",
+          page_currency(LISTING_HTML), "EUR")
+
+    # An unknown count must stay unknown rather than collapsing to zero: a
+    # later slice prints no count, and reading that as 0 would cap every run
+    # after page 1 at no pages at all.
+    equal("arithmetic: no count means unknown, not zero",
+          pages_available(None, 24), None)
+    equal("arithmetic: a page with no count reports None",
+          total_results("<html><body>nothing</body></html>"), None)
+
+    page = parse_listing(LISTING_HTML, LISTING_URL, page=1, sort="price-asc")
+    equal("arithmetic: ListingPage carries it", page.total_results, 280)
+    equal("arithmetic: and the page count", page.pages_available, 12)
+
+
+US_RESULT_COUNT_HTML = (
+    '<div class="grid-header"><div class="result-count">'
+    '<span> 281 Items </span></div></div>')
+
+
+def check_the_result_count_survives_a_localised_noun():
+    """The second-country rule, catching a real bug.
+
+    The noun beside the number is localised and the number is not. The first
+    version of this parser matched a LIST of nouns — Results, Ergebnisse,
+    Résultats — and the first run against the US market reported
+    `total_results: None`, because en-us writes "281 Items".
+
+    A noun list is a list of the locales someone happened to think of.
+    """
+    from product_parser import total_results
+    equal("count: the en-fi noun ('Results')", total_results(LISTING_HTML), 280)
+    equal("count: the en-us noun ('Items')",
+          total_results(US_RESULT_COUNT_HTML), 281)
+    # Any noun at all, including one nobody has seen yet.
+    equal("count: a noun this repo has never met",
+          total_results('<div class="result-count"><span> 42 Tuotetta </span></div>'),
+          42)
+    equal("count: and a grouped number",
+          total_results('<div class="result-count"><span> 1,234 Items </span></div>'),
+          1234)
+    equal("count: no element means unknown, never zero",
+          total_results("<html><body>nothing</body></html>"), None)
+
+
+def check_the_sort_recorded_is_the_one_ASKED_for():
+    """The site does not publish which ordering it applied — measured.
+
+    `ruleId` and the checked sort radio are BOTH the category's default on
+    every request, whatever `srule` was sent, while the results demonstrably
+    change. So the honest column is the request, and the default is recorded
+    separately under a name that says what it is.
+
+    The first version of this repo read `ruleId` as "the applied sort". It
+    warned on every page of every run and stamped the wrong ordering on every
+    row.
+    """
+    from product_parser import (parse_listing, default_sort_rule, sort_from_url,
+                                SORTS, DEFAULT_SORT, SITE_DEFAULT_SORT)
+
+    equal("sort: the page states the CATEGORY DEFAULT",
+          default_sort_rule(LISTING_HTML), "recommended")
+    equal("sort: which is the site's own default",
+          SITE_DEFAULT_SORT, "recommended")
+    equal("sort: this repo deliberately disagrees", DEFAULT_SORT, "price-asc")
+
+    equal("sort: read back from the URL that was sent",
+          sort_from_url(LISTING_URL + "&srule=FA_price-ascending"), "price-asc")
+    equal("sort: no srule means the site chose", sort_from_url(LISTING_URL), None)
+
+    asked = LISTING_URL + "&srule=FA_price-descending"
+    page = parse_listing(asked, LISTING_URL, page=1)  # html arg first
+    # Parse the real fixture with the asked-for URL:
+    page = parse_listing(LISTING_HTML, asked, page=1)
+    equal("sort: the ROW records what was asked for",
+          {r.sort for r in page.rows}, {"price-desc"})
+    equal("sort: and the page records the site's default separately",
+          page.site_default_sort, "recommended")
+    check("sort: the two are not confused",
+          page.sort != page.site_default_sort, (page.sort, page.site_default_sort))
+
+
+def check_url_building_and_pagination():
+    from product_parser import (page_url, page_number_from_url, search_url,
+                                category_url, PAGE_SIZE)
+
+    base = "https://www.montblanc.com/en-fi/bags/backpacks"
+    equal("page_url: page 1", page_url(base, 1),
+          base + "?start=0&sz=24")
+    equal("page_url: page 3", page_url(base, 3),
+          base + "?start=48&sz=24")
+    equal("page_url: honours a page size", page_url(base, 3, 48),
+          base + "?start=96&sz=48")
+    check("page_url: adds the sort rule",
+          "srule=FA_price-ascending" in page_url(base, 2, 24, "price-asc"),
+          page_url(base, 2, 24, "price-asc"))
+
+    # REPLACES rather than appends, and keeps the filters a URL already
+    # carries — dropping those would silently widen the run.
+    filtered = base + "?prefn1=ProductLabel&prefv1=New&start=0&sz=24"
+    built = page_url(filtered, 2)
+    check("page_url: keeps existing refinements", "prefn1=ProductLabel" in built, built)
+    equal("page_url: does not duplicate start", built.count("start="), 1)
+    equal("page_url: does not duplicate sz", built.count("sz="), 1)
+    check("page_url: advanced the offset", "start=24" in built, built)
+
+    equal("page_number_from_url: round-trips", page_number_from_url(page_url(base, 5)), 5)
+    equal("page_number_from_url: no start means unknown",
+          page_number_from_url(base), None)
+
+    try:
+        page_url(base, 0)
+        check("page_url: refuses page 0", False, "no exception")
+    except ValueError:
+        check("page_url: refuses page 0", True)
+
+    s = search_url("fountain pen", "en-gb")
+    check("search_url: locale in the path", "/en-gb/search" in s, s)
+    check("search_url: query is encoded", "q=fountain%20pen" in s or "q=fountain+pen" in s, s)
+
+    c = category_url("bags/backpacks", "en-us", sort="price-asc")
+    check("category_url: builds under the locale",
+          c.startswith("https://www.montblanc.com/en-us/bags/backpacks"), c)
+
+
+def check_supported_urls_are_refused_with_a_true_reason():
+    from product_parser import is_supported_url, locale_is_known, KNOWN_LOCALES
+
+    ok, why = is_supported_url("https://www.montblanc.com/en-fi/bags/backpacks")
+    check("url: a real listing is accepted", ok, why)
+
+    ok, why = is_supported_url("https://example.com/en-us/x")
+    check("url: another host is refused", not ok)
+    check("url: and the reason names the host", "example.com" in why, why)
+    check("url: with no rotting count in it",
+          not any(ch.isdigit() for ch in why), why)
+
+    ok, why = is_supported_url("https://www.montblanc.com/")
+    check("url: the bare host is refused", not ok)
+    check("url: because it has no locale", "locale" in why.lower(), why)
+
+    # The reason must not repeat the URL: every caller already prefixes it,
+    # and two copies of the address in one sentence reads like a bug.
+    for bad in ("https://www.montblanc.com/", "ftp://montblanc.com/en-us/x",
+                "https://example.com/en-us/x"):
+        ok, why = is_supported_url(bad)
+        check("url: the refusal for %r does not repeat the address" % bad,
+              bad not in why, why)
+
+    # THE ONE THAT COST A LIVE RUN. `en-fi` is a real market that the site
+    # geo-redirects Finnish visitors to, and it is absent from the country
+    # selector's own list because that list omits whichever locale it was
+    # fetched in. An allowlist refused it with a reason that was FALSE.
+    ok, why = is_supported_url("https://www.montblanc.com/en-fi/bags")
+    check("url: en-fi is accepted (it is real, and it was once refused)", ok, why)
+    check("url: en-fi is in the known set now", locale_is_known("en-fi"))
+
+    # A locale not in the snapshot is ACCEPTED, because the snapshot is known
+    # to be incomplete. It is the caller's job to warn, not to refuse.
+    ok, why = is_supported_url("https://www.montblanc.com/pt-br/bolsas")
+    check("url: an unlisted but well-formed locale is accepted", ok, why)
+    check("url: while reporting that it was not in the snapshot",
+          not locale_is_known("pt-br"))
+    check("url: the snapshot is a tuple of locales", len(KNOWN_LOCALES) > 50)
+
+
+def check_path_shapes():
+    from product_parser import (is_product_url, is_search_url, sku_from_url,
+                                category_from_url, locale_from_url)
+
+    prod = ("https://www.montblanc.com/en-fi/"
+            "montblanc-companion-rectangular-backpack--MB222875VG.html")
+    check("path: a product page is recognised", is_product_url(prod))
+    check("path: a listing is not", not is_product_url(
+        "https://www.montblanc.com/en-fi/bags/backpacks"))
+    equal("path: sku from the URL", sku_from_url(prod), "MB222875VG")
+    equal("path: a plain id", sku_from_url(
+        "https://www.montblanc.com/en-fi/x-MB220310.html"), "MB220310")
+    equal("path: the M-suffixed groups", sku_from_url(
+        "https://www.montblanc.com/en-fi/x-MB132446M.html"), "MB132446M")
+    equal("path: no id means None", sku_from_url(
+        "https://www.montblanc.com/en-fi/bags"), None)
+
+    equal("path: locale", locale_from_url(prod), "en-fi")
+    equal("path: category is the LAST segment", category_from_url(
+        "https://www.montblanc.com/en-fi/bags/backpacks"), "backpacks")
+    equal("path: a product page has no category", category_from_url(prod), None)
+    equal("path: a non-catalogue route is not a category", category_from_url(
+        "https://www.montblanc.com/en-fi/customer-service/contact-us.html"), None)
+
+    search = "https://www.montblanc.com/en-fi/search?q=fountain+pen"
+    check("path: a search URL is recognised", is_search_url(search))
+    equal("path: and its 'category' is the query",
+          category_from_url(search), "fountain pen")
+
+    # Japanese slugs are percent-encoded, and the id at the end is still
+    # ASCII — so the sku pattern has to survive a URL that is mostly escapes.
+    jp = ("https://www.montblanc.com/ja-jp/"
+          "%E3%83%A2%E3%83%B3%E3%83%96%E3%83%A9%E3%83%B3-MB223087.html")
+    equal("path: a percent-encoded Japanese product still yields its sku",
+          sku_from_url(jp), "MB223087")
+    equal("path: and its locale", locale_from_url(jp), "ja-jp")
+
+
+def check_prices_in_every_convention_the_site_uses():
+    from product_parser import _prices_in, _normalize_amount
+
+    equal("price: EUR with a space", _prices_in("€ 2,000.00")[0], [2000.0])
+    equal("price: and its currency", _prices_in("€ 2,000.00")[1], "EUR")
+    equal("price: USD with no space", _prices_in("$1,990.00", "USD")[0], [1990.0])
+    equal("price: GBP", _prices_in("£1,700.00")[1], "GBP")
+    # JPY has no decimals and groups with a comma, so "49,500" must read as
+    # a thousands grouping rather than as 49.5. That falls out of the family
+    # rule (exactly three trailing digits) without a special case.
+    equal("price: JPY without decimals", _prices_in("¥ 49,500")[0], [49500.0])
+    equal("price: the European convention still works",
+          _normalize_amount("1.234,56"), 1234.56)
+    equal("price: and the space-grouped one", _normalize_amount("1 234,56"), 1234.56)
+
+    # A bare dollar sign cannot name itself: Montblanc sells in CAD, AUD,
+    # NZD, SGD, HKD and TWD too. Without a market to resolve it, the currency
+    # is None rather than a plausible "USD" (the ladder, rung 4 vs 5).
+    equal("price: a bare $ with no market resolves to nothing",
+          _prices_in("$1,990.00")[1], None)
+    equal("price: with a market it resolves to that market",
+          _prices_in("$1,990.00", "CAD")[1], "CAD")
+
+    # An allowlist, not a bare [A-Z]{3}: a nib width beside a number must not
+    # become a currency.
+    equal("price: a nib width is not a currency", _prices_in("EF 850")[1], None)
+    equal("price: a real ISO code is", _prices_in("CHF 850")[1], "CHF")
+
+
+def check_fixtures_carry_no_session_material():
+    """A real page dump carries the session that fetched it.
+
+    A sibling repo committed three `sessionId` values, their CSRF tokens and
+    a real customer's display name, profile permalink and review text. None
+    of that granted anything — the session material was anonymous and
+    expired — and it still did not belong in a public repo.
+
+    Montblanc is the easy case: it publishes products, not people, and no
+    capture here carries a name, a review or a login. So this guards the
+    SHAPE rather than any literal, which is the half that keeps working when
+    the next capture is taken (guard with PATTERNS, not the old
+    values).
+    """
+    fixtures = {
+        "LISTING_HTML": LISTING_HTML,
+        "SOLDOUT_HTML": SOLDOUT_HTML,
+        "PRODUCT_HTML": PRODUCT_HTML,
+        "GRID_FRAGMENT_HTML": GRID_FRAGMENT_HTML,
+        "CHROMIUM_ERROR_HTML": CHROMIUM_ERROR_HTML,
+    }
+    patterns = {
+        "a session id": r"sessionId|session_id|JSESSIONID|dwsid",
+        "a CSRF token": r"csrf[_-]?token|anti-?csrftoken",
+        "a bearer token": r"[Bb]earer\s+[A-Za-z0-9._-]{16,}",
+        "a 32-hex key": r"\b[0-9a-f]{32}\b",
+        "an email address": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        "credentials in a URL": r"[a-z]+://[^\s/@]+:[^\s/@]+@",
+    }
+    for fixture_name, text in fixtures.items():
+        for label, pattern in patterns.items():
+            hit = re.search(pattern, text)
+            check("%s carries no %s" % (fixture_name, label), hit is None,
+                  "matched %r — scrub the capture before committing it"
+                  % (hit.group(0)[:40] if hit else ""))
+
+
+# A page Montblanc plainly SERVED, that links to products, and that this
+# parser turns into nothing. Built rather than captured, because the site
+# does not currently produce one — which is the point: this is the shape a
+# FUTURE markup change would take, and the signal has to exist before it
+# happens rather than after.
+SERVED_BUT_UNPARSEABLE_HTML = (
+    "<html><body>"
+    + '<img src="https://www.montblanc.com/on/demandware.static/a.png">' * 3
+    + "".join('<a href="/en-fi/some-bag-MB%06d.html">x</a>' % n
+              for n in range(111111, 111116))
+    + "</body></html>")
+
+
+def check_a_broken_parser_is_not_reported_as_an_empty_category():
+    """A served page that links to N products and parses to zero is OUR
+    bug, and saying "0 products" sends the reader to check the URL instead.
+
+    Also check the signal CAN fire before adding it — if the
+    fallback emitted a row per product link it never could. Here it cannot:
+    the tile path needs a `data-pid` element as well as a href, so markup
+    that loses its tiles while keeping its links lands exactly here.
+    """
+    import page_flow
+    from product_parser import product_link_count, parse_products, detect_page_state
+
+    links = product_link_count(SERVED_BUT_UNPARSEABLE_HTML)
+    equal("parse-failure: the fixture links to products", links, 5)
+    equal("parse-failure: and parses to nothing",
+          len(parse_products(SERVED_BUT_UNPARSEABLE_HTML,
+                             "https://www.montblanc.com/en-fi/bags")), 0)
+    equal("parse-failure: while the page reads as served",
+          detect_page_state(SERVED_BUT_UNPARSEABLE_HTML, 200, "")[0], "empty")
+
+    check("parse-failure: that combination is flagged",
+          page_flow.looks_like_a_parse_failure("empty", 0, links))
+
+    # A genuinely empty category must NOT be flagged — that is a correct
+    # answer, and crying wolf on it is the failure this guards against.
+    equal("parse-failure: an empty category with no product links is not one",
+          page_flow.looks_like_a_parse_failure("empty", 0, 0), False)
+    equal("parse-failure: one stray link (a nav flyout) is not one",
+          page_flow.looks_like_a_parse_failure("empty", 0, 1), False)
+    # Nor is a page that parsed fine, nor a block.
+    equal("parse-failure: a page with rows is never one",
+          page_flow.looks_like_a_parse_failure("content", 24, 24), False)
+    equal("parse-failure: a BLOCKED page is not one either",
+          page_flow.looks_like_a_parse_failure("blocked", 0, 5), False)
+
+
+def check_parser_found_nothing_is_not_a_complete_run():
+    """The stop_reason must not read as success (blocked != empty)."""
+    from output_writer import COMPLETE_STOP_REASONS, run_meta
+    check("parse-failure: 'parser_found_nothing' is NOT a complete stop reason",
+          "parser_found_nothing" not in COMPLETE_STOP_REASONS,
+          list(COMPLETE_STOP_REASONS))
+    meta = run_meta(status="failed", stop_reason="parser_found_nothing",
+                    pages_requested=1, pages_completed=0, pages_failed=[1],
+                    products=0, mode="category", source="montblanc.com",
+                    start_url="u", final_url="u")
+    equal("parse-failure: the sidecar carries the reason by name",
+          meta["stop_reason"], "parser_found_nothing")
+
+    # Every engine must be able to SET it, or the sidecar can never say it.
+    for module in ENGINES:
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            continue
+        source = open(path, encoding="utf-8").read()
+        check("%s can report parser_found_nothing" % module,
+              "parser_found_nothing" in source,
+              "the engine never sets the stop_reason, so it is unreachable")
+        check("%s consults page_flow for it" % module,
+              "looks_like_a_parse_failure" in source,
+              "the engine must not reimplement the decision")
+
+
+def check_page_states_on_real_captures():
+    from product_parser import detect_page_state
+
+    equal("state: a listing is content",
+          detect_page_state(LISTING_HTML, 200, "")[0], "content")
+    equal("state: a product page is content",
+          detect_page_state(PRODUCT_HTML, 200, "")[0], "content")
+    equal("state: the tiles-only fragment is content",
+          detect_page_state(GRID_FRAGMENT_HTML, 200, "")[0], "content")
+
+    # A page the site served that has no products on it — a hub, or a `start=`
+    # past the end. An ANSWER, not a block: reporting it as blocked sends the
+    # reader hunting for a proxy problem that does not exist.
+    served_empty = ("<html><body>"
+                    + '<img src="https://www.montblanc.com/on/demandware.static/a.png">' * 3
+                    + "</body></html>")
+    equal("state: served with no products is empty, not blocked",
+          detect_page_state(served_empty, 200, "")[0], "empty")
+
+    equal("state: a 403 is blocked", detect_page_state("<html/>", 403, "")[0], "blocked")
+    equal("state: a 500 is unknown, not blocked",
+          detect_page_state("<html/>", 503, "")[0], "unknown")
+    equal("state: an empty body is unknown",
+          detect_page_state("", None, "")[0], "unknown")
+
+    # CHROMIUM'S OWN ERROR PAGE — the case inverted detection is for.
+    # It carries the SITE'S OWN HOSTNAME in the title, so a title check calls
+    # it a real page, and no vendor marker of any kind. Only "was this built
+    # out of Montblanc's own assets?" answers correctly.
+    equal("state: Chromium's network-error page is blocked",
+          detect_page_state(CHROMIUM_ERROR_HTML, None, "")[0], "blocked")
+    check("state: and it really does wear the site's hostname",
+          "www.montblanc.com" in CHROMIUM_ERROR_HTML)
+
+
+def check_markers_do_not_match_a_page_montblanc_serves():
+    """Count every candidate on a page you KNOW is good, first.
+
+    This is the check that changed the marker set. Montblanc is Akamai-
+    fronted and references `akamaihd.net` on every page it serves, so a bare
+    `akamai` marker reports a served catalogue as a block — the exact
+    tokopedia-scraper failure that taught the rule.
+    """
+    from product_parser import BOT_CHALLENGE_MARKERS, detect_bot_challenge
+
+    good = {"listing": LISTING_HTML, "product": PRODUCT_HTML,
+            "grid fragment": GRID_FRAGMENT_HTML, "sold-out listing": SOLDOUT_HTML}
+    for label, html_text in good.items():
+        hit = detect_bot_challenge(html_text)
+        check("markers: none fires on a %s Montblanc served" % label,
+              hit is None, "matched %r" % hit)
+
+    # The two that are deliberately ABSENT, each for its own measured reason.
+    lowered = [m.lower() for m in BOT_CHALLENGE_MARKERS]
+    check("markers: bare 'akamai' is not a marker (it is on every good page)",
+          "akamai" not in lowered and "akamaihd" not in lowered, lowered)
+    check("markers: cf-turnstile is not a marker (the Scraping "
+          "Browser's own extension injects it)",
+          "cf-turnstile" not in lowered, lowered)
+    check("markers: challenges.cloudflare.com is the one kept instead",
+          "challenges.cloudflare.com" in lowered, lowered)
+
+
+def check_bot_manager_cookies_are_not_markers():
+    """Akamai Bot Manager IS deployed here, and its tells must stay OUT.
+
+    Measured 2026-09-18 on a live listing fetch: Montblanc sets `_abck` and
+    `bm_sz` on every response, with `ak_p` server-timing and an
+    `x-akamai-transformed` header, and Cloudflare is in the chain too. None
+    of it is in the MARKUP — it is all response headers — which is why a
+    body-only marker scan reports a perfectly clean page and why this repo's
+    37-capture sweep found zero captcha markers of any kind.
+
+    That is worth pinning in BOTH directions:
+
+      * they must not become markers. They are on every GOOD response, so
+        matching them would report a served catalogue as blocked — the same
+        mistake `akamai` itself would be.
+      * and the fact they exist must not be forgotten. `_abck` came back
+        `~-1~` on every fetch, meaning no challenge issued — so the honest
+        claim is "it did not challenge us", not "there is nothing here".
+        A future reader re-measuring the README's central claim needs to
+        know where to look, and it is not the HTML.
+    """
+    from product_parser import BOT_CHALLENGE_MARKERS
+    lowered = [m.lower() for m in BOT_CHALLENGE_MARKERS]
+    for cookie in ("_abck", "bm_sz", "ak_p", "x-akamai-transformed"):
+        check("bot-manager tell %r is NOT a marker" % cookie,
+              cookie not in lowered,
+              "it is set on every good response; matching it would report a "
+              "served page as blocked")
+
+    # And the README must not claim the site is unprotected, which is a
+    # different claim from "it did not challenge us" and would be false.
+    readme = open(os.path.join(HERE, "README.md"), encoding="utf-8").read()
+    check("the README names the bot manager that IS here",
+          "Akamai Bot Manager" in readme,
+          "saying only 'no captcha markers' reads as 'no bot management', "
+          "which is not what was measured")
+
+
+def check_a_marker_survives_both_encodings():
+    """The same refusal page reaches a parser spelled two ways.
+
+    An edge entity-escapes the punctuation; a browser parses it and
+    serialises it back out plain. A literal marker matches the browser
+    engines and silently misses the HTTP client.
+    """
+    from product_parser import detect_bot_challenge, BOT_CHALLENGE_MARKERS
+
+    plain = "<html><body>refused: https://errors.edgesuite.net</body></html>"
+    escaped = ("<html><body>refused: "
+               "https&#58;&#47;&#47;errors&#46;edgesuite&#46;net</body></html>")
+
+    # The escaped fixture deliberately carries NOTHING but the escaped form —
+    # no `Reference&#32;#`, which is itself a listed marker and would match
+    # without any unescaping at all. Controlled by removing the unescape
+    # step: with the richer fixture the check stayed GREEN, passing for the
+    # wrong reason. This is the fixture that actually exercises it.
+    check("encodings: the fixture does not contain a marker verbatim",
+          not any(m.lower() in escaped.lower() for m in BOT_CHALLENGE_MARKERS),
+          "the escaped fixture matches a marker without unescaping, so the "
+          "next check cannot fail")
+
+    check("encodings: the plain spelling is caught", detect_bot_challenge(plain))
+    check("encodings: the entity-escaped one too", detect_bot_challenge(escaped))
+
+
+def check_positive_asset_detection():
+    from product_parser import references_own_assets, _MIN_ASSET_REFERENCES
+
+    for label, html_text in (("listing", LISTING_HTML), ("product", PRODUCT_HTML),
+                             ("fragment", GRID_FRAGMENT_HTML)):
+        n = references_own_assets(html_text)
+        check("assets: a %s references the site's own host" % label,
+              n >= _MIN_ASSET_REFERENCES, n)
+
+    equal("assets: Chromium's error page references them zero times",
+          references_own_assets(CHROMIUM_ERROR_HTML), 0)
+    # The threshold has to sit below the SMALLEST real response, which is the
+    # grid fragment (24 references on the untrimmed capture).
+    check("assets: the threshold is above 1 and well below a real page",
+          1 < _MIN_ASSET_REFERENCES <= 5, _MIN_ASSET_REFERENCES)
+
+
+def check_the_transport_refusal_is_classified():
+    """Montblanc's real refusal is not a page, so it needs its own classifier.
+
+    Measured 2026-09-17: a request whose User-Agent names an HTTP client
+    library gets the connection killed. `curl` reports an HTTP/2
+    INTERNAL_ERROR; `requests` reports a ReadTimeout, which is
+    indistinguishable from a slow network unless you know.
+    """
+    import page_flow
+
+    equal("transport: a read timeout is a refusal on this site",
+          page_flow.classify_transport_error(
+              TimeoutError("Read timed out. (read timeout=30)")), "refused")
+    equal("transport: so is an HTTP/2 stream reset",
+          page_flow.classify_transport_error(
+              Exception("curl: (92) HTTP/2 stream 1 was not closed cleanly: "
+                        "INTERNAL_ERROR (err 2)")), "refused")
+    # A DEAD PROXY IS NOT A TIMEOUT: the two want opposite responses, so
+    # they must not collapse into one name.
+    equal("transport: a dead proxy is its own thing",
+          page_flow.classify_transport_error(
+              Exception("net::ERR_PROXY_CONNECTION_FAILED")), "proxy")
+    equal("transport: anything else is an ordinary error",
+          page_flow.classify_transport_error(
+              Exception("net::ERR_NAME_NOT_RESOLVED")), "error")
+
+
+def check_the_user_agent_denylist_is_known_before_it_bites():
+    """The pre-flight that turns a 30-second timeout into a sentence."""
+    import page_flow
+    for ua in ("", "curl/8.5.0", "python-requests/2.31.0", "Python-urllib/3.11",
+               "Go-http-client/2.0"):
+        check("UA: %r is known to be refused" % (ua or "<none>",),
+              page_flow.ua_will_be_refused(ua))
+    # Measured as SERVED, so they must not be refused pre-emptively.
+    for ua in ("Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0.0.0",
+               "Wget/1.21", "Scrapy/2.11", "foo"):
+        check("UA: %r is served, so it is not flagged" % ua,
+              not page_flow.ua_will_be_refused(ua))
+
+
+def check_state_policy():
+    import page_flow
+
+    equal("policy: content is parsed", page_flow.should_parse("content"), True)
+    equal("policy: content is not retried", page_flow.should_retry("content"), False)
+
+    # An empty page is an ANSWER. It must not be retried and must not be
+    # reported as blocked.
+    equal("policy: empty is parsed", page_flow.should_parse("empty"), True)
+    equal("policy: empty is not retried", page_flow.should_retry("empty"), False)
+    equal("policy: empty is not blocked", page_flow.counts_as_blocked("empty"), False)
+
+    # A refusal offers nothing to solve, so it must not spend money.
+    equal("policy: blocked never pays a solver",
+          page_flow.should_solve("blocked"), False)
+    equal("policy: blocked is blocked", page_flow.counts_as_blocked("blocked"), True)
+
+    # A rendered widget IS a test, and is the one state that pays.
+    equal("policy: a captcha may be solved", page_flow.should_solve("captcha"), True)
+
+    equal("policy: unknown waits rather than spending",
+          (page_flow.should_retry("unknown"), page_flow.should_solve("unknown")),
+          (True, False))
+    # An unrecognised state must fall back to the cautious one rather than
+    # raising, so a new state name cannot crash a run mid-flight.
+    equal("policy: an unknown state name falls back to 'unknown'",
+          page_flow.should_solve("something-new"), False)
+
+
+def check_pagination_addressability_is_asked_per_url():
+    import page_flow
+    check("pagination: a category listing is addressable",
+          page_flow.pagination_is_addressable(
+              "https://www.montblanc.com/en-fi/bags/backpacks"))
+    check("pagination: a search listing is addressable",
+          page_flow.pagination_is_addressable(
+              "https://www.montblanc.com/en-fi/search?q=pen"))
+    check("pagination: a PRODUCT page is not — it is one page",
+          not page_flow.pagination_is_addressable(
+              "https://www.montblanc.com/en-fi/x-MB1.html"))
+
+
+def check_pagination_is_planned_from_the_sites_own_number():
+    import page_flow
+    equal("plan: clamped to what the site says exists",
+          page_flow.pages_to_plan(50, 12), 12)
+    equal("plan: a smaller request is honoured", page_flow.pages_to_plan(3, 12), 3)
+    # An unknown count is not a zero: where page 1 stated nothing, the run
+    # discovers the end from the data.
+    equal("plan: unknown means the request stands",
+          page_flow.pages_to_plan(5, None), 5)
+    equal("plan: never less than one page", page_flow.pages_to_plan(0, 12), 1)
+    equal("plan: from a result COUNT rather than a page count",
+          page_flow.plan_from_total(50, 280, 24), 12)
+
+
+def check_policy_constants_have_a_consumer():
+    """A policy constant nothing reads is the same defect as dead code.
+
+    `RETRY_ON_BLOCKED` carried a paragraph of measured justification in a
+    sibling repo and NO engine consulted it, so setting it False changed
+    nothing while the prose read like enforcement.
+    """
+    import page_flow
+    sources = {}
+    for name in ("playwright_scraper", "puppeteer_scraper", "selenium_scraper"):
+        path = os.path.join(HERE, name + ".py")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                sources[name] = f.read()
+    check("policy: the engines are readable", len(sources) == 3, sorted(sources))
+
+    for const in ("RETRY_ON_BLOCKED", "BLOCK_RETRIES_WITHOUT_POOL",
+                  "SOLVES_PER_PAGE"):
+        readers = [n for n, s in sources.items() if const in s]
+        check("policy: %s is read by an engine" % const, readers, "no consumer")
+
+
+def check_row_schema():
+    from output_writer import Product, ROW_CLASS_BY_MODE, UNIQUE_BY_SKU_MODES
+    names = [f.name for f in fields(Product)]
+    equal("the family prefix is byte-identical and in order",
+          names[:5], ["source", "scraped_at", "url", "sku", "title"])
+
+    # The commerce columns this site DOES have. Montblanc is a shop, so the
+    # family's price fields are present rather than dropped.
+    for present in ("brand", "price", "currency", "in_stock", "image_url",
+                    "category", "price_source"):
+        check("the commerce column %r is present" % present, present in names)
+
+    # And the ones measured ABSENT, each with its count in output_writer's
+    # docstring. Removing a column needs the measurement written
+    # down; this pins that they stay removed until someone re-measures.
+    for gone in ("original_price", "discount_pct", "lowest_price_30d",
+                 "rating", "review_count", "ean", "gtin", "engraved"):
+        check("the column %r is absent, not null-forever" % gone,
+              gone not in names,
+              "if this is back, output_writer's measurement should be too")
+
+    # Site-specific columns go at the END of the row, after the family's.
+    equal("site-specific columns come last",
+          names[-9:], ["locale", "base_sku", "collection", "sub_collection",
+                       "color", "size", "special_edition", "variant_of", "sort"])
+
+    equal("every mode maps to a row class",
+          sorted(ROW_CLASS_BY_MODE), ["category", "product", "search"])
+    equal("every mode is one row per sku",
+          sorted(UNIQUE_BY_SKU_MODES), ["category", "product", "search"])
+    equal("all three modes share one class",
+          len({c for c in ROW_CLASS_BY_MODE.values()}), 1)
+
+
+def check_csv_and_json_writers():
+    from output_writer import Product, write_csv, write_json
+    import product_parser as P
+    rows = P.parse_listing(LISTING_HTML, LISTING_URL).rows
+    check("the fixture produced rows to write", len(rows) > 0, len(rows))
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "out.csv")
+        write_csv(rows, csv_path, row_cls=Product)
+        with open(csv_path, encoding="utf-8") as f:
+            reader = list(csv.reader(f))
+        equal("CSV header matches the dataclass, in order",
+              reader[0], [f.name for f in fields(Product)])
+        equal("CSV holds every row", len(reader) - 1, len(rows))
+        check("no Python list repr leaked into the CSV",
+              not any(cell.startswith("[") for row in reader[1:] for cell in row))
+
+        empty_csv = os.path.join(tmp, "empty.csv")
+        write_csv([], empty_csv, row_cls=Product)
+        with open(empty_csv, encoding="utf-8") as f:
+            header = list(csv.reader(f))
+        equal("an EMPTY csv still carries its header", len(header), 1)
+        equal("...and it is the right one", header[0],
+              [f.name for f in fields(Product)])
+
+        json_path = os.path.join(tmp, "out.json")
+        write_json(rows, json_path)
+        loaded = json.load(open(json_path, encoding="utf-8"))
+        equal("JSON holds every row", len(loaded), len(rows))
+        equal("JSON keys are the dataclass fields, in order",
+              list(loaded[0].keys()), [f.name for f in fields(Product)])
+        equal("JSON and CSV agree on the column ORDER",
+              list(loaded[0].keys()), reader[0])
+
+
+def check_exit_codes():
+    import output_writer as O
+    equal("0 ok / 1 crash / 2 usage / 3 blocked / 4 empty / 5 api / 6 partial",
+          (O.EXIT_BLOCKED, O.EXIT_NO_PRODUCTS, O.EXIT_API_ERROR, O.EXIT_PARTIAL),
+          (3, 4, 5, 6))
+    check("page_cap_reached is a COMPLETE stop reason",
+          "page_cap_reached" in O.COMPLETE_STOP_REASONS)
+    check("single_page_mode is complete by construction",
+          "single_page_mode" in O.COMPLETE_STOP_REASONS)
+    check("no_new_products is complete",
+          "no_new_products" in O.COMPLETE_STOP_REASONS)
+
+
+def check_a_run_that_finds_nothing_writes_nothing():
+    """Never replace last night's good output with []."""
+    from output_writer import save
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "out")
+        with open(prefix + ".json", "w", encoding="utf-8") as f:
+            f.write('[{"sku": "yesterday"}]')
+        code = save([], prefix, "json", allow_empty=False)
+        equal("an empty run exits 4", code, 4)
+        equal("...and leaves the previous good file alone",
+              open(prefix + ".json", encoding="utf-8").read(),
+              '[{"sku": "yesterday"}]')
+        code = save([], prefix, "json", allow_empty=True)
+        equal("--allow-empty WRITES the empty file...", 
+              json.load(open(prefix + ".json", encoding="utf-8")), [])
+        # ...and still reports exit 4. Pinned deliberately (pin a known
+        # behaviour rather than half-guarding it): "zero businesses" is true
+        # whether or not the file was written, and a caller that wanted the
+        # file still wants to know the result was empty.
+        equal("...and still reports exit 4, because it IS empty", code, 4)
+
+
+def check_page_and_position_are_unique_across_pages():
+    """One line, and the column is worthless without it: `position` restarts
+    at 1 on every page."""
+    import product_parser as P
+    page1 = P.parse_listing(LISTING_HTML, LISTING_URL, page=1).rows
+    page2 = P.parse_listing(LISTING_HTML, LISTING_URL, page=2).rows
+    pairs = [(r.page, r.position) for r in page1 + page2]
+    equal("page+position is unique across a multi-page run",
+          len(set(pairs)), len(pairs))
+    equal("page 2's rows really say page 2",
+          sorted({r.page for r in page2}), [2])
+
+
+def check_sidecar_shape():
+    from output_writer import run_meta
+    meta = run_meta(status="complete", stop_reason="page_cap_reached",
+                    pages_requested=50, pages_completed=12, pages_failed=[],
+                    products=280, mode="category", source="montblanc.com",
+                    start_url="https://www.montblanc.com/en-fi/writing-instruments",
+                    final_url="https://www.montblanc.com/en-fi/writing-instruments?start=264&sz=24",
+                    extra={"total_results": 280, "pages_available": 12,
+                           "page_size": 24, "locale": "en-fi",
+                           "sort_requested": "price-asc",
+                           "site_default_sort": "recommended"})
+    for key in ("status", "stop_reason", "pages_requested", "pages_completed",
+                "pages_failed", "mode", "source"):
+        check("the sidecar records %r" % key, key in meta)
+    equal("the sidecar carries the site's own total", meta["total_results"], 280)
+    equal("...and the market the prices belong to", meta["locale"], "en-fi")
+    equal("...and which ordering was asked for", meta["sort_requested"], "price-asc")
+    equal("...and what a visitor would have got instead",
+          meta["site_default_sort"], "recommended")
+    equal("pages_failed is a LIST of numbers, not a count",
+          isinstance(meta["pages_failed"], list), True)
+
+    # No `capped_by_site` here, and the ABSENCE is the finding: this site
+    # imposes no page cap, so a complete run really is the whole category.
+    check("no capped_by_site on a site that does not cap",
+          "capped_by_site" not in meta, sorted(meta))
+
+
+# ---------------------------------------------------------------------------
+# The engines — the cross-engine checks
+# ---------------------------------------------------------------------------
+
+ENGINES = ("playwright_scraper", "selenium_scraper", "puppeteer_scraper")
+DRIVER_IMPORTS = {
+    "playwright_scraper": "playwright",
+    "selenium_scraper": "selenium",
+    "puppeteer_scraper": "pyppeteer",
+}
+
+
+def _import_engine(name):
+    try:
+        return __import__(name)
+    except ImportError as e:
+        skip(name, "engine library absent (%s)" % e)
+        return None
+
+
+def check_engines_import_their_driver_at_module_level():
+    """For the guarded imports above to MEAN anything.
+
+    A sibling repo imported `launch`/`connect` inside the launch path, so the
+    module imported cleanly with no pyppeteer installed: the group never
+    skipped, and the CI job that exists to fail on unexpected skips could not
+    have caught a broken import. It also let CI run against a stub version
+    for a while without anything noticing. This drifts back silently, so it
+    is asserted with an `ast` walk rather than trusted.
+    """
+    for module, driver in DRIVER_IMPORTS.items():
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            check("%s exists" % module, False)
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        top_level = set()
+        for node in tree.body:          # module level ONLY
+            if isinstance(node, ast.Import):
+                top_level.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top_level.add(node.module.split(".")[0])
+        check("%s imports %s at MODULE level" % (module, driver),
+              driver in top_level,
+              "top-level imports: %s" % sorted(top_level))
+
+
+def check_shared_calls_bind_against_the_real_signature():
+    """Cross-engine check #1, and the one that earns its keep.
+
+    A sibling repo shipped `classify(html, url=…)` in two of three engines
+    against a callee taking `status` second, and BOTH crashed on their first
+    fetch — invisible to import, --help, compileall, the undefined-name walk
+    and 400+ green assertions, because none of those calls a function the way
+    a live run does.
+
+    This walks every engine's AST for calls into the shared modules and binds
+    each one against the callee's real signature.
+    """
+    import page_flow
+    import product_parser
+    import output_writer
+    targets = {"page_flow": page_flow, "product_parser": product_parser,
+               "output_writer": output_writer}
+    bound = 0
+    for module in ENGINES + ("scraper_api_client",):
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            continue
+        source = open(path, encoding="utf-8").read()
+        tree = ast.parse(source)
+        # Which shared names this file imported directly (`from x import y`).
+        direct = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in targets:
+                for alias in node.names:
+                    direct[alias.asname or alias.name] = (
+                        targets[node.module], alias.name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            owner = attr = None
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if func.value.id in targets:
+                    owner, attr = targets[func.value.id], func.attr
+            elif isinstance(func, ast.Name) and func.id in direct:
+                owner, attr = direct[func.id]
+            if owner is None:
+                continue
+            # A name that is NOT THERE is the loudest possible failure and
+            # this check used to swallow it: `getattr(..., None)` returned
+            # None, `not callable(None)` was true, and the call was skipped.
+            # Three calls into a page_flow API that does not exist in this
+            # repo -- comparable(), next_page_selector(),
+            # next_page_candidates(), all of them Tokopedia's, all arriving
+            # with copied code -- sat in two engines under a green run of
+            # this very function. Absent is not "nothing to bind".
+            if not hasattr(owner, attr):
+                check("%s.%s exists (called from %s:%d)"
+                      % (getattr(owner, "__name__", owner), attr,
+                         module + ".py", node.lineno),
+                      False,
+                      "the engine calls a name the shared module does not "
+                      "define; a live run reaches this as AttributeError")
+                continue
+            callee = getattr(owner, attr)
+            if not callable(callee) or inspect.isclass(callee):
+                continue
+            try:
+                signature = inspect.signature(callee)
+            except (TypeError, ValueError):
+                continue
+            positional = [inspect.Parameter.empty] * len(node.args)
+            keywords = {}
+            for kw in node.keywords:
+                if kw.arg is None:          # **kwargs — cannot be checked here
+                    keywords = None
+                    break
+                keywords[kw.arg] = inspect.Parameter.empty
+            if keywords is None:
+                continue
+            try:
+                signature.bind(*positional, **keywords)
+                bound += 1
+            except TypeError as e:
+                check("%s:%d %s.%s(...) binds against its real signature"
+                      % (module, node.lineno, owner.__name__, attr),
+                      False, "%s; signature is %s" % (e, signature))
+    check("every shared-module call in every engine binds (%d checked)" % bound,
+          bound > 40, "only %d calls were checked — is the walk finding them?"
+          % bound)
+
+
+def _argparse_flags(module_name):
+    """Every --flag a module's parser defines, without running the CLI."""
+    path = os.path.join(HERE, module_name + ".py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    # Only calls on the argparse parser itself. A browser's option object
+    # also has `add_argument`, and counting Chrome's own switches
+    # (`--no-sandbox`, `--window-size=…`) as CLI flags made this check
+    # compare nonsense.
+    parsers = {"p"}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr in ("add_argument_group",
+                                             "add_mutually_exclusive_group")):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    parsers.add(target.id)
+    flags = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in parsers):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                        and arg.value.startswith("--"):
+                    flags.add(arg.value)
+    return flags
+
+
+# The family's flag contract, plus this repo's own additions.
+CONTRACT_FLAGS = {
+    "--url", "--pages", "--category", "--format", "--out", "--delay",
+    "--retries", "--retry-delay", "--concurrency", "--proxy", "--proxy-file",
+    "--proxy-rotate", "--proxy-shuffle", "--proxy-block-retries",
+    "--twocaptcha-key", "--captcha-api", "--solve-captcha", "--min-score",
+    "--cdp-endpoint", "--allow-empty", "--dump-html",
+}
+# The five flags the written contract omitted for months while nearly every repo in
+# the family shipped them, plus this site's own additions.
+#
+# `--fingerprint`, `--fp-tags`, `--fp-country` and `--mode` are in 17 of the
+# 18 repos counted; `--locale` is in 16. Re-derive rather than trusting this
+# comment:
+#
+#   grep -ohE '"--[a-z0-9-]+"' */playwright_scraper.py | sort | uniq -c | sort -rn
+FAMILY_FLAGS = {"--fingerprint", "--fp-tags", "--fp-country", "--locale",
+                "--mode"}
+
+# Site-specific, and each one earns its place:
+#   --sort        the ordering decides WHICH products are in the file
+#   --query       builds a /search URL without hand-assembling one
+#   --page-size   the site's `sz`, which it honours up to at least 96
+SITE_FLAGS = {"--sort", "--query", "--page-size"}
+
+
+def check_engine_flag_sets():
+    """Cross-engine check #2: against the contract AND against each other, both ways.
+
+    A missing flag fails; so does closing a difference the README documents.
+    """
+    sets = {}
+    for module in ENGINES:
+        if not os.path.exists(os.path.join(HERE, module + ".py")):
+            continue
+        sets[module] = _argparse_flags(module)
+    for module, flags in sets.items():
+        missing = (CONTRACT_FLAGS | FAMILY_FLAGS | SITE_FLAGS) - flags
+        check("%s defines every contract flag" % module, not missing,
+              "missing %s" % sorted(missing))
+    # The ONE documented difference: pyppeteer downloads its own Chromium
+    # and could not launch it on the development machine, so it needs a way
+    # to point at another one. Its twins have no equivalent because they do
+    # not ship a browser. Listed here so that closing the difference — or
+    # growing a second one — fails the build.
+    DOCUMENTED_DIFFERENCES = {"puppeteer_scraper": {"--chromium-path"}}
+    names = sorted(sets)
+    for i in range(len(names) - 1):
+        a, b = names[i], names[i + 1]
+        only_a = sets[a] - sets[b] - DOCUMENTED_DIFFERENCES.get(a, set())
+        only_b = sets[b] - sets[a] - DOCUMENTED_DIFFERENCES.get(b, set())
+        check("%s and %s define the same flags" % (a, b),
+              not only_a and not only_b,
+              "only in %s: %s; only in %s: %s"
+              % (a, sorted(only_a), b, sorted(only_b)))
+
+
+BANNED_FLAGS = ("--antidetect", "--country-code")
+
+
+def check_banned_and_removed_flags():
+    """Scoped to the ENGINES.
+
+    `--country` is absent here — the flag this family bans outright — and
+    `--locale` takes its place, because on Montblanc the market really is a
+    property of the URL rather than of the browser.
+
+    That makes the ban's REASON bite harder than usual: the locale is a path
+    segment, so a `--locale` that disagreed with a `--url` would silently
+    read a different market, and on this site a different market is a
+    different PRICE (EUR 2000 on en-fi against EUR 1900 on de-de for one
+    backpack). So the flag is refused alongside --url rather than merged,
+    and this check pins that refusal exists in every engine.
+    """
+    for module in ENGINES:
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            continue
+        source = open(path, encoding="utf-8").read()
+        for flag in BANNED_FLAGS:
+            check("%s does not define %s" % (module, flag),
+                  '"%s"' % flag not in source)
+        check("%s does not define the banned --country" % module,
+              '"--country"' not in source,
+              "it is banned: it could disagree with the URL")
+        check("%s refuses --locale alongside --url" % module,
+              "--url already carries its locale" in source,
+              "the refusal that keeps --locale from contradicting the URL "
+              "is missing — on this site that means a different price")
+
+
+def check_undefined_names_in_every_module():
+    """`compileall` proves a file PARSES, not that its names RESOLVE.
+
+    A live run of a sibling repo's pyppeteer engine died with NameError on a
+    line reached only while fetching, after an import had been removed — the
+    module imported cleanly, --help worked, compileall passed and CI was
+    green. Kept COARSE (pooled bindings, no scope tracking) so it
+    under-reports rather than inventing problems.
+    """
+    import builtins
+    modules = [f for f in sorted(os.listdir(HERE))
+               if f.endswith(".py") and f != "smoke_test.py"]
+    for filename in modules:
+        tree = ast.parse(open(os.path.join(HERE, filename), encoding="utf-8").read())
+        # Module-level dunders exist without being assigned anywhere.
+        defined = set(dir(builtins)) | {"__file__", "__name__", "__doc__",
+                                        "__package__", "__spec__"}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    defined.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                defined.add(node.id)
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, ast.alias) and node.asname:
+                defined.add(node.asname)
+        used = {n.id for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        unresolved = sorted(used - defined)
+        check("%s: every name resolves" % filename, not unresolved,
+              "%s" % unresolved)
+
+
+def _import_graph(entrypoint):
+    """Every local module an entrypoint reaches, transitively."""
+    local = {f[:-3] for f in os.listdir(HERE) if f.endswith(".py")}
+    seen, queue = set(), [entrypoint]
+    while queue:
+        name = queue.pop()
+        if name in seen or name not in local:
+            continue
+        seen.add(name)
+        tree = ast.parse(open(os.path.join(HERE, name + ".py"),
+                              encoding="utf-8").read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                queue.extend(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                queue.append(node.module.split(".")[0])
+    return seen
+
+
+def check_dockerfile_copies_everything_the_entrypoint_imports():
+    """All three repos in this family shipped an image that died with
+    ModuleNotFoundError on every invocation, --help included, because
+    proxy_pool.py was missing from the COPY list. CI never built the image;
+    this check needs no Docker."""
+    path = os.path.join(HERE, "Dockerfile")
+    if not os.path.exists(path):
+        check("Dockerfile exists", False)
+        return
+    dockerfile = open(path, encoding="utf-8").read()
+    # Only the COPY instructions, continuations included — a comment above
+    # them naming a file is not a file the image carries.
+    copy_lines, joining = [], False
+    for line in dockerfile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if joining or stripped.upper().startswith("COPY "):
+            copy_lines.append(stripped)
+            joining = stripped.endswith("\\")
+    copied = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\.py", " ".join(copy_lines)))
+    entry = re.search(r'(?:CMD|ENTRYPOINT)\s*\[?\s*"?(?:python3?"?,\s*"?)?'
+                      r'([A-Za-z_][A-Za-z0-9_]*)\.py', dockerfile)
+    entrypoint = entry.group(1) if entry else "playwright_scraper"
+    needed = _import_graph(entrypoint)
+    missing = sorted(needed - copied)
+    check("the Dockerfile COPYs every module %s.py imports" % entrypoint,
+          not missing, "missing %s" % missing)
+    for unwanted in ("smoke_test", "test_smoke"):
+        check("the image does not carry %s.py" % unwanted,
+              unwanted not in copied)
+
+
+def check_env_example_documents_exactly_what_the_loader_reads():
+    import env_config
+    path = os.path.join(HERE, ".env.example")
+    if not os.path.exists(path):
+        check(".env.example exists", False)
+        return
+    documented = set(re.findall(r"^\s*#?\s*([A-Z][A-Z0-9_]+)\s*=", 
+                                open(path, encoding="utf-8").read(), re.M))
+    read = set(env_config.ENV_KEYS)
+    check("every variable the loader reads is documented",
+          not (read - documented), "undocumented: %s" % sorted(read - documented))
+    check("every documented variable is actually read",
+          not (documented - read), "unread: %s" % sorted(documented - read))
+
+
+def check_a_copied_env_example_reads_as_UNSET():
+    """`cp .env.example .env` followed by a run must not connect.
+
+    The placeholder check was a literal set in a sibling repo, and the two
+    credentialled URLs are documented the way the vendor documents them —
+    `ws://{login}-zone-…:{password}@cb.2captcha.com:9222` — so neither
+    literal matched, the run connected with the string `{login}-zone-…` as
+    its username, and got a 401 a long way from its cause.
+    """
+    import env_config
+    example = os.path.join(HERE, ".env.example")
+    if not os.path.exists(example):
+        check(".env.example exists", False)
+        return
+    text = open(example, encoding="utf-8").read()
+    values = dict(re.findall(r"^([A-Z][A-Z0-9_]+)=(.*)$", text, re.M))
+    CREDENTIALS = {"TWOCAPTCHA_KEY", "MONTBLANC_CDP_ENDPOINT", "MONTBLANC_PROXY"}
+    # The credentials ship as placeholders; the default TARGET ships
+    # COMMENTED OUT. Set, a copied example chose the user's target for them:
+    # it replaced the category --category asked for and refused --query and
+    # --locale. The commented line still documents it (checked above).
+    check("the example sets every credential as a placeholder",
+          set(values) == CREDENTIALS,
+          "example sets %s" % sorted(values))
+    check("MONTBLANC_URL ships commented out, not set",
+          "MONTBLANC_URL" not in values
+          and re.search(r"^#\s*MONTBLANC_URL=https://", text, re.M) is not None)
+    before = dict(os.environ)
+    try:
+        for name, raw in values.items():
+            os.environ[name] = raw
+            got = env_config.env_value(name)
+            if name in CREDENTIALS:
+                check("a copied .env.example leaves %s unset" % name,
+                      got is None, "got %r" % got)
+            else:
+                check("...while %s stays a usable default" % name,
+                      got == raw.strip(), "got %r" % got)
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+    # And the counter-check: a real credential must still come through, or
+    # the placeholder rule would have made the loader useless. Deliberately
+    # NOT 32 hex characters — that is the shape of a real 2captcha key, and
+    # this repo's own credential scan (rightly) fails on one.
+    try:
+        os.environ["TWOCAPTCHA_KEY"] = "not-a-real-key-but-a-real-value"
+        equal("a real value is still read",
+              env_config.env_value("TWOCAPTCHA_KEY"),
+              "not-a-real-key-but-a-real-value")
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+
+
+def check_credential_scan_is_one_implementation_invoked_from_both():
+    """Two sources of truth, one dead and one holed.
+
+    `.github/ci_checks.py` sat in three repos invoked by NOTHING, while
+    tests.yml carried an inline grep doing a narrower version of the same job
+    — one that matched only ws:// and wss://, so an http://user:pass@
+    credential would have sailed past CI.
+    """
+    script = os.path.join(HERE, ".github", "ci_checks.py")
+    check("the credential scan exists as a script", os.path.exists(script))
+    if not os.path.exists(script):
+        return
+    workflow = os.path.join(HERE, ".github", "workflows", "tests.yml")
+    if os.path.exists(workflow):
+        text = open(workflow, encoding="utf-8").read()
+        check("CI INVOKES the script rather than reimplementing it",
+              "ci_checks.py" in text)
+    result = subprocess.run([sys.executable, script, "--all"], cwd=HERE,
+                            capture_output=True, text=True)
+    check("the credential scan passes on this repo's own tree",
+          result.returncode == 0,
+          (result.stdout + result.stderr)[-600:])
+
+
+BANNED_WORDING = (
+    "cloud browser", "antidetect browser", "2scraper Antidetect Browser",
+    "gate.2prx.com", "ANTIDETECT_LOCAL_API",
+)
+
+
+def check_ci_calls_the_shared_checks_rather_than_restating_them():
+    """One implementation, invoked from both — asserted, not assumed.
+
+    This repo's FIRST CI run failed on exactly this. `tests.yml` carried
+    INLINE reimplementations of the `--help` and sample-output checks that
+    `.github/ci_checks.py` already implements. The inline sample check still
+    imported `output_writer.Business` — a class this repo renamed to
+    `Product` — so the job died with ImportError while `ci_checks.py` passed
+    on the same tree. One copy had been updated and the other had not, and
+    nothing in the repo could see the difference.
+
+    The guard triggers on the whole `.github` directory being absent, never
+    on a file inside it being missing: two suites in this family run
+    INSIDE the Docker image, which deliberately COPYs no `.github/`, so a
+    check that reads a workflow file is correct in the repo and red in the
+    image. A check that quietly starts passing once its input disappears is
+    the failure mode this one is guarding against, so the escape is the
+    directory, not the file.
+    """
+    github_dir = os.path.join(HERE, ".github")
+    if not os.path.isdir(github_dir):
+        skip("ci wiring", "no .github/ directory (this is the Docker image, "
+                          "which deliberately carries no CI material)")
+        return
+
+    workflow = os.path.join(github_dir, "workflows", "tests.yml")
+    script = os.path.join(github_dir, "ci_checks.py")
+    check("ci_checks.py exists", os.path.exists(script))
+    check("tests.yml exists", os.path.exists(workflow))
+    if not (os.path.exists(workflow) and os.path.exists(script)):
+        return
+
+    text = open(workflow, encoding="utf-8").read()
+    for flag in ("--help-check", "--sample-check", "--secret-check"):
+        check("tests.yml invokes ci_checks.py %s" % flag,
+              "ci_checks.py" in text and flag in text,
+              "the workflow must CALL the shared check, not restate it")
+
+    # The positive direction is not enough on its own: the workflow could
+    # call the script AND still carry a stale inline copy beside it, which is
+    # exactly the state that broke the first run. So assert the tell-tales of
+    # a reimplementation are gone.
+    # Deliberately NOT keyed on the filename. `sample_output.json` appears
+    # legitimately in the docker job, which asserts the IMAGE does not carry
+    # it — so a filename tell-tale fails on a correct workflow, which is its
+    # own kind of check nobody can read. What actually distinguishes a
+    # reimplementation is inline Python that imports the row model or
+    # dataclass machinery to rebuild the expected column list.
+    for tell in ("from output_writer import", "asdict("):
+        check("tests.yml does not reimplement the sample check (%r)" % tell,
+              tell not in text,
+              "an inline copy drifts from the shared one silently")
+
+
+def check_banned_wording():
+    """Enforced by this test rather than by review."""
+    for root, dirs, files in os.walk(HERE):
+        dirs[:] = [d for d in dirs if d not in
+                   (".git", "__pycache__", ".pytest_cache", "node_modules")]
+        for filename in files:
+            if not filename.endswith((".py", ".md", ".yml", ".yaml", ".txt",
+                                      ".toml", ".html", ".example")):
+                continue
+            path = os.path.join(root, filename)
+            text = open(path, encoding="utf-8", errors="replace").read().lower()
+            for phrase in BANNED_WORDING:
+                if phrase.lower() in text and filename != "smoke_test.py":
+                    check("%s contains no %r" % (
+                        os.path.relpath(path, HERE), phrase), False)
+    check("banned-wording scan ran", True)
+
+
+def check_concurrency_with_the_browser_stubbed():
+    """A live run cannot always reach this machinery.
+
+    Page 1 is fetched alone and decides how many pages there are, so a
+    blocked page 1 means the workers never start. Driven directly instead,
+    with the browser replaced.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    class Args:
+        delay = 0
+        retries = 1
+        retry_delay = 0
+        out = "unused"
+        mode = "search"
+        sort = "a-z"
+        pages = 50
+
+    fetched = []
+    import threading
+    lock = threading.Lock()
+
+    def fake_fetch(session, args, pool, page_num, url):
+        with lock:
+            fetched.append(page_num)
+        outcome = engine.PageOutcome(page_num=page_num, url=url)
+        # Page 6 is the end of this listing: no rows, but a served page.
+        outcome.products = [] if page_num >= 6 else [object()] * 15
+        outcome.state = "empty" if page_num >= 6 else "content"
+        return outcome
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            self.pool = None
+        def open(self):
+            return self
+        def close(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+        def __exit__(self, *a):
+            return False
+
+    real_fetch = engine._fetch_one_page
+    real_session = engine._BrowserSession
+    real_pw = engine.sync_playwright
+    engine._fetch_one_page = fake_fetch
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    try:
+        specs = [(n, "u%d" % n) for n in range(2, 51)]
+        results, unattempted, exhausted = engine._fetch_pages_concurrently(
+            Args(), None, specs, 4)
+    finally:
+        engine._fetch_one_page = real_fetch
+        engine._BrowserSession = real_session
+        engine.sync_playwright = real_pw
+
+    check("every page fetched was fetched exactly once",
+          len(fetched) == len(set(fetched)), "%r" % sorted(fetched))
+    check("dispatch STOPPED at the end of the listing", exhausted)
+    check("...so the 49 queued pages cost far fewer fetches",
+          len(fetched) < 15, "fetched %d of 49" % len(fetched))
+    check("unattempted pages are REPORTED, not counted as failed",
+          len(unattempted) > 0 and all(isinstance(n, int) for n in unattempted))
+    equal("attempted + unattempted covers the whole queue",
+          len(set(fetched)) + len(unattempted), 49)
+    equal("outcomes are restorable to page order",
+          [o.page_num for o in sorted(results, key=lambda o: o.page_num)],
+          sorted(o.page_num for o in results))
+
+
+def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+
+    class Args:
+        delay = 0
+        retries = 1
+        retry_delay = 0
+        out = "unused"
+        mode = "search"
+        sort = "a-z"
+        pages = 10
+
+    def exploding_fetch(session, args, pool, page_num, url):
+        if page_num == 3:
+            raise RuntimeError("worker died")
+        outcome = engine.PageOutcome(page_num=page_num, url=url)
+        outcome.products = [object()] * 15
+        outcome.state = "content"
+        return outcome
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            self.pool = None
+        def open(self):
+            return self
+        def close(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+        def __exit__(self, *a):
+            return False
+
+    real_fetch, real_session, real_pw = (engine._fetch_one_page,
+                                         engine._BrowserSession,
+                                         engine.sync_playwright)
+    engine._fetch_one_page = exploding_fetch
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    try:
+        specs = [(n, "u%d" % n) for n in range(2, 8)]
+        results, unattempted, exhausted = engine._fetch_pages_concurrently(
+            Args(), None, specs, 3)
+    finally:
+        engine._fetch_one_page = real_fetch
+        engine._BrowserSession = real_session
+        engine.sync_playwright = real_pw
+
+    check("the run returned rather than hanging", True)
+    check("the dead worker's siblings still delivered their pages",
+          len(results) >= 3, "%d results" % len(results))
+    check("page 3 is not reported as a success",
+          3 not in [o.page_num for o in results])
+
+
+def check_worker_pools_start_on_different_exits():
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    from proxy_pool import ProxyPool
+    pool = ProxyPool(["http://a:1", "http://b:2", "http://c:3"], rotate="per-run")
+    firsts = [engine._worker_pool(pool, i).current for i in range(3)]
+    equal("three workers start on three different exits",
+          len(set(firsts)), 3)
+    equal("a missing pool stays missing", engine._worker_pool(None, 0), None)
+
+
+def check_fingerprint_kwargs_are_ones_the_driver_accepts():
+    """An unknown key in new_context(**kwargs) is a TypeError at launch,
+    on the PAID path, at runtime."""
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        return
+    try:
+        from fingerprint_client import playwright_context_kwargs
+    except ImportError as e:
+        skip("fingerprint", str(e))
+        return
+    sample = {"id": "x", "country": "US",
+              "userAgent": "Mozilla/5.0 Chrome/140.0.0.0",
+              "screen": {"width": 1920, "height": 1080},
+              "timezone": "America/New_York", "language": "en-US",
+              "devicePixelRatio": 2}
+    kwargs = playwright_context_kwargs(sample)
+    from playwright.sync_api import sync_playwright  # noqa: F401
+    import playwright.sync_api as pw_api
+    signature = inspect.signature(pw_api.Browser.new_context)
+    unknown = [k for k in kwargs if k not in signature.parameters]
+    check("every fingerprint kwarg is one new_context accepts", not unknown,
+          "unknown: %s" % unknown)
+
+
+def check_every_engine_exposes_the_same_public_surface():
+    for module in ENGINES:
+        engine = _import_engine(module)
+        if engine is None:
+            continue
+        for name in ("scrape", "parse_args", "PageOutcome", "_fetch_one_page",
+                     "_parse_for_mode", "_target_url"):
+            check("%s.%s exists" % (module, name), hasattr(engine, name))
+        outcome = engine.PageOutcome(page_num=1, url="u")
+        for field_name in ("state", "total_available", "pages_available",
+                           "sort_applied", "products", "blocked_by",
+                           "load_failed", "final_url"):
+            check("%s.PageOutcome carries %r" % (module, field_name),
+                  hasattr(outcome, field_name))
+        check("%s.PageOutcome.ok is True for a fresh outcome" % module,
+              outcome.ok)
+        equal("%s shares CORE_FIELDS with its twins" % module,
+              tuple(engine.CORE_FIELDS),
+              ("title", "url", "sku", "currency"))
+        equal("%s shares PRICE_COVERAGE_FLOOR with its twins" % module,
+              engine.PRICE_COVERAGE_FLOOR, 95)
+        equal("%s shares CORE_FIELD_FLOOR with its twins" % module,
+              engine.CORE_FIELD_FLOOR, 99)
+
+
+def check_engines_do_not_evaluate_a_string_in_the_browser():
+    """A site whose CSP omits `unsafe-eval` kills wait_for_function with
+    an EvalError and takes the run down with exit 1. Montblanc has not been
+    measured for that, and the cheap habit costs nothing where it would have
+    been allowed."""
+    for module in ENGINES:
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        called = {node.func.attr for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)}
+        for banned in ("wait_for_function", "waitForFunction", "waitFor"):
+            check("%s never CALLS %s" % (module, banned), banned not in called,
+                  "poll through page_flow.wait_for_count instead")
+
+
+def check_credentials_never_reach_a_log():
+    """An EXCEPTION MESSAGE is a log, and the masker must be GLOBAL.
+
+    A Playwright connection error repeats the endpoint five times (the
+    message plus a four-line call log), so a masker handling only the first
+    occurrence prints the password four times and looks like it is working.
+    """
+    for module in ENGINES:
+        engine = _import_engine(module)
+        if engine is None:
+            continue
+        masked = engine._mask_credentials(
+            "tried ws://u:supersecret@h1:9222 and ws://u:supersecret@h2:9222 "
+            "and again ws://u:supersecret@h1:9222")
+        check("%s masks EVERY occurrence" % module,
+              "supersecret" not in masked, masked)
+        check("%s keeps the host and port, which are the useful half" % module,
+              "h1:9222" in masked and "h2:9222" in masked, masked)
+    from proxy_pool import mask
+    masked = mask("http://user:secret@exit.example.com:2334")
+    check("proxy_pool.mask hides the password", "secret" not in masked)
+    check("proxy_pool.mask keeps the exit", "exit.example.com:2334" in masked)
+
+
+def check_sample_output_matches_the_schema():
+    from output_writer import Product
+    expected = [f.name for f in fields(Product)]
+    json_path = os.path.join(HERE, "sample_output.json")
+    csv_path = os.path.join(HERE, "sample_output.csv")
+    if not os.path.exists(json_path):
+        check("sample_output.json exists", False)
+        return
+    rows = json.load(open(json_path, encoding="utf-8"))
+    check("sample_output.json holds rows", bool(rows))
+    equal("sample_output.json keys match the schema, in order",
+          list(rows[0].keys()), expected)
+    check("sample_output.json is from a real run (montblanc.com rows)",
+          all(r["source"] == "montblanc.com" for r in rows))
+    check("...and every row carries the market its price belongs to",
+          all(r.get("locale") for r in rows),
+          "a price with no market is a number with no units")
+    check("...and a currency wherever there is a price",
+          all(r.get("currency") for r in rows if r.get("price") is not None))
+    check("...and carries no fabrication markers",
+          not any("example" in (r.get("url") or "").lower() or
+                  "lorem" in (r.get("title") or "").lower() for r in rows))
+    if os.path.exists(csv_path):
+        header = next(csv.reader(open(csv_path, encoding="utf-8")))
+        equal("sample_output.csv header matches the schema", header, expected)
+
+
+def check_readme_numbers_are_not_stale():
+    """Cross-engine check #4: diff every numeric claim against what is on disk.
+
+    Only the figures that MUST hold are pinned: a number that legitimately
+    varies between runs is written as a range in the README and not checked
+    here.
+    """
+    path = os.path.join(HERE, "README.md")
+    if not os.path.exists(path):
+        check("README.md exists", False)
+        return
+    readme = open(path, encoding="utf-8").read()
+    import product_parser as P
+    # The site's own default page size, which the README quotes when it
+    # explains pagination. There is no page CAP to pin here — unlike the
+    # sibling repo, this site imposes none — so what is checkable is the
+    # page size and the arithmetic built on it.
+    if "sz=24" in readme or "24 products per page" in readme:
+        equal("the README's page size matches PAGE_SIZE", P.PAGE_SIZE, 24)
+    if "280 results across 12" in readme or "12 pages of 24" in readme:
+        equal("the README's 280/12 arithmetic holds",
+              P.pages_available(280, 24), 12)
+    from output_writer import Product
+    column_count = len(fields(Product))
+    # "## Related scrapers" describes OTHER repositories, whose rows have
+    # their own widths; a sibling's "39 columns" there is not a claim about
+    # this schema. Every other section is still checked.
+    own = re.sub(r"(?ms)^## Related scrapers\b.*?(?=^## |\Z)", "", readme)
+    claimed = re.findall(r"(\d+)\s+columns", own)
+    for number in claimed:
+        equal("the README's column count matches the schema",
+              int(number), column_count)
+
+
+_TREE_BEFORE = None
+
+
+def _tree_state():
+    result = subprocess.run(["git", "status", "--porcelain"], cwd=HERE,
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return sorted(line for line in result.stdout.splitlines()
+                  if not line.endswith(".pyc"))
+
+
+def check_no_test_mutates_the_working_tree():
+    """One suite used its own file as a fake chromedriver and chmod'd it
+    to 755, leaving a mode change in git status.
+
+    Compares the tree against how it looked when the suite STARTED, not
+    against a clean checkout — otherwise this is permanently red while
+    anyone is editing, and a check that is always red teaches everyone to
+    ignore checks.
+    """
+    if _TREE_BEFORE is None:
+        skip("git status", "not a git repository")
+        return
+    after = _tree_state()
+    changed = sorted(set(after) - set(_TREE_BEFORE))
+    check("the suite itself changed nothing in the working tree",
+          not changed, "%s" % changed)
+
+
+def check_captcha_capability_claims_match_the_code():
+    """The most expensive bug this family can ship is a SENTENCE.
+
+    It fails in both directions and this family has shipped both:
+
+      * saying a captcha CANNOT be solved, when the true statement is that
+        THIS REPO does not implement the task type. 2Captcha solves
+        enterprise reCAPTCHA and Cloudflare Turnstile and has for years, so
+        such a sentence tells a reader not to buy something that works.
+      * saying this repo DOES solve something it builds no task type for --
+        which is what the sibling bbb-scraper's README once said: it billed
+        its site's Managed Challenge solve to `--twocaptcha-key`, while the only thing that clears one is
+        `Captcha.setAutoSolve` over `--cdp-endpoint`.
+
+    Neither is visible to any other check: nothing fails, nothing crashes,
+    and the output is correct.
+    """
+    readme = open(os.path.join(HERE, "README.md"), encoding="utf-8").read()
+    solver = open(os.path.join(HERE, "captcha_solver.py"), encoding="utf-8").read()
+    low = readme.lower()
+
+    # Conclusions about the PRODUCT. "Unsolvable" is a property of a PAGE —
+    # it means the page carries no widget — and never of a vendor. 2Captcha
+    # solves enterprise reCAPTCHA and Cloudflare Turnstile and has for years,
+    # so a sentence saying otherwise tells a reader not to buy something that
+    # works, and nothing else in this suite can see it.
+    for phrase in ("cannot be solved", "can't be solved", "neither is solvable",
+                   "is not solvable", "solver is inapplicable", "no solver can",
+                   "2captcha cannot", "no captcha service"):
+        check("README: no %r -- write 'this repo does not implement X'" % phrase,
+              phrase not in low)
+
+    # The pairing that matters ON THIS SITE.
+    #
+    # The sibling repo pins "the README must say TurnstileTaskProxyless is
+    # not built here", because BBB renders Cloudflare Managed Challenges and
+    # a reader could reasonably expect a key to clear one. Montblanc renders
+    # NO challenge at all, so the equivalent hazard is the opposite one: this
+    # README's central claim is that no key is needed, and a claim like that
+    # rots the moment the site switches a bot manager on.
+    #
+    # So the claim has to be PAIRED with the thing that would retest it — the
+    # scheduled canary — rather than left as a sentence nobody re-measures.
+    claims_no_key = ("no, and it would be dishonest" in low
+                     or "do i need a 2captcha account" in low)
+    if claims_no_key:
+        check("README pairs 'no key needed' with the canary that retests it",
+              "canary" in low,
+              "a claim that the site is ungated goes stale silently; the "
+              "scheduled canary is what turns it back into a measurement")
+        check("...and dates the measurement it rests on",
+              re.search(r"20\d\d-\d\d-\d\d", readme) is not None,
+              "a number describing a living thing needs its moment")
+
+    # And in the other direction: if the README names a task type, the solver
+    # had better build it. A capability claim citing no task type is a guess
+    # wearing a fact's clothes; one citing a task type nobody implemented is
+    # worse.
+    for task in ("TurnstileTaskProxyless", "RecaptchaV2EnterpriseTaskProxyless",
+                 "RecaptchaV3TaskProxyless"):
+        if task.lower() in low:
+            check("README names %s, so the solver must build it" % task,
+                  task in solver,
+                  "the README credits a task type this repo does not send")
+
+    # Whatever the README credits with clearing the challenge must be a thing
+    # the engines actually do.
+    if "setautosolve" in low:
+        srcs = ""
+        for name in ("playwright_scraper.py", "selenium_scraper.py",
+                     "puppeteer_scraper.py"):
+            path = os.path.join(HERE, name)
+            if os.path.exists(path):
+                srcs += open(path, encoding="utf-8").read()
+        check("README credits Captcha.setAutoSolve, and an engine calls it",
+              "Captcha.setAutoSolve" in srcs)
+def check_no_statement_is_unreachable():
+    """A statement sitting after a return/raise/break/continue in the SAME
+    block, which therefore can never run.
+
+    Narrow on purpose: it makes no claim about reachability in general, only
+    about a block whose control flow has already left. Measured across the
+    eighteen repos of this family on 2026-09-16 it reported six problems and
+    zero false positives.
+
+    `check_undefined_names_in_every_module` cannot see this class at all, by
+    design -- it pools every binding in the file rather than tracking scopes,
+    so a name used inside dead code passes as long as anything else in the
+    module binds it. What was hiding in that blind spot here, and in five
+    sibling repos, byte for byte: a function whose `def` line had been lost,
+    leaving its docstring and body absorbed into the end of the function
+    above it. Present since this repo's first commit, invisible to import,
+    `--help`, `compileall`, and every green run of this suite.
+    """
+    for filename in sorted(f for f in os.listdir(HERE) if f.endswith(".py")):
+        tree = ast.parse(open(os.path.join(HERE, filename),
+                              encoding="utf-8").read())
+        dead = []
+        for node in ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                block = getattr(node, field, None)
+                if not isinstance(block, list):
+                    continue
+                for i, stmt in enumerate(block[:-1]):
+                    if isinstance(stmt, (ast.Return, ast.Raise,
+                                         ast.Continue, ast.Break)):
+                        dead.append(block[i + 1].lineno)
+                        break
+        check("%s: no statement the control flow can never reach" % filename,
+              not dead, "first at line %d" % min(dead) if dead else "")
+
+
+def check_x_debug_header_is_redacted():
+    """SECURITY.md names the Scraper API's x-debug header as a place
+    credentials reach a log unmasked. It was then logged verbatim.
+
+    The fixtures are assembled from pieces rather than written out whole,
+    because this file is scanned by the credential check like every other
+    and a fixture that LOOKS like a live key fails it. They are the SHAPES a
+    credential takes, not the literals this repo happens to contain today.
+    """
+    try:
+        import scraper_api_client as sac
+    except ImportError:
+        return
+
+    pw = "SeCr" + "EtPw"
+    key = "abcdef01" * 4
+    raw = ("cdpurl=ws://acct-zone-scraping_browser-pid-7:" + pw
+           + "@cb.2captcha.com:9222 cost=0.00145 key=" + key + " status=200")
+    out = sac._redact_debug_header(raw)
+    check("x-debug: the credential and the key are gone",
+                 pw not in out and key not in out)
+    check("x-debug: the cost, host and status survive",
+                 "cost=0.00145" in out and "cb.2captcha.com:9222" in out
+                 and "status=200" in out)
+
+    s1, s2 = "secret" + "one", "secret" + "two"
+    two = sac._redact_debug_header(
+        "a=http://u1:" + s1 + "@h1:1 b=http://u2:" + s2 + "@h2:2")
+    check("x-debug: both credentials are masked, not just the first",
+                 s1 not in two and s2 not in two)
+
+    src = inspect.getsource(sac)
+    check("x-debug: the log line calls the redactor",
+                 'logger.info("x-debug: %s", _redact_debug_header(debug))' in src)
+
+
+
+def check_scraper_api_payload_and_status():
+    """Measured 2026-09-23 against the live Scraper API: `waitFor` sent as
+    a JSON-encoded string is answered HTTP 422 and still billed, and the
+    response's `status` is the API's own "success" while the target's code
+    is `http_code`. Drive the real fetch_html with requests.post stubbed:
+    no network, no key spent."""
+    import scraper_api_client as sac
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"status": "success", "http_code": 403,
+                    "headers": {}, "body": "<html></html>"}
+
+    def fake_post(url, **kw):
+        captured.update(kw.get("json") or {})
+        return _Resp()
+
+    real_post, real_argv = sac.requests.post, sys.argv
+    sac.requests.post = fake_post
+    sys.argv = ["scraper_api_client.py", "--key", "k" * 8,
+                "--url", 'https://www.montblanc.com/en-us/writing-instruments',
+                "--wait-text", 'Montblanc']
+    try:
+        _html, status = sac.fetch_html(sac.parse_args())
+    finally:
+        sac.requests.post, sys.argv = real_post, real_argv
+
+    check("scraper API: waitFor is sent as an object, not a JSON string",
+          captured.get("waitFor") == {"text": 'Montblanc'},
+          "got %r" % (captured.get("waitFor"),))
+    check("scraper API: the target status comes from http_code (403), "
+          "not the API's own 'success'", status == 403, "got %r" % (status,))
+
+
+# ---------------------------------------------------------------------------
+# Output contract: atomic writes, file modes, CSV formula cells
+# ---------------------------------------------------------------------------
+
+def check_a_failed_write_keeps_the_previous_good_file():
+    """`open(path, "w")` truncated before writing, so a write that raised
+    halfway left a 567-byte good `out.json` as 0 bytes, and a sidecar
+    rewrite that raised left invalid JSON. Every writer now goes through a
+    temp file in the target's own directory and a rename."""
+    import output_writer as O
+
+    class Unserialisable:
+        pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, path, write in (
+                ("write_json", os.path.join(tmp, "out.json"),
+                 lambda p: O.write_json([O.Product(title="first"),
+                                         O.Product(title=Unserialisable())], p)),
+                ("write_run_meta", os.path.join(tmp, "out.meta.json"),
+                 lambda p: O.write_run_meta(os.path.join(tmp, "out"),
+                                            {"status": Unserialisable()})),
+                ("write_csv", os.path.join(tmp, "out.csv"),
+                 lambda p: O.write_csv([_ExplodingRow()], p))):
+            good = '{"good": true}'
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(good)
+            raised = False
+            old_out = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                write(path)
+            except Exception:                # noqa: BLE001
+                raised = True
+            finally:
+                sys.stdout = old_out
+            check("%s: the injected failure really raised" % label, raised)
+            equal("%s: a failed write leaves the previous file intact" % label,
+                  open(path, encoding="utf-8").read(), good)
+        leftovers = [n for n in os.listdir(tmp) if n.endswith(".tmp")]
+        equal("a failed write leaves no temp file behind", leftovers, [])
+
+
+class _ExplodingRow:
+    """Not a dataclass: `asdict` raises AFTER the CSV header is written."""
+
+
+def check_new_files_follow_the_umask_and_existing_files_keep_their_mode():
+    """A temp file is created 0600 and a rename keeps that, so a naive port
+    makes every output owner-only. New files get `0o666 & ~umask` (what a
+    plain `open()` gives); an existing file keeps its own mode. 002 is the
+    case that tells this apart from a flat 0644."""
+    import output_writer as O
+    if os.name != "posix":
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        for umask, want in ((0o022, 0o644), (0o002, 0o664), (0o077, 0o600)):
+            path = os.path.join(tmp, "new-%o.json" % umask)
+            old = os.umask(umask)
+            try:
+                O.write_json([], path)
+            finally:
+                os.umask(old)
+            equal("a new file under umask %03o is %03o" % (umask, want),
+                  oct(os.stat(path).st_mode & 0o777), oct(want))
+        path = os.path.join(tmp, "existing.json")
+        with open(path, "w") as f:
+            f.write("[]")
+        os.chmod(path, 0o640)
+        O.write_json([], path)
+        equal("an existing file keeps its own mode",
+              oct(os.stat(path).st_mode & 0o777), oct(0o640))
+
+
+def check_csv_formula_cells_are_neutralised_in_csv_only():
+    import output_writer as O
+    from output_writer import Product
+    row = Product(title='=HYPERLINK("http://x")', url="https://www.montblanc.com/x",
+                  price=-5.0)
+    row_list = Product(title="plain", url="https://www.montblanc.com/y",
+                       price=1.0)
+    first_list_field = next((f.name for f in fields(Product)
+                             if f.type in ("List[str]", "list") or
+                             str(f.type).startswith(("List", "typing.List"))), None)
+    if first_list_field:
+        setattr(row_list, first_list_field, ["@SUM(A1)", "ok"])
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "out")
+        old_out = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            rc = O.finish_run([row, row_list], prefix, "both", False,
+                              blocked=False, stop_reason="completed",
+                              pages_requested=1, pages_completed=1,
+                              start_url="u", final_url="u", mode="category",
+                              extra={"csv_cells_escaped": "caller wins",
+                                     "total_results": 2})
+        finally:
+            sys.stdout = old_out
+        equal("a complete run with rows exits 0", rc, 0)
+        cells = list(csv.DictReader(open(prefix + ".csv", encoding="utf-8")))
+        equal("a formula-shaped title is prefixed in the CSV",
+              cells[0]["title"], "'" + '=HYPERLINK("http://x")')
+        equal("a NUMBER is never escaped (-5 stays a number)",
+              cells[0]["price"], "-5.0")
+        if first_list_field:
+            check("a joined list whose first item is formula-shaped is escaped",
+                  cells[1][first_list_field].startswith("'@SUM"),
+                  cells[1][first_list_field])
+        data = json.load(open(prefix + ".json", encoding="utf-8"))
+        equal("the JSON keeps the site's bytes", data[0]["title"],
+              '=HYPERLINK("http://x")')
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        equal("the caller's extra wins a name collision with the write stats",
+              meta["csv_cells_escaped"], "caller wins")
+
+        rc = O.finish_run([row, row_list], prefix, "csv", False,
+                          blocked=False, stop_reason="completed",
+                          pages_requested=1, pages_completed=1,
+                          start_url="u", final_url="u", mode="category")
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+        equal("a joined list is escaped after joining",
+              O._csv_escape(O._csv_value(["@SUM(A1)", "ok"]))[0],
+              "'@SUM(A1) | ok")
+        equal("the sidecar counts the escaped cells",
+              meta.get("csv_cells_escaped"), 2 if first_list_field else 1)
+
+
+# ---------------------------------------------------------------------------
+# Engines driven offline: the driver stubbed when it is not installed
+# ---------------------------------------------------------------------------
+# These checks need the engine MODULE, not its driver, so they must not skip
+# in a venv without the driver — a guard that skips there is green in exactly
+# the job (offline) that runs most often. When the driver is installed the
+# real import is used; otherwise the driver's packages are stubbed for the
+# duration of one private import and removed again.
+
+_DRIVER_PACKAGES = {
+    "playwright_scraper": ("playwright", "playwright.sync_api"),
+    "puppeteer_scraper": ("pyppeteer",),
+    "selenium_scraper": (
+        "selenium", "selenium.webdriver", "selenium.common",
+        "selenium.common.exceptions", "selenium.webdriver.chrome",
+        "selenium.webdriver.chrome.options", "selenium.webdriver.common",
+        "selenium.webdriver.common.by", "selenium.webdriver.support",
+        "selenium.webdriver.support.ui"),
+}
+_OFFLINE_ENGINES = {}
+
+
+def _import_engine_offline(name):
+    if name in _OFFLINE_ENGINES:
+        return _OFFLINE_ENGINES[name]
+    import importlib
+    import importlib.util
+    import types
+    try:
+        module = importlib.import_module(name)
+        _OFFLINE_ENGINES[name] = module
+        return module
+    except ImportError:
+        pass
+
+    class _Stub(types.ModuleType):
+        def __getattr__(self, attr):
+            if attr.startswith("__"):
+                raise AttributeError(attr)
+            value = type(attr, (Exception,), {})
+            setattr(self, attr, value)
+            return value
+
+    added = []
+    for pkg in _DRIVER_PACKAGES[name]:
+        if pkg not in sys.modules:
+            sys.modules[pkg] = _Stub(pkg)
+            added.append(pkg)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_offline_" + name, os.path.join(HERE, name + ".py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for pkg in added:
+            sys.modules.pop(pkg, None)
+    _OFFLINE_ENGINES[name] = module
+    return module
+
+
+def _engine_args(engine, extra_argv=()):
+    argv = ["prog", "--url", "https://www.montblanc.com/en-us/writing-instruments",
+            "--retries", "2", "--retry-delay", "0"] + list(extra_argv)
+    old_argv, old_err = sys.argv, sys.stderr
+    sys.argv, sys.stderr = argv, io.StringIO()
+    try:
+        return engine.parse_args()
+    finally:
+        sys.argv, sys.stderr = old_argv, old_err
+
+
+class _FakeResponse:
+    def __init__(self, status):
+        self.status = status
+
+
+class _FakePage:
+    """Answers every primitive the three engines' fetch paths touch."""
+    def __init__(self, fail, status):
+        self.fail, self.status, self.url = fail, status, "about:blank"
+        self.navigations = 0
+        self.exc = Exception
+
+    def goto(self, url, *a, **k):
+        self.navigations += 1
+        if self.fail:
+            raise self.exc("net::ERR_TIMED_OUT (simulated)")
+        self.url = url
+        return _FakeResponse(self.status)
+
+    def get(self, url):                       # Selenium's spelling
+        self.goto(url)
+
+    @property
+    def current_url(self):
+        return self.url
+
+    page_source = ""
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def screenshot(self, *a, **k):
+        pass
+
+    def save_screenshot(self, *a, **k):
+        pass
+
+    def query_selector_all(self, sel):
+        return []
+
+    querySelectorAll = query_selector_all
+
+    def find_elements(self, *a, **k):
+        return []
+
+    def content(self):
+        return ""
+
+
+class _FakeSession:
+    def __init__(self, page):
+        self.page = self.driver = page
+        self.relaunches = 0
+
+        class _Bridge:
+            def run(self, value):
+                return value
+        self.bridge = _Bridge()
+
+    def relaunch(self):
+        self.relaunches += 1
+
+
+def _drive_fetch(module, html, *, fail=False, status=200, pool=None):
+    """Run one engine's real `_fetch_one_page` against a fake session."""
+    engine = _import_engine_offline(module)
+    args = _engine_args(engine)
+    page = _FakePage(fail, status)
+    if module == "playwright_scraper":
+        page.exc = engine.PWTimeout
+    elif module == "selenium_scraper":
+        page.exc = engine.TimeoutException
+    session = _FakeSession(page)
+    saved = {n: getattr(engine, n) for n in ("_snapshot", "handle_captcha_if_present")}
+    saved_sleep = engine.time.sleep
+    with tempfile.TemporaryDirectory() as tmp:
+        args.out = os.path.join(tmp, "out")
+        engine._snapshot = lambda *a, **k: html
+        engine.handle_captcha_if_present = lambda *a, **k: False
+        engine.time.sleep = lambda s: None
+        try:
+            return engine._fetch_one_page(session, args, pool, 1, args.url), session
+        finally:
+            for n, v in saved.items():
+                setattr(engine, n, v)
+            engine.time.sleep = saved_sleep
+
+
+_REFUSAL_HTML = "<html><body>Access Denied</body></html>"
+
+
+def check_no_proxy_paths_never_dereference_the_pool():
+    """With no --proxy, `pool` is None, and a block-retry or a repeated load
+    failure in the pyppeteer and Selenium engines called `pool.current` /
+    `pool.advance` and crashed with AttributeError (exit 1) where the run
+    should have reported exit 3 or 5. Driven through each engine's real
+    `_fetch_one_page` with a fake session."""
+    for module in ENGINES:
+        for label, kwargs in (("a blocked page", {"html": _REFUSAL_HTML}),
+                              ("a page that never loads",
+                               {"html": "", "fail": True})):
+            try:
+                outcome, session = _drive_fetch(module, pool=None, **kwargs)
+            except Exception as exc:          # noqa: BLE001
+                check("%s, no proxy, %s: does not raise" % (module, label), False,
+                      "%s: %s" % (type(exc).__name__, exc))
+                continue
+            check("%s, no proxy, %s: does not raise" % (module, label), True)
+            check("%s, no proxy, %s: reported as a failed page" % (module, label),
+                  not outcome.ok)
+            if not kwargs.get("fail"):
+                equal("%s, no proxy, %s: re-fetched once, not relaunched"
+                      % (module, label),
+                      (session.page.navigations, session.relaunches), (2, 0))
+
+
+_NOT_FOUND_HTML = """<!DOCTYPE html><html lang="de"><head>
+<title>Die gew&uuml;nschte Seite konnte nicht gefunden werden!</title></head>
+<body><div class="error-container d-flex flex-column">
+<h1 class="error-title">Entschuldigung!</h1>
+<div class="error-system_info"><h2 class="error-subtitle">x</h2></div></div>
+<script>var url = '/de-de/errorpage.html';</script></body></html>"""
+
+
+def check_a_mistyped_url_is_not_found_not_an_empty_catalogue():
+    """`/en-us/this-page-does-not-exist` answers HTTP 404 with the site's own
+    error page, and it was classified `empty` — exit 4, "the catalogue is
+    empty", for a typo. The engines also threw the navigation's status away.
+    Structure trimmed from real 404s on en-us, de-de, fr-fr and ja-jp
+    (2026-10-15)."""
+    import page_flow
+    import product_parser as P
+    output_writer = __import__("output_writer")
+    equal("HTTP 404 is not_found", P.detect_page_state("", 404, "")[0], "not_found")
+    equal("HTTP 410 is not_found", P.detect_page_state("", 410, "")[0], "not_found")
+    equal("the site's own error page is not_found without a status",
+          P.detect_page_state(_NOT_FOUND_HTML, None, "")[0], "not_found")
+    equal("a served listing is still content",
+          P.detect_page_state(LISTING_HTML, 200, LISTING_URL)[0], "content")
+    check("not_found is not retried, solved, or counted as blocked",
+          not page_flow.should_retry("not_found")
+          and not page_flow.should_solve("not_found")
+          and not page_flow.counts_as_blocked("not_found"))
+    for module in ENGINES:
+        for label, html, status in (("HTTP 404", "<html></html>", 404),
+                                    ("its error page", _NOT_FOUND_HTML, 200)):
+            try:
+                outcome, session = _drive_fetch(module, html, status=status)
+            except Exception as exc:          # noqa: BLE001
+                check("%s: %s is handled" % (module, label), False,
+                      "%s: %s" % (type(exc).__name__, exc))
+                continue
+            if module == "selenium_scraper" and label == "HTTP 404":
+                # Selenium exposes no status; its 404 is read from the body.
+                continue
+            equal("%s: %s is not_found" % (module, label), outcome.state, "not_found")
+            check("%s: %s is a failed page, not blocked" % (module, label),
+                  not outcome.ok and outcome.blocked_by is None)
+            equal("%s: %s is fetched once" % (module, label),
+                  session.page.navigations, 1)
+        engine = _import_engine_offline(module)
+        reason = engine._failure_reason(engine.PageOutcome(1, "u", state="not_found"))
+        equal("%s: the stop reason says not_found" % module, reason, "not_found")
+    with tempfile.TemporaryDirectory() as tmp:
+        old_out = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            rc = output_writer.finish_run(
+                [], os.path.join(tmp, "out"), "json", False, blocked=False,
+                stop_reason="not_found", pages_requested=1, pages_completed=0,
+                start_url="u", final_url="u", mode="category")
+        finally:
+            sys.stdout = old_out
+    equal("a run that hit not_found and gathered nothing exits 5, not 4", rc, 5)
+
+
+def check_scraper_api_reads_the_state_not_the_tuple():
+    """`detect_page_state` returns (state, detail); the Scraper API client
+    compared the tuple to "blocked", which can never be equal, so a refusal
+    there fell through to exit 4."""
+    source = open(os.path.join(HERE, "scraper_api_client.py"), encoding="utf-8").read()
+    tree = ast.parse(source)
+    bad = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "id", "") == "detect_page_state"
+                and isinstance(node.targets[0], ast.Name)):
+            bad.append(node.lineno)
+    equal("no detect_page_state result is held as one name", bad, [])
+    check("the client handles not_found", '"not_found"' in source)
+
+
+def _parse_with_env(module, argv, env_url):
+    engine = _import_engine_offline(module)
+    import env_config
+    old_env = os.environ.get("MONTBLANC_URL")
+    old_load = env_config.load_env
+    os.environ["MONTBLANC_URL"] = env_url
+    env_config.load_env = lambda *a, **k: {}
+    old_argv, old_err = sys.argv, sys.stderr
+    sys.argv, sys.stderr = ["prog"] + argv, io.StringIO()
+    try:
+        return engine.parse_args(), None
+    except SystemExit as exc:
+        return None, (exc.code, sys.stderr.getvalue())
+    finally:
+        sys.argv, sys.stderr = old_argv, old_err
+        env_config.load_env = old_load
+        if old_env is None:
+            os.environ.pop("MONTBLANC_URL", None)
+        else:
+            os.environ["MONTBLANC_URL"] = old_env
+
+
+def check_an_env_url_never_overrides_the_command_line():
+    """MONTBLANC_URL, as `.env.example` shipped it, silently replaced the
+    category --category asked for (exit 0, the wrong category) and turned
+    --query and --locale into usage errors, because the conflict checks ran
+    after the environment had filled --url in."""
+    env_url = "https://www.montblanc.com/en-us/writing-instruments"
+    for module in ENGINES:
+        args, err = _parse_with_env(module, ["--category", "bags/backpacks"], env_url)
+        check("%s: --category builds its own URL despite MONTBLANC_URL" % module,
+              args is not None and "bags/backpacks" in (args.url or ""),
+              err or (args and args.url))
+        args, err = _parse_with_env(module, ["--query", "fountain pen"], env_url)
+        check("%s: --query is accepted despite MONTBLANC_URL" % module,
+              args is not None and "search" in (args.url or ""), err)
+        args, err = _parse_with_env(
+            module, ["--locale", "en-fi", "--category", "bags/backpacks"], env_url)
+        check("%s: --locale is accepted despite MONTBLANC_URL" % module,
+              args is not None and "/en-fi/" in (args.url or ""), err)
+        args, err = _parse_with_env(module, [], env_url)
+        check("%s: with no builder flag the env URL is still the default" % module,
+              args is not None and args.url == env_url, err)
+        args, err = _parse_with_env(
+            module, ["--url", env_url, "--query", "pen"], env_url)
+        check("%s: a TYPED --url with --query is still refused" % module,
+              args is None and err and err[0] == 2, err)
+
+
+def check_credential_scan_works_from_any_clone_location():
+    """The scan tested ABSOLUTE path parts, so a clone under `venv/` or
+    `.venv-x/` scanned 0 files and printed "nothing credential-shaped", and
+    it skipped `.env.bak`, JSON, HTML and page dumps entirely. Run against a
+    throwaway copy of the scanner, planted under such an ancestor."""
+    scanner = os.path.join(HERE, ".github", "ci_checks.py")
+    if not os.path.exists(scanner):
+        return          # the Docker image carries no .github/ at all
+    key = "c" * 32
+    with tempfile.TemporaryDirectory() as tmp:
+        for ancestor in ("venv", ".venv-x"):
+            repo = os.path.join(tmp, ancestor, "clone")
+            os.makedirs(os.path.join(repo, ".github"))
+            with open(scanner, encoding="utf-8") as src, \
+                    open(os.path.join(repo, ".github", "ci_checks.py"), "w",
+                         encoding="utf-8") as dst:
+                dst.write(src.read())
+            run = lambda: subprocess.run(
+                [sys.executable, os.path.join(repo, ".github", "ci_checks.py"),
+                 "--secret-check"], capture_output=True, text=True)
+            clean = run()
+            check("scan under %s/ reads files and passes when clean" % ancestor,
+                  clean.returncode == 0 and " 0 files" not in clean.stdout,
+                  clean.stdout[-200:])
+            for name in (".env.bak", "leak.json", "dump.html", "out.json.page3"):
+                path = os.path.join(repo, name)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("key=%s\n" % key)
+                caught = run()
+                check("scan under %s/ catches a key in %s" % (ancestor, name),
+                      caught.returncode != 0 and name in caught.stdout,
+                      caught.stdout[-200:])
+                os.remove(path)
+            os.makedirs(os.path.join(repo, "myenv", "lib"))
+            with open(os.path.join(repo, "myenv", "pyvenv.cfg"), "w") as f:
+                f.write("home = /usr\n")
+            with open(os.path.join(repo, "myenv", "lib", "vendored.py"), "w") as f:
+                f.write("# %s\n" % key)
+            check("a virtualenv inside the clone is still skipped",
+                  run().returncode == 0)
+
+    # And the case the old scan printed as a pass: nothing scanned at all.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_ci_checks_probe", scanner)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    probe.scanned_files = lambda: iter(())
+    old_out = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        failed = probe.secret_check()
+    finally:
+        sys.stdout = old_out
+    check("a scan that read 0 files FAILS rather than reporting clean",
+          any("0 files scanned" in line for line in failed), failed)
+
+
+def check_numeric_flags_refuse_impossible_values():
+    """Counts and pauses that cannot be negative (or zero, where they count
+    workers or pages) are refused with an argparse error naming the flag, in
+    every engine — not clamped, and not left to fail mid-run."""
+    url = "https://www.montblanc.com/en-us/writing-instruments"
+    cases = (("--pages", "0"), ("--concurrency", "0"), ("--delay", "-1"),
+             ("--retry-delay", "-1"), ("--proxy-block-retries", "-1"),
+             ("--retries", "0"))
+    for module in ENGINES:
+        engine = _import_engine_offline(module)
+        for flag, bad in cases:
+            old_argv, old_err = sys.argv, sys.stderr
+            sys.argv, sys.stderr = ["prog", "--url", url, flag, bad], io.StringIO()
+            try:
+                engine.parse_args()
+                check("%s refuses %s %s" % (module, flag, bad), False, "accepted")
+            except SystemExit as exc:
+                err = sys.stderr.getvalue()
+                check("%s refuses %s %s, naming the flag" % (module, flag, bad),
+                      exc.code == 2 and "error:" in err and flag in err.split("error:")[-1],
+                      err[-160:])
+            finally:
+                sys.argv, sys.stderr = old_argv, old_err
+
+
+def check_no_private_citations_in_shipped_files():
+    """The project's internal notes are not public, so a pointer into them
+    (by file name or by a section number) is a dead reference for every
+    reader. Rules are stated in this repo's own words instead. The tokens
+    are assembled from pieces so this check does not match itself."""
+    tokens = ("CLAUDE" + ".md", "claude_" + "2scraper", "2scraper_" + "repo_rules",
+              "play" + "book")
+    section = re.compile("§" + r"\s*\d")
+    try:
+        tracked = subprocess.run(["git", "ls-files"], cwd=HERE, capture_output=True,
+                                 text=True, check=True).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return          # not a git checkout (the Docker image): nothing to scan
+    hits = []
+    for name in tracked:
+        path = os.path.join(HERE, name)
+        try:
+            text = open(path, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if any(t in line for t in tokens) or section.search(line):
+                hits.append("%s:%d" % (name, lineno))
+    check("scanned the tracked files", len(tracked) > 10, len(tracked))
+    equal("no shipped file cites the private notes", hits[:10], [])
+
+
+CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")]
+
+
+def main():
+    global VERBOSE
+    parser = argparse.ArgumentParser(description="montblanc-scraper offline suite")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+    VERBOSE = args.verbose
+
+    global _TREE_BEFORE
+    _TREE_BEFORE = _tree_state()
+
+    for fn in CHECKS:
+        if VERBOSE:
+            print("\n== %s" % fn.__name__)
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 — a broken check is a failure
+            import traceback
+            FAILURES.append("%s raised %s: %s" % (fn.__name__, type(e).__name__, e))
+            print("  ERROR %s raised %s: %s" % (fn.__name__, type(e).__name__, e))
+            if VERBOSE:
+                traceback.print_exc()
+
+    print("\n%d checks passed, %d failed, %d group(s) skipped."
+          % (PASSED, len(FAILURES), len(SKIPS)))
+    for line in SKIPS:
+        print("  skipped: %s" % line)
+    if FAILURES:
+        print("\nFailures:")
+        for line in FAILURES:
+            print("  - %s" % line)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
