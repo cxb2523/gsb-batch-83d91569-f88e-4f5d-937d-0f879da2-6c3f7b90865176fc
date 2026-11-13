@@ -66,6 +66,9 @@ before(async () => {
 });
 
 after(async () => {
+  // 高保真开关和失败注入是全局状态：某条用例半路失败时可能停在关闭状态，
+  // 后面的用例就会莫名其妙地全部降级。收尾一律复原。
+  try { await c.call('__l2', { off: false, force: null }); } catch { /* 扩展已经没了 */ }
   try { await c.call('tabs', { action: 'close' }); } catch { /* 已经关了 */ }
   c?.close();          // 不关的话一条开着的 WebSocket 会把进程永远吊住
   server?.close();
@@ -344,15 +347,15 @@ test('敏感文案的目标不自动升级，避免重复执行', async () => {
   assert.equal(await val('document.getElementById("riskyOut").textContent'), '"未触发"');
 });
 
-// 下面两条需要用户在扩展弹窗里开过「高保真模式」，没开就跳过——
-// 未授权时的正确行为是干净降级，那由上面的用例覆盖。
+// 下面几条需要真实事件层真的能接上，接不上就跳过——
+// 接不上时的正确行为是「如实报出分类 + 普通事件照常试一次」，那由下面那一组覆盖。
 //
-// 判据不能写成 includes('真实事件')：未授权时的提示语是「真实事件也没能用上」，
-// 正好含这四个字，于是该跳过的用例反而跑了起来，失败得莫名其妙。
-// 认「没拿到权限」这句话本身，比认「有没有成功」可靠。
+// 判据不能写成 includes('真实事件')：没接上时的回执里也一定有这四个字
+// （「真实事件层：没接上 ✗」），正好含它们，于是该跳过的用例反而跑了起来。
+// 认「已接入 ✓」这句结论本身，比认「有没有出现某个词」可靠。
 const l2 = async () => {
-  const { text } = await c.call('click', { selector: '#deadBtn' });
-  return !/还没拿到调试器权限/.test(text);
+  const { text } = await c.call('click', { selector: '#deadBtn', real: true });
+  return /真实事件层：已接入 ✓/.test(text);
 };
 
 test('只认 isTrusted 的按钮：普通事件无效时自动升级并成功', async (t) => {
@@ -360,6 +363,7 @@ test('只认 isTrusted 的按钮：普通事件无效时自动升级并成功', 
   if (!(await l2())) return t.skip('未开启高保真模式');
   const r = await c.call('click', { selector: '#trustedOnly' });
   assert.match(r.text, /真实事件/);
+  assert.match(r.text, /真实事件层：已接入 ✓/);
   assert.equal(await val('document.getElementById("trustedOut").textContent'), '"已触发（真实事件）"');
 });
 
@@ -368,6 +372,142 @@ test('敏感目标显式传 real:true 时照做', async (t) => {
   if (!(await l2())) return t.skip('未开启高保真模式');
   await c.call('click', { selector: '#riskySim', real: true });
   assert.equal(await val('document.getElementById("riskyOut").textContent'), '"已删除（真实事件）"');
+});
+
+// ---------- 真实事件层的接入交代 ----------
+//
+// 降级以前是静默的：调用方只看到一次「点了没反应」，分不清是页面不认还是
+// 真实事件这条路没走通。下面这几条守的是新的承诺——每次走真实事件的写操作
+// 都要交代接没接上、没接上属于哪一类、该怎么办，而且普通事件的结果不能被
+// 说成真实事件的结果。
+//
+// 三类不可用里，「开关被关」和「调试器被占用／保护页」没法在真浏览器里手工
+// 复现（一个标签页只允许一个调试器，测试侧占不住它），所以扩展留了一个
+// 只对测试开放的注入点 __l2（不在 MCP 工具列表里，agent 调不到）。
+const l2Off = () => c.call('__l2', { off: true });
+const l2On = (force) => c.call('__l2', { off: false, force: force || null });
+
+test('正常接入：回执标明真实事件，并给出效果', async (t) => {
+  await go();
+  await l2On();
+  if (!(await l2())) return t.skip('没有调试器权限');
+  const r = await c.call('click', { selector: '#trustedOnly', real: true });
+  assert.match(r.text, /真实事件层：已接入 ✓/);
+  // 接上了就得给效果证据，不能只报一句「点过了」
+  assert.match(r.text, /效果：/);
+  assert.equal(await val('document.getElementById("trustedOut").textContent'), '"已触发（真实事件）"');
+});
+
+test('开关被关：回执标明「开关被关」，普通事件结果照常返回', async () => {
+  await go();
+  await l2Off();
+  const r = await c.call('click', { selector: '#plainOk', real: true });
+  // 分类、错误码、原因、处理，四样都要有——少一样 agent 就不知道该干什么
+  assert.match(r.text, /真实事件层：没接上 ✗ —— 开关被关（NEEDS_L2）/);
+  assert.match(r.text, /原因：.*高保真模式/);
+  assert.match(r.text, /处理：.*打开开关/);
+  // 普通事件仍然照常试了一次，结果单独给出，且不能被说成真实事件的结果
+  assert.equal(await val('document.getElementById("plainOkOut").textContent'), '"已确认"');
+  assert.match(r.text, /这次只走了普通事件/);
+  assert.doesNotMatch(r.text, /（真实事件）/);
+  assert.doesNotMatch(r.text, /真实事件层：已接入/);
+  await l2On();
+});
+
+test('开关被关时普通事件的结果不会被说成真实事件', async () => {
+  await go();
+  await l2Off();
+  // 显式要真实事件，但开关关着：只能退回普通事件。只认 isTrusted 的按钮
+  // 必然不响应，回执不能说「已点击（真实事件）」，也不能说层接上了。
+  const r = await c.call('click', { selector: '#trustedOnly', real: true });
+  assert.match(r.text, /真实事件层：没接上 ✗ —— 开关被关/);
+  assert.doesNotMatch(r.text, /真实事件层：已接入/);
+  assert.equal(await val('document.getElementById("trustedOut").textContent'), '"未触发"');
+  await l2On();
+});
+
+test('自动升级时开关被关：两条路各自的结果都写清楚', async () => {
+  await go();
+  await l2Off();
+  // 不传 real:true：普通事件零证据 → 自动升级，而层被开关关着。
+  // 回执要同时写清「普通事件试过、无效」和「升级没接上、为什么」。
+  const r = await c.call('click', { selector: '#trustedOnly' });
+  assert.match(r.text, /没有反应|没有可归因于这次操作的变化/);
+  assert.match(r.text, /真实事件层：没接上 ✗ —— 开关被关（NEEDS_L2）/);
+  assert.match(r.text, /普通事件已经照常试过一次/);
+  assert.match(r.text, /处理：.*打开开关/);
+  await l2On();
+});
+
+test('调试器被占用：回执标明占用原因', async () => {
+  await go();
+  await l2On();
+  if (!(await l2())) { await l2On(); return; }
+  await l2On('busy');
+  const r = await c.call('click', { selector: '#trustedOnly', real: true });
+  assert.match(r.text, /真实事件层：没接上 ✗ —— 调试器被占用（L2_BUSY）/);
+  assert.match(r.text, /原因：.*调试器占用/);
+  assert.match(r.text, /处理：.*DevTools/);
+  // 同样是降级，普通事件照常试过
+  assert.equal(await val('document.getElementById("trustedOut").textContent'), '"未触发"');
+  await l2On();
+});
+
+test('浏览器保护页：回执标明保护页', async () => {
+  await go();
+  await l2On();
+  if (!(await l2())) { await l2On(); return; }
+  await l2On('protected');
+  const r = await c.call('click', { selector: '#plainOk', real: true });
+  assert.match(r.text, /真实事件层：没接上 ✗ —— 浏览器保护页（L2_PROTECTED）/);
+  assert.match(r.text, /处理：.*换一个普通网页/);
+  await l2On();
+});
+
+test('其它接入失败：归到「接入失败」，给可操作提示', async () => {
+  await go();
+  await l2On();
+  if (!(await l2())) { await l2On(); return; }
+  await l2On('attach');
+  const r = await c.call('click', { selector: '#plainOk', real: true });
+  assert.match(r.text, /真实事件层：没接上 ✗ —— 接入失败（L2_ATTACH）/);
+  assert.match(r.text, /处理：.*重试/);
+  await l2On();
+});
+
+test('坐标点击没接上真实事件时如实报错，不拿普通事件冒充', async () => {
+  await go();
+  await l2Off();
+  const [x, y] = JSON.parse(await val('(() => { const r = document.getElementById("cv").getBoundingClientRect(); return [Math.round(r.left + 120), Math.round(r.top + 45)]; })()'));
+  await assert.rejects(
+    () => c.call('click', { x, y }),
+    (e) => /L2_BUSY|NEEDS_L2|L2_ATTACH|L2_PROTECTED|真实事件层没接上/.test(`${e.code} ${e.message}`));
+  // 画布没收到任何点击：这条路上不存在「用合成事件兜底」这回事
+  assert.equal(await val('document.getElementById("cvOut").textContent'), '"无"');
+  await l2On();
+});
+
+test('支付类目标在真实事件可用时也不自动改道', async (t) => {
+  await go();
+  await l2On();
+  if (!(await l2())) return t.skip('没有调试器权限');
+  // 支付另有确认闸门；这里用的是「删除全部记录」——同属敏感文案，
+  // 但不会把用例挂在确认弹窗上。它只认 isTrusted，普通事件必然零证据，
+  // 而这正是自动升级唯一的触发条件：真实事件层可用也不能自动走。
+  const r = await c.call('click', { selector: '#riskySim' });
+  assert.match(r.text, /没有自动用真实事件重试/);
+  assert.doesNotMatch(r.text, /已自动改用真实事件/);
+  assert.doesNotMatch(r.text, /真实事件层：已接入/);
+  assert.equal(await val('document.getElementById("riskyOut").textContent'), '"未触发"');
+});
+
+test('原生 select 传 real:true 也不走真实事件', async () => {
+  await go();
+  await l2On();
+  const r = await c.call('select', { selector: '#nat-city', value: '深圳', real: true });
+  assert.doesNotMatch(r.text, /（真实事件）/);
+  assert.doesNotMatch(r.text, /真实事件层/);
+  assert.equal(await val('document.getElementById("nat-city").value'), '"sz"');
 });
 
 // ---------- v0.4.1：支付确认 ----------
@@ -1231,7 +1371,8 @@ test('WebMCP 声明式表单进快照头部，参数说明和 ref 一起给', as
 test('截图默认 60% JPEG，full 才是 1:1 PNG', async (t) => {
   await go();
   const small = await c.call('screenshot', {}).catch((e) => ({ err: e }));
-  if (small.err?.code === 'NEEDS_L2' || small.err?.code === 'L2_BUSY') return t.skip('没有调试器权限');
+  // 四档不可用都该跳过：开关被关、调试器被占、保护页、接入失败
+  if (/^(NEEDS_L2|L2_BUSY|L2_PROTECTED|L2_ATTACH)$/.test(small.err?.code || '')) return t.skip('没有调试器权限');
   assert.match(small.dataUrl, /^data:image\/jpeg/);
   assert.equal(small.scale, 0.6);
   const full = await c.call('screenshot', { full: true });

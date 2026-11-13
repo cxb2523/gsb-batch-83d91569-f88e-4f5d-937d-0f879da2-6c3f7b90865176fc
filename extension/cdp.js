@@ -25,6 +25,8 @@
 // ip33 魔方页实测：连续截图的高度在 1610 / 1722 之间来回跳，根因就是它跟着
 // L2 的通断反复出现。screenshot() 里为此钉了一层视口覆盖（见该函数注释）。
 
+import { l2ReasonInfo, classifyAttachError, isL2LayerLost } from './l2-reason.js';
+
 const L2_IDLE_MS = 5000;
 const PROTOCOL = '1.3';
 
@@ -36,11 +38,36 @@ const sessions = new Map();
 // 所以顺手把它接住——这是 L2 的附带收益里最实用的一条。
 const dialogs = new Map();   // tabId -> { type, message, at }
 
+// 真实事件层不可用。带上 reasonKey 是这次改动的重点：回执不能只说「没接上」，
+// 还要说清是哪一类（开关被关 / 调试器被占 / 保护页 / 接入失败），
+// 调用方才能给出对得上的下一步。文案统一从 l2-reason.js 取。
+//
+// code 默认取自 reasonKey：NEEDS_L2 / L2_BUSY / L2_PROTECTED / L2_ATTACH。
+// 另一类用途是「动作本身出错」（元素没找到、表达式失败），它们不是层不可用，
+// 显式传自己的 code（REF_NOT_FOUND / INTERNAL），isL2Unavailable 会把它们排除。
 export class L2Unavailable extends Error {
-  constructor(reason, code = 'NEEDS_L2') {
+  constructor(reason, code = 'NEEDS_L2', reasonKey = null) {
     super(reason);
     this.code = code;
+    // 有 reasonKey 才代表「层没接上」；没有就是动作本身的问题
+    this.reasonKey = reasonKey;
   }
+}
+
+// 按分类造一个层不可用的错误。detail 是 Chrome 给的原始报错，附在句尾——
+// 用户排查时要看到它，但主句必须是能照着做的那一句。
+// 结构化字段（l2Title / l2Detail / l2Hint）留给回执渲染：同一句话在错误通道和
+// 正常回执里都要出现，从这里取就不会两处各写一份、慢慢说出不一样的话。
+export function l2Unavailable(reasonKey, detail = '') {
+  const info = l2ReasonInfo(reasonKey);
+  return Object.assign(
+    new L2Unavailable(
+      `${info.title}${detail ? `（${detail}）` : ''}。${info.hint}`,
+      info.code,
+      info.reason,
+    ),
+    { l2Title: info.title, l2Detail: String(detail || ''), l2Hint: info.hint, l2Label: info.label },
+  );
 }
 
 // ---------- 开关 ----------
@@ -70,27 +97,25 @@ async function ensureAttached(tabId) {
   const s = sessions.get(tabId);
   if (s?.ready) return touch(tabId);
 
-  if (!(await isEnabled())) {
-    throw new L2Unavailable(
-      '这一步需要「高保真模式」（浏览器级的真实输入事件），但它被关掉了。'
-      + '让用户点开 huashu-chrome 扩展图标，把「高保真模式」打开，然后重试。');
+  if (!(await isEnabled())) throw l2Unavailable('disabled');
+
+  // 可注入的失败（回归测试用，见 background 的 __l2）。真 Chrome 里要复现
+  // 「DevTools 占着调试器」「浏览器保护页」这两类根本没别的办法：一个标签页只
+  // 允许一个调试器，而测试没法从另一侧去占它。留一个受控入口，比让这两种
+  // 失败永远没有测试覆盖要好。生产里这个键不存在，读取代价是零。
+  const forced = await chrome.storage.local.get('l2ForceFail').then(
+    (r) => r.l2ForceFail || null, () => null);
+  if (forced) {
+    throw l2Unavailable(forced, forced === 'busy' ? 'Another debugger is already attached to the tab with id: ' + tabId : '');
   }
 
   try {
     await chrome.debugger.attach({ tabId }, PROTOCOL);
   } catch (e) {
-    const m = String(e?.message || e);
     // 用户自己开着 DevTools 是最常见的一种：Chrome 一个标签页只允许一个调试器。
     // 这不该让整条链路失败——降级回 L1，把原因说清楚就行。
-    if (/Another debugger is already attached/i.test(m)) {
-      throw new L2Unavailable(
-        '这个标签页已经被另一个调试器占用（多半是你自己开着 DevTools）。'
-        + '关掉 DevTools 后重试，或者继续用普通模式。', 'L2_BUSY');
-    }
-    if (/Cannot access|chrome:\/\//i.test(m)) {
-      throw new L2Unavailable(`浏览器保护页面不允许调试（${m}）`, 'L2_BUSY');
-    }
-    throw new L2Unavailable(`attach 失败：${m}`, 'L2_BUSY');
+    // 分类规则在 l2-reason.js（纯函数），这里只负责把原始报错带过去。
+    throw l2Unavailable(classifyAttachError(e?.message || e), String(e?.message || e));
   }
 
   sessions.set(tabId, { ready: true, timer: null, metrics: null });
@@ -176,13 +201,26 @@ function send(tabId, method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
 
-// 对外的统一入口：确保 attach 后执行 fn，并重置空闲计时
+// 对外的统一入口：确保 attach 后执行 fn，并重置空闲计时。
+//
+// attach 成功不等于整条路走得通：后台标签页的会话会被浏览器收走、用户会点黄条上的
+// 「取消」、标签页会中途关掉。那些错误以前会原样冒出去，调用方只能看到一串 Chrome
+// 内部话术，而「真实事件到底有没有送达」无从判断。这里把它们归到「接入失败」那一档，
+// 并且清掉本地会话记录（浏览器已经断了，留着 ready 会让下一次以为还连着）。
 export async function withL2(tabId, fn) {
   await ensureAttached(tabId);
   try {
     return await fn((method, params) => send(tabId, method, params));
+  } catch (e) {
+    if (!(e instanceof L2Unavailable) && isL2LayerLost(e?.message || e)) {
+      await detach(tabId);   // 浏览器那侧已经断了，这里只清本地记录（detach 自己吞错）
+      // l2Phase 让回执能区分「没接上」和「接到一半断了」：后者可能已经有
+      // 一部分事件送达，直接重试有重复执行的风险，得先看效果证据。
+      throw Object.assign(l2Unavailable('attach', String(e?.message || e)), { l2Phase: 'dispatch' });
+    }
+    throw e;
   } finally {
-    touch(tabId);
+    touch(tabId);   // 会话已经没了的话 touch 是空操作
   }
 }
 

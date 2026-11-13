@@ -786,10 +786,15 @@ function hint(e) {
     TAB_DISCARDED: '标签页被 Chrome 回收了。navigate(action:"reload") 后重做这一步。',
     NO_TAB: '没有可用的标签页。先用 tabs(action:"new", url:…) 开一个。',
     TIMEOUT: '浏览器侧超时。页面可能还在加载——先 wait 再重试。',
-    NEEDS_L2: '这一步需要真实输入事件，但高保真模式被关了。让用户点开 huashu-chrome 扩展图标，'
+    NEEDS_L2: '这一步需要真实输入事件，但高保真模式被关掉了。让用户点开 huashu-chrome 扩展图标，'
       + '在「高保真模式」那一栏点「开启」——只需一次。',
-    L2_BUSY: '真实输入事件用不了（多半是用户自己开着 DevTools，一个标签页只允许一个调试器）。'
-      + '已经用普通事件完成了；如果结果不对，让用户关掉 DevTools 再试。',
+    L2_BUSY: '真实输入事件用不了，因为这个标签页已被另一个调试器占用（多半是用户自己开着 DevTools，'
+      + '一个标签页只允许一个调试器）。这次已经用普通事件试过了；如果结果不对，让用户关掉 DevTools 再试。',
+    L2_PROTECTED: '浏览器保护页（chrome://、扩展页、devtools:// 这类）不允许调试器接入，真实输入事件打不到。'
+      + '换一个普通网页操作；这一步只能由用户手动完成。',
+    L2_ATTACH: '真实事件层没能接入这个标签页（不是开关的问题，也不是被别的调试器占着）。'
+      + '稍后重试一次；持续出现就让用户重启 Chrome，或在 chrome://extensions 里重新加载扩展。'
+      + '如果回执说「通道在中途断开」，那一步可能已经生效了一部分——先 snapshot 确认，确认没生效再重试。',
   };
   return `[${e.code || 'INTERNAL'}] ${e.message}` + (map[e.code] ? `\n→ ${map[e.code]}` : '');
 }

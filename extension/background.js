@@ -9,6 +9,7 @@
 // 漂移记录和 iframe 快照在 storage.session，连接状态由 offscreen 维护。
 
 import * as cdp from './cdp.js';
+import { l2Lines, l2Tag, l2ReasonInfo, reasonOfError, isL2Unavailable } from './l2-reason.js';
 import { compat, compatNote } from './compat.js';
 import { matchChallenge, hostOf, hostMatches, L2_ORIGINS_SEED } from './risk.js';
 import { CRED_URL, redactCreds } from './redact.js';
@@ -1319,6 +1320,42 @@ async function execL2(id, cmd, params, loc) {
   throw err('INTERNAL', `${cmd} 没有 L2 实现`);
 }
 
+// ---------- 真实事件层的回执 ----------
+//
+// 每次走真实事件的写操作都要交代「这次到底接上了没有」。这条状态以前藏在
+// 一句可选的 l2note 里，而且只有降级时才出现——于是「真实事件成功」和
+// 「真实事件根本没尝试」在回执里长得一模一样，agent 分不清页面不认和路没通。
+//
+// 这里统一成一份结构化报告，渲染交给 l2-reason.js 的纯函数（能单测）：
+// attempted=false 就一个字都不印；used=true 印「已接入」；degraded 印分类+处理。
+function newL2Report(attempted = false) {
+  return { attempted, used: false, degraded: false, reason: null, code: null, phase: null, auto: false };
+}
+
+// 把一次失败记进报告。只认「层不可用」那一类——元素没找到、表达式写错
+// 不是路没通，混进来说明会误导调用方。
+function degradeL2(report, e, phase = 'attach') {
+  const reason = reasonOfError(e) || 'attach';
+  const info = l2ReasonInfo(reason);
+  report.degraded = true;
+  report.used = false;
+  report.reason = reason;
+  report.code = info.code;
+  report.title = e?.l2Title || info.title;
+  report.detail = e?.l2Detail || (isL2Unavailable(e) ? '' : String(e?.message || e || ''));
+  report.hint = e?.l2Hint || info.hint;
+  report.phase = e?.l2Phase || phase;
+  return report;
+}
+
+// act 的单行版本。跑通的一步只标「真实事件 ✓」；没接上时把分类压成一句，
+// 处理提示只在停机那一行给——批处理里每一步都铺开三行会把结论淹掉。
+const actL2Tag = (l2) => (l2?.attempted ? `　（${l2Tag(l2)}）` : '');
+const actL2Why = (l2) => {
+  if (!l2?.attempted || l2.used || !l2.degraded) return '';
+  return `${l2Tag(l2)}。${l2ReasonInfo(l2.reason).hint}`;
+};
+
 // 轮询等页面反应。有变化就早停——快页面比原来固定的 400ms 更快，
 // 慢页面比它更稳，「更可靠」和「更快」在这里是同一个改动的两面。
 //
@@ -1696,22 +1733,42 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 而看到了也没有任何一条路能点到那个位置（审计里 287 次截图集中在这类站）。
   // 走真实事件，不做元素定位，效果证据只有全局那几样；支付闸门在这里管不着——
   // 坐标点不到「按钮文案」，这条路的安全边界是它本来就要求显式给坐标。
+  //
+  // 这条路没有普通事件可以降级——按坐标合成的点击和真实点击在 canvas 类应用上
+  // 完全不是一回事，拿它冒充只会让 agent 以为点到了。所以没接上时如实报出分类，
+  // 并明确说「没有普通事件兜底」，而不是装作什么都没发生。
   if (cmd === 'click' && !hasTarget && Number.isFinite(params.x) && Number.isFinite(params.y)) {
     const base = await toContent(id, { __hc: 'locate', baselineOnly: true }, frameId).catch(() => null);
     const wmark = await armWrites(id);
     const x = Number(params.x), y = Number(params.y);
+    const l2 = newL2Report(true);
     let note;
-    if (params.dragTo && Number.isFinite(params.dragTo.x) && Number.isFinite(params.dragTo.y)) {
-      await cdp.drag(id, x, y, Number(params.dragTo.x), Number(params.dragTo.y));
-      note = `已从 (${x}, ${y}) 拖到 (${params.dragTo.x}, ${params.dragTo.y})（真实事件）`;
-    } else {
-      await cdp.click(id, x, y);
-      note = `已点击坐标 (${x}, ${y})（真实事件）`;
+    try {
+      if (params.dragTo && Number.isFinite(params.dragTo.x) && Number.isFinite(params.dragTo.y)) {
+        await cdp.drag(id, x, y, Number(params.dragTo.x), Number(params.dragTo.y));
+        note = `已从 (${x}, ${y}) 拖到 (${params.dragTo.x}, ${params.dragTo.y})（真实事件）`;
+      } else {
+        await cdp.click(id, x, y);
+        note = `已点击坐标 (${x}, ${y})（真实事件）`;
+      }
+      l2.used = true;
+    } catch (e) {
+      // 只有「层不可用」才走这套交代；别的错误（比如浏览器拒绝了这个坐标）
+      // 原样抛出去，别包成「真实事件没接上」
+      if (!isL2Unavailable(e)) throw e;
+      degradeL2(l2, e);
+      throw Object.assign(
+        err(l2.code || 'L2_ATTACH',
+          `没有点击坐标 (${x}, ${y})：这条路没有普通事件兜底（按坐标的合成点击在这类页面上不是一回事）。\n`
+          + `真实事件层没接上 —— ${l2ReasonInfo(l2.reason).label}：${l2.title}${l2.detail ? `（${l2.detail}）` : ''}\n`
+          + `→ ${l2.hint}`),
+        { l2 },
+      );
     }
     const ev = await settle(id, frameId, { ...params, ref: undefined }, base?.baseline, before);
     ev.writes = await readWrites(id, wmark);
     const after = (await chrome.tabs.get(id)).url;
-    return { note, l2note: '', ev, navigated: before !== after, upgraded: false };
+    return { note, l2note: '', l2, ev, navigated: before !== after, upgraded: false };
   }
   const loc = await toContent(id,
     // fields 要带过去：fill 没有单一目标，它的效果证据靠逐个字段的状态，
@@ -1742,11 +1799,22 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     }
   }
 
-  const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside;
+  // 原生 <select> 也在这里被挡在 L2 之外：prefer==='L1' 时即使调用方传了
+  // real:true 也不改道——L2 点开的是浏览器进程的原生 popup，CDP 的 Input
+  // 打不到它，键盘会被吃掉，下拉还会卡在打开状态挡住后续操作。
+  const l2ok = frameId === 0 && L2_CMDS.has(cmd) && hasTarget && !loc?.outside && loc?.prefer !== 'L1';
   // 风控站点从 L2 起步。这里不能等「零证据」再升级——在这类站上 L1 恰恰是有效果的，
   // 那条升级路永远不会触发，而每一次 isTrusted:false 都在给验证码攒分。
   const riskyOrigin = l2ok && await prefersL2(before);
-  let layer = (l2ok && (params.real || loc?.prefer === 'L2' || riskyOrigin)) ? 'L2' : 'L1';
+
+  // 两条既有边界，不能被「每次都交代」这件事动摇：
+  //   1) 敏感目标（提交/支付/下单/删除/发布）永不自动改道真实事件——L1 可能
+  //      其实已经生效，只是没留下痕迹，再点一次就是下第二笔单。只有调用方
+  //      显式传 real:true 时才走 L2（那是它自己要求的方式）。
+  //   2) 原生 <select> 不进 L2（prefer==='L1'，上面 l2ok 里）。
+  const explicitReal = !!params.real;
+  const sensitiveBlocked = !!loc?.sensitive;
+  let layer = (l2ok && (explicitReal || loc?.prefer === 'L2' || riskyOrigin)) ? 'L2' : 'L1';
 
   const runL1 = async () => {
     const d = await toContent(id, { __hc: cmd, ...params }, frameId);
@@ -1755,16 +1823,48 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     return n;
   };
 
+  // 这次写操作的真实事件层报告。attempted 只在真的要去接 L2 时为真——
+  // 没尝试就一个字都不印，免得让 agent 以为「这次真实事件失败了」。
+  const l2 = newL2Report(layer === 'L2');
   let note = '', usedL2 = layer === 'L2', l2note = '';
   const wmark = await armWrites(id);
   try {
     note = usedL2 ? await execL2(id, cmd, params, loc) : await runL1();
+    if (usedL2) l2.used = true;
   } catch (e) {
-    // L2 不可用不该让整条链路失败——降级回 L1，把原因带在返回里说清楚
-    if (usedL2 && (e.code === 'NEEDS_L2' || e.code === 'L2_BUSY')) {
+    // L2 不可用不该让整条链路失败——降级回 L1，把原因带在返回里说清楚。
+    // 但绝不把普通事件的结果冒充成真实事件的结果：note 里 L1 自己会写明
+    // 「已点击」，回执正文由 l2Lines 明确标出真实事件没接上及原因。
+    if (usedL2 && isL2Unavailable(e)) {
       usedL2 = false;
-      l2note = `（本想用真实事件，但${e.message}）`;
-      note = await runL1();
+      degradeL2(l2, e);
+      // 断在操作途中（而不是 attach 阶段）意味着可能已经有一部分真实事件送达。
+      // 对提交/支付/删除这类目标，再用普通事件补一次就是赌「那一下没生效」——
+      // 赌输了就是第二笔单。所以这里不补，把两条路的实际情况都写进回执。
+      if (sensitiveBlocked && l2.phase === 'dispatch') {
+        // 这一步两条路都没能安全地走完：不再往下跑，也不能装作成功。
+        // 带上结构化的 l2 报告，agent 从错误里也能看到分类与处理提示。
+        throw Object.assign(
+          err(l2.code || 'L2_ATTACH',
+            `已发出真实事件，但通道在中途断开，无法确认这一步是否已经生效。\n`
+            + `真实事件层没接上 —— ${l2ReasonInfo(l2.reason).label}：${l2.title}${l2.detail ? `（${l2.detail}）` : ''}\n`
+            + `→ ${l2.hint}\n`
+            + `没有自动改用普通事件补一次：这是提交/支付/删除一类的动作，补一次可能就是重复执行。`
+            + `先 snapshot 确认这一步没生效，再决定是否显式重试。`),
+          { l2 },
+        );
+      }
+      note = await runL1().catch((e2) => {
+        // 两条路都没走通。普通事件的错误原样保留，前面补上真实事件的分类——
+        // 只报后一条的话，agent 看不出「本来还试过真实事件」。
+        throw Object.assign(
+          err(e2.code || 'INTERNAL',
+            `${e2.message}\n（另外，真实事件层也没接上 —— `
+            + `${l2ReasonInfo(l2.reason).label}：${l2.title}${l2.detail ? `（${l2.detail}）` : ''}。`
+            + `处理：${l2.hint}）`),
+          { l2 },
+        );
+      });
     } else throw e;
   }
 
@@ -1774,19 +1874,34 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
   // 零证据 → 自动升级。发出过写请求不算零证据：那一下已经生效了，再点一次就是第二次。敏感目标除外：L1 可能其实已经生效只是没留下痕迹，
   // 对「提交/支付/删除」重试一次就是下第二笔单，这个闸门是确定性的，不问模型。
   let upgraded = false;
-  if (!ev.changed && !ev.writes.length && !usedL2 && l2ok && !params.real) {
-    if (loc?.sensitive) {
+  // l2.degraded 时不再升级：这次已经去接过真实事件层，接不上是层的问题，
+  // 原地再撞一次只会多一次一样的失败，还把「开关被关」翻成「普通事件无效」。
+  if (!ev.changed && !ev.writes.length && !usedL2 && l2ok && !explicitReal && !l2.degraded) {
+    if (sensitiveBlocked) {
       l2note = '（没有自动用真实事件重试：这是提交/支付/删除一类的动作，'
              + '重试可能造成重复执行。确认需要请显式传 real:true）';
     } else {
+      // 自动升级也是一次「真的去接真实事件层」，这一次要走完整的报告：
+      // 接上了就是 upgraded，没接上要写明属于哪一类不可用。
+      l2.attempted = true;
+      l2.auto = true;
       try {
         note = await execL2(id, cmd, params, loc);
         usedL2 = true;
         upgraded = true;
+        l2.used = true;
+        l2.degraded = false;
         ev = await settle(id, frameId, params, loc?.baseline, before);
         ev.writes = await readWrites(id, wmark);
       } catch (e) {
-        l2note = `（普通事件无效，真实事件也没能用上：${e.message}）`;
+        if (isL2Unavailable(e)) {
+          // 分类与处理写在 l2Lines 那份报告里，这里只留一句「升级没成」，
+          // 免得同一件事在回执里说两遍、说法还不一样
+          degradeL2(l2, e);
+          l2note = '（普通事件无效，自动升级到真实事件也没成——原因与处理见下面几行）';
+        } else {
+          l2note = `（普通事件无效，真实事件这条路出错了：${e.message}）`;
+        }
       }
     }
   }
@@ -1821,10 +1936,10 @@ async function performCore(id, cmd, p, { blockSensitive = false } = {}, ctx) {
     await setActiveTabId(child.id);
     await claimTab(ctx?.sid, child.id, ctx);
     await markNavigated(child.id, ctx?.sid);
-    return { note, l2note, ev, navigated, upgraded, followed: { from: id, to: child.id, url: child.url, how: child.how } };
+    return { note, l2note, l2, ev, navigated, upgraded, followed: { from: id, to: child.id, url: child.url, how: child.how } };
   }
 
-  return { note, l2note, ev, navigated, upgraded };
+  return { note, l2note, l2, ev, navigated, upgraded };
 }
 
 // 每一步的人话描述。批处理最怕的是「跑了一半，不知道跑到哪了」——
@@ -1874,11 +1989,12 @@ function panelStep(st) {
 }
 
 // 把一次执行的结果写成给 agent 看的那几行
-function effectLines({ note, l2note, ev, upgraded, followed }) {
+function effectLines({ note, l2note, l2, ev, upgraded, followed }) {
   if (followed) {
     return [
       note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
       l2note,
+      ...l2Lines(l2),
       `↪️ 这次操作开了一个**新标签页**，受控标签页已经跟过去了：\n`
       + `   现在在 [${followed.to}] ${followed.url}\n`
       + `   原来那页是 [${followed.from}]，要回去：tabs(action:"select", tabId:${followed.from})\n`
@@ -1892,6 +2008,7 @@ function effectLines({ note, l2note, ev, upgraded, followed }) {
   return [
     note + (upgraded ? '　←　普通事件无效，已自动改用真实事件' : ''),
     l2note,
+    ...l2Lines(l2),
     ev.expectUnmet ? `⚠️ 期望未满足（等了 ${SETTLE_MS / 1000}s）：${ev.expectUnmet}。别按「成功」往下走。` : '',
     ev.changed
       ? `效果：${ev.parts.join('；')}` + (ev.volatile ? '　（注意：这个页面本身也在持续变化）' : '')
@@ -2066,18 +2183,19 @@ const HANDLERS = {
         }
         // 发出了写请求的一步算生效：批处理接着往下跑，回执里写明请求
         if (!r.ev.changed && r.ev.writes?.length) {
-          out.push(`✅ ${label}　请求：${writesText(r.ev.writes)}（页面上暂时没有可见变化）`);
+          out.push(`✅ ${label}　请求：${writesText(r.ev.writes)}（页面上暂时没有可见变化）${actL2Tag(r.l2)}`);
           return;
         }
         if (!r.ev.changed) {
           stopped = {
             label,
             why: `这一步没有让页面产生任何可归因的变化，后面的步骤多半建立在错误的前提上，`
-              + `所以停在这里。${r.l2note || ''}`,
+              + `所以停在这里。${actL2Why(r.l2)}${r.l2note || ''}`,
           };
           return;
         }
-        out.push(`✅ ${label}　效果：${r.ev.parts.join('；')}` + (r.ev.writes?.length ? `；请求：${writesText(r.ev.writes)}` : ''));
+        out.push(`✅ ${label}　效果：${r.ev.parts.join('；')}` + (r.ev.writes?.length ? `；请求：${writesText(r.ev.writes)}` : '')
+          + actL2Tag(r.l2));
         // 只有「结构性」变化才作废 ref：填个值、勾个框不影响编号，
         // 而连续填表正是批处理最常见的用法，不该逼它们全用 find。
         // 区块里多了三五个节点也不算——那是 ripple、下拉箭头、校验图标这类
@@ -2462,8 +2580,9 @@ const HANDLERS = {
         try {
           return { untrusted: true, text: await cdp.evaluate(id, src, { maxLength: p.maxLength || 20000 }) };
         } catch (e) {
-          throw err(e.code === 'NEEDS_L2' || e.code === 'L2_BUSY' ? e.code : 'INTERNAL',
-            e.code === 'NEEDS_L2'
+          const layer = isL2Unavailable(e);
+          throw err(layer ? (e.code || 'L2_ATTACH') : 'INTERNAL',
+            layer
               ? `这个页面的 CSP 禁止 eval。${e.message}`
               : `页面的 CSP 禁止 eval，真实求值通道也没能用上：${e.message}\n`
                 + `改用 query（按 selector 提取）或 network（读接口），它们不受 CSP 限制。`);
@@ -2496,7 +2615,9 @@ const HANDLERS = {
     try {
       return await cdp.screenshot(id, { full: !!p.full });
     } catch (e) {
-      if (e.code !== 'NEEDS_L2' && e.code !== 'L2_BUSY') throw e;
+      // 层不可用（开关被关 / 调试器被占 / 保护页 / 接入失败）才走老路；
+      // 别把别的失败也当成「没权限」
+      if (!isL2Unavailable(e)) throw e;
       // 没有调试器权限时退回老路，前台保护一条不少
       const tab = await chrome.tabs.get(id);
       if (!tab.active) {
@@ -2699,6 +2820,25 @@ const HANDLERS = {
   async __pay_timeout(p) {
     payTimeout = Math.min(Math.max(Number(p.ms) || 180000, 1000), 600000);
     return { text: `支付确认等待时间设为 ${payTimeout}ms` };
+  },
+
+  // 回归测试用：把「高保真模式」的软开关拨到指定状态，不必让测试去点侧栏。
+  // 开关本身是 storage.local 的 l2Disabled，cdp.isEnabled 每条命令都现读，
+  // 所以这里改完立刻生效。关掉时顺手断掉已挂着的调试会话——和侧栏那条路径
+  // 一样，否则黄条会留在标签页上，而谁也没法再去摘它。
+  // force 用来模拟另外几类不可用（busy / protected / attach）：真 Chrome 里
+  // 没法从测试侧占住调试器、也没法把页面变成 chrome://，不注入就永远测不到。
+  // 和 __pay_timeout 一样不进 MCP 工具列表：agent 那一侧看不到、也调不到。
+  async __l2(p) {
+    const off = !!p.off;
+    await chrome.storage.local.set({ l2Disabled: off });
+    if (p.force !== undefined) {
+      if (p.force) await chrome.storage.local.set({ l2ForceFail: String(p.force) });
+      else await chrome.storage.local.remove('l2ForceFail');
+    }
+    // 让下一次操作真的去 attach：已挂着的会话会跳过开关与失败注入的判定
+    if (off || p.force) await cdp.reapAll();
+    return { text: `高保真模式已${off ? '关闭' : '开启'}${p.force ? `（模拟不可用：${p.force}）` : ''}` };
   },
 
   // 开发期用：改完扩展代码不必再手动去 chrome://extensions 点重载。
