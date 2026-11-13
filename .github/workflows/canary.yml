@@ -1,0 +1,203 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "27 9 * * 1"   # weekly, Mondays (every run bills the proxy or Scraping Browser); avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+jobs:
+  # A real local-first browser run against a real g2.com category.
+  #
+  # A bare GitHub runner is consistently blocked by DataDome (one plain
+  # request to /categories/crm from a datacentre address on 2026-10-14: HTTP
+  # 403 with DataDome markers), so this job needs the G2_PROXY secret. With
+  # no secret it FAILS with an error naming it: a canary that skips green
+  # every day tests nothing and reads like a pass. Once configured it is
+  # strict: only EXIT_OK plus a complete three-page result with real rows
+  # passes. Treating blocked,
+  # empty, or partial as green would hide exactly the parser/pagination
+  # regressions a live canary exists to detect.
+  #
+  # Headful under Xvfb, measured 2026-11-05: a headless Chromium got
+  # DataDome's hard refusal (dd 't':'bv', no challenge at all) through the
+  # US residential G2_PROXY on every attempt, and from a datacentre address
+  # with no proxy. From that same datacentre address a headful Chromium got
+  # a challenge instead, the same refusal class a real visitor gets.
+  #
+  # ALSO NOTE, and do not "fix" this into a sibling repo's threshold:
+  # price_confirmed_pct is expected to be 0 (or null) here. g2.com carries
+  # NO price on a category card or a product page at all — pricing lives on
+  # a separate /pricing page behind --with-pricing, which this canary
+  # deliberately does not use (one extra request per product, against a
+  # best-effort text parser). Asserting a price floor the way lidl-scraper's
+  # or shein-scraper's canaries do would fail on a perfectly good run.
+  canary-live:
+    runs-on: ubuntu-latest
+    env:
+      HAS_PROXY: ${{ secrets.G2_PROXY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail — no G2_PROXY secret configured
+        if: env.HAS_PROXY != 'true'
+        run: |
+          echo "::error::canary-live cannot test g2.com: the G2_PROXY repo secret is not set. \
+          A bare datacentre runner is refused by G2/DataDome, so without a (residential) \
+          proxy this canary would test nothing. Add G2_PROXY (http://login:password@host:port) \
+          under Settings > Secrets > Actions."
+          exit 1
+
+      - uses: actions/setup-python@v5
+        if: env.HAS_PROXY == 'true'
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+        if: env.HAS_PROXY == 'true'
+
+      - name: Run three real category pages through the configured proxy
+        if: env.HAS_PROXY == 'true'
+        env:
+          G2_PROXY: ${{ secrets.G2_PROXY }}
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          command -v xvfb-run >/dev/null || sudo apt-get install -y xvfb
+          set +e
+          xvfb-run -a python3 playwright_scraper.py --headful \
+            --category crm --max-pages 3 --max-results 60 \
+            --format json --out canary_out.json --dump-html --proxy-budget-mb 10
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+
+      # What the run sent through G2_PROXY, read from its sidecar, into the
+      # job summary. Red when the run stopped at the 10 MB budget
+      # (stop_reason proxy_budget_exceeded); a missing sidecar is reported,
+      # not failed — the next step judges the run itself.
+      - name: Proxy traffic
+        if: always() && env.HAS_PROXY == 'true'
+        run: python3 .github/proxy_traffic_summary.py canary_out.json canary-live 10
+
+      - name: Require a complete multi-page run
+        if: env.HAS_PROXY == 'true'
+        run: |
+          python3 -c "
+          import json, os, sys
+
+          code = int(os.environ['exit_code'])
+          print(f'playwright_scraper.py exited {code}')
+          if code != 0:
+              print(f'::error::live canary must complete; exit {code} means blocked, empty, partial, or broken')
+              sys.exit(1)
+          meta = json.load(open('canary_out.json.meta.json'))
+          print(json.dumps(meta, indent=2))
+          assert meta['status'] == 'complete', meta
+          assert meta['pages_completed'] >= 3, meta
+          assert meta['product_count'] >= 20, meta
+          rows = json.load(open('canary_out.json'))
+          assert len(rows) == meta['product_count'] >= 20, len(rows)
+          # Parser checks, not merchandising: every listing row must carry
+          # its identity, and the listing card's rating/review count must
+          # be read on nearly every row.
+          for col in ('sku', 'title', 'product_url', 'category'):
+              missing = [r.get('sku') for r in rows if not r.get(col)]
+              assert not missing, (col, missing[:5])
+          for col in ('rating_5', 'review_count'):
+              share = sum(1 for r in rows if r.get(col) is not None) / len(rows)
+              print(f'{col} non-null on {share:.0%} of rows')
+              assert share >= 0.8, (col, share)
+          pages = {r['sku'] for r in rows}
+          assert len(pages) == len(rows), 'duplicate sku in output'
+          print(f\"canary: got {meta['product_count']} products in {meta['pages_completed']} pages\")
+          "
+
+      - name: Upload artifacts (output + debug HTML) on every run
+        if: always() && env.HAS_PROXY == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-live-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+            canary_out.json.latest_attempt.meta.json
+            canary_out_debug.html
+          retention-days: 14
+
+  # Opt-in, mirroring the rest of the family's pattern: exercises the
+  # --cdp-endpoint (2Captcha Scraping Browser API) path, which needs the
+  # G2_CDP_ENDPOINT repo secret. Without it the job FAILS with an error
+  # naming the secret rather than skipping green. This is also the single most useful observation this repo can
+  # make about g2.com that it has not made yet: whether the Scraping
+  # Browser API's own device identity and exit get past DataDome where a
+  # bare CI runner does not. Nothing here solves DataDome — the question is
+  # whether it fires at all.
+  canary-cdp:
+    runs-on: ubuntu-latest
+    env:
+      HAS_CDP: ${{ secrets.G2_CDP_ENDPOINT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail — no G2_CDP_ENDPOINT secret configured
+        if: env.HAS_CDP != 'true'
+        run: |
+          echo "::error::canary-cdp cannot test g2.com: the G2_CDP_ENDPOINT repo secret is not set. \
+          Add a 2Captcha Scraping Browser endpoint \
+          (ws://{login}-zone-scraping_browser-country-us-pid-{profileId}:{password}@cb.2captcha.com:9222) \
+          under Settings > Secrets > Actions; TWOCAPTCHA_KEY is optional here."
+          exit 1
+
+      - uses: actions/setup-python@v5
+        if: env.HAS_CDP == 'true'
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-playwright.txt
+        if: env.HAS_CDP == 'true'
+
+      # Both secrets go through the ENVIRONMENT, never a command-line flag
+      # (credentials never reach argv). env_config.py already
+      # reads G2_CDP_ENDPOINT/TWOCAPTCHA_KEY unconditionally, so this is
+      # correct with or without either secret set.
+      - name: Run over the Scraping Browser API
+        if: env.HAS_CDP == 'true'
+        env:
+          G2_CDP_ENDPOINT: ${{ secrets.G2_CDP_ENDPOINT }}
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --category crm --max-pages 3 --max-results 60 \
+            --format json --out canary_cdp_out.json --dump-html
+          echo "cdp_exit_code=$?" >> "$GITHUB_ENV"
+
+      - name: Require a complete multi-page managed-browser run
+        if: env.HAS_CDP == 'true'
+        run: |
+          python3 -c "
+          import json, os, sys
+          code = int(os.environ['cdp_exit_code'])
+          print(f'playwright_scraper.py (--cdp-endpoint) exited {code}')
+          if code != 0:
+              print(f'::error::managed-browser canary must complete; got exit {code}')
+              sys.exit(1)
+          meta = json.load(open('canary_cdp_out.json.meta.json'))
+          assert meta['status'] == 'complete', meta
+          assert meta['pages_completed'] >= 3, meta
+          assert meta['product_count'] >= 20, meta
+          rows = json.load(open('canary_cdp_out.json'))
+          for col in ('sku', 'title', 'product_url', 'category'):
+              missing = [r.get('sku') for r in rows if not r.get(col)]
+              assert not missing, (col, missing[:5])
+          share = sum(1 for r in rows if r.get('rating_5') is not None) / len(rows)
+          assert share >= 0.8, ('rating_5', share)
+          "
+
+      - name: Upload artifacts on every non-skipped run
+        if: always() && env.HAS_CDP == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-cdp-${{ github.run_id }}
+          path: |
+            canary_cdp_out.json
+            canary_cdp_out.json.meta.json
+            canary_cdp_out_debug.html
+          retention-days: 14

@@ -1,0 +1,57 @@
+# scraper output — large, machine-specific, stale by the time anyone reads it
+*.json
+*.csv
+!sample_output.json
+!sample_output.csv
+!tests/fixtures/*.json
+g2_results.*
+*_debug.html
+*_debug.png
+live_results/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.fingerprint_cache/
+*.egg-info/
+dist/
+build/
+# CI's engine-smoke job creates one venv PER engine right inside the
+# checkout (.venv-playwright, .venv-selenium, .venv-puppeteer — see
+# tests.yml), not a single .venv. A bare `.venv/` pattern
+# doesn't match those suffixed names, so `git ls-files --others
+# --exclude-standard` (.github/ci_checks.py's file list) was walking
+# straight into each one's installed packages and scanning THEIR test
+# fixtures and license data for credential shapes — found the hard way
+# when a real CI run flagged pip's vendored SPDX license list and
+# selenium's own websocket test fixtures as "possible committed
+# credentials". `.venv*/` covers every one of them, plus plain `.venv/`.
+.venv*/
+venv/
+env/
+
+# node (puppeteer/selenium tooling, if any local scripts are added later)
+node_modules/
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# secrets — `.env*`, not just `.env`: a working copy renamed the way people
+# actually rename one (.env.bak, .env.local, .env.save) is otherwise
+# untracked but NOT ignored, one `git add -A` away from a commit.
+*.log
+.env*
+!.env.example
+*.key
+secrets*
+# --proxy-file input (README's own example names it proxies.txt) — a real
+# credential file a user creates locally, same class of thing as .env.
+# Found missing here 2026-09-23 during a pre-push audit, after this exact
+# name was the one suggested to a real user for a real proxy list.
+proxies.txt
+proxies*.txt
+*proxy-list*.txt

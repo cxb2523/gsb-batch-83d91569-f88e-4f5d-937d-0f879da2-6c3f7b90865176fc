@@ -1,0 +1,13 @@
+.git
+.env*
+!.env.example
+*.json
+*.csv
+!sample_output.json
+!sample_output.csv
+*_debug.html
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.log

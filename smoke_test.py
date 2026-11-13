@@ -1,0 +1,3167 @@
+#!/usr/bin/env python3
+"""smoke_test.py — one file of plain functions with inline synthetic-fixture
+checks. No pytest, no conftest, no engine driver required: this runs, and
+must pass, in an environment with none of playwright/selenium/pyppeteer
+installed, which is exactly what CI's offline job is.
+
+**Honesty note, read before trusting a green run** (the same caveat every
+family member's smoke_test.py carries). Every HTML fixture below is
+SYNTHETIC — hand-written to exercise the parsing code paths — but built
+from the CONFIRMED real field names, class names and JSON-LD shapes
+captured live from www.g2.com on 2026-09-22 and transcribed in
+`g2_parser.py`'s module docstring, not from invented ones. A green run
+here proves the architecture (exit codes, precedence, dedupe, credential
+redaction, CLI validation, robots.txt compliance, engines importing with
+no driver present) AND that the confirmed data shapes parse correctly. It
+does NOT prove that this repo's own engine scripts get the same treatment
+against the live site. Three real runs reached g2.com but were blocked by
+DataDome/proxy quality before collecting a product; the successful
+real-browser E2E remains a local stand-in. That last gap is still open.
+
+Run directly: `python3 smoke_test.py`
+"""
+from __future__ import annotations
+
+import asyncio
+import inspect as _inspect
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import captcha_solver
+import diff_runs
+import env_config
+import g2_parser as gp
+import output_writer
+import proxy_meter
+import proxy_pool
+import puppeteer_scraper
+import scraper_api_client
+import selenium_scraper
+
+try:
+    import playwright_scraper
+except Exception as exc:  # pragma: no cover — this import itself must never fail
+    raise AssertionError(f"playwright_scraper must import cleanly even without playwright installed: {exc}") from exc
+
+ROOT = Path(__file__).parent
+ENGINE_FILES = ("playwright_scraper.py", "selenium_scraper.py", "puppeteer_scraper.py")
+ENGINE_MODULES = (playwright_scraper, selenium_scraper, puppeteer_scraper)
+
+RESULTS = []  # (name, ok, detail)
+
+
+def check(name):
+    """Runs the decorated function IMMEDIATELY (at module-load time) and
+    records the outcome — same pattern as every other family member's
+    smoke_test.py; every check function is named `_` because only RESULTS
+    is ever read, nothing looks a check up by name."""
+    def decorator(fn):
+        try:
+            fn()
+            RESULTS.append((name, True, ""))
+        except AssertionError as exc:
+            RESULTS.append((name, False, str(exc)))
+        except Exception as exc:  # a check that crashes is still a failure, not an uncaught traceback
+            RESULTS.append((name, False, f"{type(exc).__name__}: {exc}"))
+        return fn
+    return decorator
+
+
+def asyncio_run_maybe(mod, args):
+    """playwright_scraper.run()/puppeteer_scraper.run() are coroutines;
+    selenium_scraper.run() is plain sync."""
+    result = mod.run(args)
+    if _inspect.iscoroutine(result):
+        return asyncio.run(result)
+    return result
+
+
+def _parse(mod, argv):
+    return mod.build_arg_parser().parse_args(argv)
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic fixtures, built from g2_parser.py's CONFIRMED captured shapes
+# --------------------------------------------------------------------------- #
+def _card(slug: str, name: str, product_id: int, rating: str = "4.4", count: str = "27,555") -> str:
+    """One `.category-product-card`, with the confirmed `data-event-options`
+    JSON blob, `.elv-star-wrapper` rating text and image."""
+    opts = json.dumps({
+        "product_id": product_id,
+        "product_uuid": f"16e299ae-0000-0000-0000-{product_id:012d}",
+        "product": name,
+        "vendor_id": 469,
+        "product_type": "Software",
+        "category": "CRM",
+        "category_id": 179,
+        "resource_type": "Category",
+        "resource_id": 179,
+        "list_type": None,
+        "is_onboarding": False,
+        "name": "Event::Products::ListItemClicked",
+    })
+    return (
+        '<div class="content-card category-product-card x-category-product-card">'
+        f"<a data-event-options='{opts}' href=\"/products/{slug}/reviews\">{name}</a>"
+        f'<div class="elv-star-wrapper">{rating}/5 '
+        f'<span class="elv-star-wrapper__desc__count">({count})</span></div>'
+        f'<img src="https://images.g2crowd.com/uploads/product/image/{slug}.png">'
+        "</div>"
+    )
+
+
+def _pagination(next_disabled: bool = False, current: int = 1) -> str:
+    next_classes = "pagination__component" + (" pagination__component--disabled" if next_disabled else "")
+    return (
+        '<ul class="pagination" aria-label="Pagination">'
+        f'<li class="pagination__component pagination__page-number pagination__page-number--current">{current}</li>'
+        '<li class="pagination__component pagination__page-number">2</li>'
+        f'<li class="{next_classes}">Next</li>'
+        "</ul>"
+    )
+
+
+def listing_html(*, cards: int = 3, next_disabled: bool = False, datadome: bool = True) -> str:
+    """A healthy category-listing page. DataDome's own tag is included by
+    default because it is on EVERY g2.com page, healthy ones very much
+    included — that fact is load-bearing for several checks below."""
+    body = "".join(
+        _card(f"product-{i}", f"Product {i}", 500 + i) for i in range(1, cards + 1)
+    )
+    dd = '<script>window.DataDomeJsTag = {};window.dataDomeOptions={endpoint:"https://dd.g2.com/js/"};</script>' if datadome else ""
+    return (
+        "<html><head><title>Best CRM Software in 2026 | G2</title>"
+        f"{dd}</head><body>{body}{_pagination(next_disabled)}</body></html>"
+    )
+
+
+def product_html(*, best_rating: int = 10, rating_value: float = 8.9, datadome: bool = True) -> str:
+    """A product `/reviews` page: the one useful `SoftwareApplication`
+    JSON-LD block, plus the `BreadcrumbList` block that sits beside it and
+    carries no product data."""
+    node = {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "HubSpot Sales Hub",
+        "url": "https://www.g2.com/products/hubspot-sales-hub/reviews",
+        "image": "https://images.g2crowd.com/uploads/product/image/hubspot.png",
+        "aggregateRating": {
+            "@type": "AggregateRating",
+            "ratingValue": rating_value,
+            "bestRating": best_rating,
+            "worstRating": 0,
+            "reviewCount": 14333,
+        },
+        "review": [{
+            "@type": "Review",
+            "author": {"@type": "Person", "name": "Excel M."},
+            "name": "Great for pipeline visibility",
+            "reviewBody": "Works well for our team.",
+            "datePublished": "2026-08-01",
+            "reviewRating": {"@type": "Rating", "ratingValue": 4.5, "bestRating": 5},
+        }],
+    }
+    breadcrumb = {"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": []}
+    dd = '<script>window.DataDomeJsTag = {};</script>' if datadome else ""
+    return (
+        "<html><head><title>HubSpot Sales Hub Reviews | G2</title>"
+        f'<script type="application/ld+json">{json.dumps(breadcrumb)}</script>'
+        f'<script type="application/ld+json">{json.dumps(node)}</script>'
+        f"{dd}</head><body>reviews</body></html>"
+    )
+
+
+PRICING_HTML = (
+    "<html><head><title>HubSpot Sales Hub Pricing 2026 | G2</title></head><body>"
+    "<p>HubSpot Sales Hub offers 4 pricing editions, starting from $0 to $150.</p>"
+    "<div>Free HubSpot CRM — $0</div>"
+    "<div>Sales Hub Starter — $20 / 1 Core Seat Per Month</div>"
+    "<div>Sales Hub Professional — $100 / 1 Sales Seat Per Month</div>"
+    "<div>Sales Hub Enterprise — $150 / 1 Sales Seat Per Month</div>"
+    "<p>*Pricing information is supplied by the software provider or retrieved from publicly "
+    "accessible pricing materials.</p>"
+    "</body></html>"
+)
+
+# A DataDome wall: the vendor's own tag, and none of the page's real
+# content. This is what `identify_unsupported_vendor()` exists for — there
+# is no widget and no sitekey to extract, because DataDome has neither.
+DATADOME_WALL_HTML = (
+    "<html><head><title>g2.com</title></head><body>"
+    '<script src="https://dd.g2.com/js/" type="text/javascript"></script>'
+    "<script>window.DataDomeJsTag = {};</script>"
+    "<p>Please enable JS and disable any ad blocker</p>"
+    "</body></html>"
+)
+
+# DataDome's own interstitial SLIDER challenge — the vendor-documented
+# shape (https://2captcha.com/api-docs/datadome-slider-captcha), added
+# 2026-09-22. Unlike DATADOME_WALL_HTML above, this one has the iframe a
+# real challenge presents; entity-encoded `&amp;` in the query string
+# matches how a browser's `page.content()`/`driver.page_source` would
+# actually render the attribute.
+DATADOME_SLIDER_WALL_HTML = (
+    "<html><head><title>g2.com</title></head><body>"
+    '<script src="https://dd.g2.com/js/" type="text/javascript"></script>'
+    "<script>window.DataDomeJsTag = {};</script>"
+    '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=abc123'
+    '&amp;hash=deadbeef&amp;cid=xyz789&amp;t=fe&amp;referer=https%3A%2F%2Fwww.g2.com%2Fcategories%2Fcrm"'
+    ' height="600" width="100%"></iframe>'
+    "</body></html>"
+)
+
+# The OTHER confirmed DataDome shape — `/interstitial/`, not `/captcha/` —
+# added 2026-09-22 after the first real `--cdp-endpoint` + real-key run
+# against live g2.com actually hit it (see captcha_solver.py's module
+# docstring for the full story). Synthetic, mirroring
+# DATADOME_SLIDER_WALL_HTML's own style; the real scrubbed capture this is
+# modeled on lives at tests/fixtures/g2_datadome_interstitial.html and gets
+# its own check below.
+DATADOME_INTERSTITIAL_WALL_HTML = (
+    "<html><head><title>g2.com</title></head><body>"
+    '<script src="https://dd.g2.com/js/" type="text/javascript"></script>'
+    "<script>window.DataDomeJsTag = {};</script>"
+    '<iframe src="https://geo.captcha-delivery.com/interstitial/?initialCid=abc123'
+    '&amp;hash=deadbeef&amp;cid=xyz789&amp;referer=https%3A%2F%2Fwww.g2.com%2Fcategories%2Fcrm'
+    '&amp;s=48726&amp;e=deadbeef&amp;b=1648239&amp;dm=cd"'
+    ' title="DataDome Device Check" height="600" width="100%"></iframe>'
+    "</body></html>"
+)
+
+
+# --------------------------------------------------------------------------- #
+# Engine import/CLI hygiene
+# --------------------------------------------------------------------------- #
+@check("engines import cleanly regardless of installed drivers")
+def _():
+    for mod in ENGINE_MODULES:
+        assert hasattr(mod, "build_arg_parser")
+        assert hasattr(mod, "run")
+
+
+@check("each engine imports its driver at MODULE level, guarded by try/except ImportError")
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "except ImportError as _IMPORT_ERROR" in src, f"{path}: missing guarded driver import"
+
+
+@check(
+    "BEHAVIORAL proof of the rule, not just the structural grep above: with "
+    "playwright/selenium/pyppeteer made unimportable (a meta_path blocker in a subprocess), all "
+    "three engine modules still import, and each reports its own driver as absent rather than "
+    "raising. This is the check the structural one can only approximate — and it is the one that "
+    "matters in an environment where the drivers ARE installed, where a missing guard would "
+    "otherwise go unnoticed until a user without them ran the suite."
+)
+def _():
+    script = """
+import importlib.abc, sys
+BLOCKED = {"playwright", "selenium", "pyppeteer"}
+
+class _Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".")[0] in BLOCKED:
+            raise ImportError("blocked by smoke_test: " + fullname)
+        return None
+
+for name in list(sys.modules):
+    if name.split(".")[0] in BLOCKED:
+        del sys.modules[name]
+sys.meta_path.insert(0, _Blocker())
+
+import playwright_scraper, selenium_scraper, puppeteer_scraper
+assert playwright_scraper.async_playwright is None, "playwright guard did not fire"
+assert selenium_scraper.webdriver is None, "selenium guard did not fire"
+assert puppeteer_scraper.pyppeteer_launch is None, "pyppeteer guard did not fire"
+assert playwright_scraper.build_arg_parser() is not None
+assert selenium_scraper.build_arg_parser() is not None
+assert puppeteer_scraper.build_arg_parser() is not None
+print("NO_DRIVER_IMPORT_OK")
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=120,
+    )
+    assert "NO_DRIVER_IMPORT_OK" in proc.stdout, (
+        f"engines did not import with their drivers blocked:\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
+@check("no forbidden overclaiming wording in any shipped .py/.md/.html/.toml/.cfg/.yml file")
+def _():
+    banned = (
+        "cloud browser", "antidetect browser", "2scraper antidetect browser",
+        "gate.2prx.com", "--antidetect", "antidetect_local_api",
+    )
+    # smoke_test.py is allowed to NAME the banned phrases —
+    # that is what makes this check readable. Nothing else is.
+    exempt_names = {"smoke_test.py"}
+    for path in ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix not in (".py", ".md", ".html", ".toml", ".cfg", ".yml", ".yaml"):
+            continue
+        if path.name in exempt_names or path.name.startswith("2scraper"):
+            continue
+        if ".git" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        for phrase in banned:
+            assert phrase not in text, f"{path.relative_to(ROOT)}: contains banned phrase {phrase!r}"
+
+
+@check("all three engines expose the identical --flag set")
+def _():
+    def flag_set(mod):
+        return {opt for a in mod.build_arg_parser()._actions for opt in a.option_strings if opt.startswith("--")}
+
+    pw, se, pu = (flag_set(m) for m in ENGINE_MODULES)
+    all_engines = pw | se | pu
+    for name, flags in (("playwright_scraper", pw), ("selenium_scraper", se), ("puppeteer_scraper", pu)):
+        missing = all_engines - flags
+        assert not missing, f"{name} is missing {sorted(missing)} that (an)other engine(s) define — flag sets have drifted apart"
+
+
+@check("all three engines share the same default output filename stem")
+def _():
+    for mod in ENGINE_MODULES:
+        assert mod._default_out("json") == "g2_results.json"
+        assert mod._default_out("csv") == "g2_results.csv"
+
+
+@check("all three engines carry the per-site constants block, and READINESS is SHORTER than an SPA sibling's 3s (g2.com is server-rendered Rails/PJAX, confirmed — nothing has to hydrate before the content is readable)")
+def _():
+    assert playwright_scraper.NAV_TIMEOUT_MS == 30_000
+    assert playwright_scraper.READINESS_WAIT_MS < 3_000, playwright_scraper.READINESS_WAIT_MS
+    assert selenium_scraper.NAV_TIMEOUT_S == 30
+    assert selenium_scraper.READINESS_WAIT_S < 3.0, selenium_scraper.READINESS_WAIT_S
+    assert puppeteer_scraper.NAV_TIMEOUT_MS == 30_000
+    assert puppeteer_scraper.READINESS_WAIT_S < 3.0, puppeteer_scraper.READINESS_WAIT_S
+    for mod in ENGINE_MODULES:
+        assert mod.MIN_CARD_MATCHES == gp.MIN_CARD_MATCHES == 2, (
+            f"{mod.__name__}: MIN_CARD_MATCHES must come from g2_parser, not be re-tuned per engine"
+        )
+
+
+@check("engines never request a robots.txt-disallowed path — _resolve_start_url refuses /products/*/reviews/* (the ONE extra rule g2.com's robots.txt gives ClaudeBot and its peers) before any fetch")
+def _():
+    for mod in ENGINE_MODULES:
+        url, reason = mod._resolve_start_url(
+            _parse(mod, ["--url", "https://www.g2.com/products/hubspot-sales-hub/reviews/2"])
+        )
+        assert url is None, f"{mod.__name__}: a disallowed path must never be attempted"
+        assert reason == "disallowed", f"{mod.__name__}: expected a 'disallowed' reason, got {reason!r}"
+        # ...while the bare product page it sits under IS this scraper's target.
+        url, mode = mod._resolve_start_url(
+            _parse(mod, ["--url", "https://www.g2.com/products/hubspot-sales-hub/reviews"])
+        )
+        assert url and mode == "product", f"{mod.__name__}: the bare /reviews page must still be allowed"
+
+
+@check("engines refuse a URL shape this repo has no parser for, instead of fetching a page they will then fail to read")
+def _():
+    for mod in ENGINE_MODULES:
+        url, reason = mod._resolve_start_url(_parse(mod, ["--url", "https://www.g2.com/sponsored/whatever"]))
+        assert url is None and reason == "unknown_shape", f"{mod.__name__}: got {(url, reason)!r}"
+
+
+@check("engines refuse a /categories/{slug}/grids.json --url with a message naming WHY, rather than fetching G2's own Grid(R) ranking JSON and reporting a confusing zero-card listing: the endpoint is real and sanctioned, but this repo ships no parser for its response (g2_parser.py, 'Left for the next stage')")
+def _():
+    for mod in ENGINE_MODULES:
+        url, reason = mod._resolve_start_url(
+            _parse(mod, ["--url", "https://www.g2.com/categories/crm/grids.json"])
+        )
+        assert url is None and reason == "grids_unsupported", f"{mod.__name__}: got {(url, reason)!r}"
+        code = asyncio_run_maybe(mod, _parse(mod, ["--url", "https://www.g2.com/categories/crm/grids.json"]))
+        assert code == output_writer.EXIT_BAD_USAGE, f"{mod.__name__}: got {code}"
+    # The URL builder still exists — the endpoint is confirmed real, it just
+    # has no parser behind it yet.
+    assert gp.grids_json_url("crm").endswith("/categories/crm/grids.json")
+
+
+@check("_resolve_start_url routes each of g2.com's three real page shapes to its own mode, in all three engines")
+def _():
+    cases = [
+        (["--url", "https://www.g2.com/categories/crm?page=4"], "category"),
+        (["--url", "https://www.g2.com/products/hubspot-sales-hub/reviews"], "product"),
+        (["--url", "https://www.g2.com/products/hubspot-sales-hub/pricing"], "pricing"),
+        (["--category", "crm"], "category"),
+        (["--product", "hubspot-sales-hub"], "product"),
+    ]
+    for mod in ENGINE_MODULES:
+        for argv, expected in cases:
+            url, mode = mod._resolve_start_url(_parse(mod, argv))
+            assert url and mode == expected, f"{mod.__name__} {argv}: got {(url, mode)!r}, expected {expected!r}"
+
+
+@check("all three engines only classify a DataDome/captcha marker as blocked when the page's own content is ABSENT — DataDome's tag ships on every healthy g2.com page, so a bare marker match must never turn a good listing into EXIT_BLOCKED")
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "captcha_detected and not cards_present" in src, (
+            f"{path}: a marker alone can still turn a healthy listing page into EXIT_BLOCKED"
+        )
+        assert "gp.count_result_cards(html) >= MIN_CARD_MATCHES" in src, (
+            f"{path}: 'did this page render results' must use the site's own MIN_CARD_MATCHES threshold"
+        )
+
+
+@check("all three engines treat 'unsupported_vendor' (the EXPECTED outcome of a real DataDome wall) as still-blocked, exactly like the other non-solved outcomes — an honest vendor name in the log, the same EXIT_BLOCKED underneath (the skyscanner-scraper/PerimeterX precedent)")
+def _():
+    for mod in ENGINE_MODULES:
+        assert "unsupported_vendor" in mod.STILL_BLOCKED_ACTIONS, (
+            f"{mod.__name__}: a DataDome wall would not be counted as blocked"
+        )
+        for expected in (
+            "warning_no_key", "warning_no_proxy", "warning_proxy_banned",
+            "warning_solver_error", "detected_unidentified_widget",
+        ):
+            assert expected in mod.STILL_BLOCKED_ACTIONS, f"{mod.__name__}: missing {expected!r}"
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert 'action == "unsupported_vendor"' in src, (
+            f"{path}: no dedicated log branch naming the vendor — a DataDome wall would report the "
+            f"misleading 'no known widget/sitekey could be extracted' instead"
+        )
+
+
+@check("all three engines have a dedicated log branch for 'warning_no_proxy' and 'warning_proxy_banned' — added 2026-09-22 after both fell through their if/elif chain with NO log line at all (warning_no_proxy: a pre-existing gap since DataDomeSliderTask's proxy-required guard was added; warning_proxy_banned: the new action itself, added the same day after a real 2Captcha rejection — see captcha_solver.py's module docstring)")
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert 'action == "warning_no_proxy"' in src, (
+            f"{path}: DataDomeSliderTask with no proxy would silently report EXIT_BLOCKED with "
+            f"no explanation of why a solve was never attempted"
+        )
+        assert 'action == "warning_proxy_banned"' in src, (
+            f"{path}: a 2Captcha 'IP address is banned' rejection would silently report EXIT_BLOCKED "
+            f"with no hint that rotating the proxy (not retrying the same one) is the actual fix"
+        )
+
+
+@check(
+    "BUG found live-testing 2026-09-23, now fixed: all three engines' scrape_category() used to set "
+    "remote_api_error=True unconditionally the moment the FIRST page's navigation failed, which "
+    "run()'s block_attempt loop treats as fatal (breaks immediately, same as a crash) — that defeated "
+    "--proxy-file rotation entirely the instant any single proxy timed out on page 1. Confirmed live: "
+    "a real run with 10 fresh proxies and --block-retries 9 stopped after ONE navigation timeout on "
+    "attempt 6, never trying proxies 7-10. Fix: when a proxy_pool is active, treat this as `blocked "
+    "= True` instead so the caller rotates to proxy_pool.next(); only fall back to the fatal "
+    "remote_api_error when there is no alternative identity to rotate to (no proxy pool, or a "
+    "--cdp-endpoint session providing its own fixed exit)."
+)
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "if proxy_pool is not None and proxy is not None:" in src and "blocked = LOAD_FAILED" in src, (
+            f"{path}: scrape_category()'s first-page-navigation-failure branch must check for a live "
+            f"proxy_pool and set blocked=LOAD_FAILED (letting --block-retries rotate) rather than always "
+            f"declaring remote_api_error"
+        )
+        # The two branches must both still exist, in this order: rotate-if-
+        # possible, THEN fall back to the fatal remote_api_error only when
+        # there's truly no alternative exit to try.
+        rotate_idx = src.find("if proxy_pool is not None and proxy is not None:\n")
+        fatal_idx = src.find("remote_api_error = True", rotate_idx)
+        assert rotate_idx != -1 and fatal_idx != -1 and fatal_idx > rotate_idx, (
+            f"{path}: expected the proxy-pool rotation check to come BEFORE the fatal "
+            f"remote_api_error fallback in scrape_category()"
+        )
+
+
+@check(
+    "the dead-first-proxy rotation fix also covers standalone product and pricing modes in all "
+    "three engines — these single-page paths previously converted the first dead proxy into a "
+    "fatal remote_api_error before --block-retries could advance --proxy-file"
+)
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        product_start = src.index("def scrape_product_page(")
+        pricing_start = src.index("def scrape_pricing_page(", product_start)
+        product_section = src[product_start:pricing_start]
+        assert "if proxy_pool is not None and proxy is not None:" in product_section, (
+            f"{path}: standalone product navigation failure does not distinguish a rotatable "
+            f"proxy pool from a fixed/direct identity"
+        )
+        assert "return [], LOAD_FAILED, False, 0, [1]" in product_section, (
+            f"{path}: standalone product mode must report a dead pooled proxy as blocked so the "
+            f"outer retry loop advances the pool"
+        )
+
+        pricing_only_name = "def _scrape_pricing_only(" if path == "playwright_scraper.py" else "def scrape_pricing_only("
+        pricing_only_start = src.index(pricing_only_name)
+        pricing_only_section = src[pricing_only_start:]
+        assert "failed_pages = [1] if (blocked or remote_api_error) and not products else []" in pricing_only_section, (
+            f"{path}: standalone pricing failure is not preserved in failed_pages"
+        )
+        pricing_path = src[pricing_start:pricing_only_start] if pricing_start < pricing_only_start else src[pricing_start:]
+        rotation_is_local = "if proxy_pool is not None and proxy is not None:" in pricing_path
+        rotation_is_adapter = "if remote_api_error and proxy_pool is not None and proxy is not None:" in pricing_only_section
+        assert rotation_is_local or rotation_is_adapter, (
+            f"{path}: standalone pricing navigation failure remains fatal instead of becoming a "
+            f"rotatable blocked result when --proxy-file is active"
+        )
+
+
+@check(
+    "parity fix 2026-09-23: playwright_scraper.py's _goto_with_retries() now "
+    "accepts proxy_pool=/proxy= and detects a dead-proxy marker via is_proxy_dead_error(), matching "
+    "the capability selenium_scraper.py and puppeteer_scraper.py already had (a real, previously "
+    "undiscovered engine-parity gap — playwright is the PRIMARY engine, and had the "
+    "weakest proxy-failure detection of the three)"
+)
+def _():
+    src = (ROOT / "playwright_scraper.py").read_text(encoding="utf-8")
+    assert "is_proxy_dead_error" in src, (
+        "playwright_scraper.py: _goto_with_retries() still can't recognise a dead-proxy marker"
+    )
+    assert "proxy_pool: Optional[ProxyPool] = None, proxy: Optional[Proxy] = None," in src, (
+        "playwright_scraper.py: _goto_with_retries() is missing the proxy_pool=/proxy= parameters "
+        "selenium/puppeteer's versions already have"
+    )
+    for mod in ENGINE_MODULES:
+        sig = _inspect.signature(mod._goto_with_retries)
+        assert "proxy_pool" in sig.parameters and "proxy" in sig.parameters, (
+            f"{mod.__name__}: _goto_with_retries() must accept proxy_pool=/proxy= — engine parity "
+        )
+
+
+@check("all three engines log a diagnostic (not silence) when a page yields zero products but was not flagged as blocked — a parity gap a sibling repo's first live run exposed")
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "diagnose_unexpected_page" in src, f"{path}: no zero-products diagnostic"
+
+
+@check("all three engines check the HTTP status for a block (DataDome answers 403, it does not redirect) and record a failed page rather than crashing the run (-> EXIT_PARTIAL)")
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "status >= 400" in src, f"{path}: no HTTP-status block check"
+        assert "failed_pages.append(page_num)" in src, f"{path}: a bad page does not degrade to a failed page"
+
+
+@check("the single credential scanner passes and tests.yml invokes it instead of carrying a second inline grep")
+def _():
+    scanner = ROOT / ".github" / "ci_checks.py"
+    if not scanner.exists():
+        # This check inspects the repo's own meta-files (.github/, the
+        # workflow YAMLs) — none of which the Dockerfile COPYs into the
+        # build context on purpose (the image ships no test
+        # suite and no CI plumbing). `RUN python3 smoke_test.py` runs this
+        # same file from inside that stripped-down build, where the thing
+        # being asserted about literally isn't there to assert about. The
+        # offline CI job (a full checkout) is what actually exercises this
+        # check; skipping here isn't a coverage gap, it's the same
+        # "warn/skip rather than red for a reason everyone already knows
+        # about" precedent as tests.yml's sample_output step.
+        return
+    result = subprocess.run(
+        [sys.executable, str(scanner)], cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    scanner_source = scanner.read_text(encoding="utf-8")
+    assert "URL_CREDENTIALS" in scanner_source
+    assert "SECRET_ASSIGNMENT" in scanner_source
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "python3 .github/ci_checks.py" in workflow
+    assert "grep -rnE" not in workflow
+
+
+@check("pre-publication release guards: Docker removes fixtures, live canary is strict, @claude is collaborator-only, and test scripts are not packaged")
+def _():
+    dockerfile = ROOT / "Dockerfile"
+    if not dockerfile.exists():
+        # Same reasoning as the credential-scanner check above: the
+        # Dockerfile is never COPYed into its own build context, so this
+        # check has nothing to read once it's running as part of `docker
+        # build`'s own RUN python3 smoke_test.py step. The offline job's
+        # full checkout is what actually verifies this.
+        return
+    dockerfile_text = dockerfile.read_text(encoding="utf-8")
+    assert "rm -rf smoke_test.py tests __pycache__" in dockerfile_text
+
+    canary = (ROOT / ".github" / "workflows" / "canary.yml").read_text(encoding="utf-8")
+    assert "HAS_PROXY" in canary and "--max-pages 3" in canary
+    assert "if code != 0:" in canary
+    assert "elif code in (3, 4, 5)" not in canary
+
+    claude = (ROOT / ".github" / "workflows" / "claude.yml").read_text(encoding="utf-8")
+    assert "author_association" in claude
+    for role in ("OWNER", "MEMBER", "COLLABORATOR"):
+        assert role in claude
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    module_block = pyproject.split("py-modules = [", 1)[1]
+    assert '"smoke_test"' not in module_block
+    assert '"local_e2e_test"' not in module_block
+
+
+# --------------------------------------------------------------------------- #
+# output_writer — exit codes / precedence / dedupe
+# --------------------------------------------------------------------------- #
+@check("exit codes and STATUS_BY_EXIT match the family contract exactly")
+def _():
+    expected = {0: "complete", 1: "crashed", 2: "bad_usage", 3: "blocked", 4: "empty", 5: "remote_api_error", 6: "partial"}
+    assert output_writer.STATUS_BY_EXIT == expected
+    assert (output_writer.EXIT_OK, output_writer.EXIT_CRASH, output_writer.EXIT_BAD_USAGE,
+            output_writer.EXIT_BLOCKED, output_writer.EXIT_ZERO_PRODUCTS,
+            output_writer.EXIT_REMOTE_API_ERROR, output_writer.EXIT_PARTIAL) == (0, 1, 2, 3, 4, 5, 6)
+
+
+def _mk_product(sku, price=None, **kw):
+    defaults = dict(
+        sku=sku, source="g2.com", category="CRM", title=f"Product {sku}",
+        brand=None, price=price, currency="USD" if price is not None else None,
+        price_source="pricing_page_text" if price is not None else None,
+        product_url=f"https://www.g2.com/products/{sku}/reviews",
+        image_url=None, scraped_at="2026-09-22T00:00:00Z",
+        rating_5=4.4, review_count=27555, review_count_source="listing_card",
+        product_slug=sku,
+    )
+    defaults.update(kw)
+    return output_writer.Product(**defaults)
+
+
+@check("finish_run: rows gathered and THEN a remote error is 'partial' (exit 6), never 'complete' — and the sidecar's stop_reason names the error. Changed 2026-10-14: this used to pin exit 5 for a run holding rows, but 5 promises the content was never obtained, and these rows were")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=[_mk_product("a")], out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=1, failed_pages=None,
+            blocked=True, remote_api_error=True, allow_empty=True, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_PARTIAL, code
+        assert Path(out).exists(), "already-collected products must still be written out"
+        meta = json.loads(Path(f"{out}.meta.json").read_text())
+        assert meta["status"] == "partial", meta["status"]
+        assert meta["stop_reason"] == "remote_api_error", meta["stop_reason"]
+
+
+@check("finish_run precedence: blocked+zero-products respects --allow-empty for WHETHER to write, never for the STATUS")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out_a = str(Path(td) / "a.json")
+        code = output_writer.finish_run(
+            products=[], out_path=out_a, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=1, failed_pages=[2],
+            blocked=True, remote_api_error=False, allow_empty=True, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_BLOCKED
+        assert Path(out_a).exists(), "--allow-empty means a zero-product outcome DOES get written"
+        meta = json.loads(Path(f"{out_a}.meta.json").read_text())
+        assert meta["status"] == "blocked", "--allow-empty must never launder this into 'complete'"
+
+        out_b = str(Path(td) / "b.json")
+        code = output_writer.finish_run(
+            products=[], out_path=out_b, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=1, failed_pages=[2],
+            blocked=True, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_BLOCKED
+        assert not Path(out_b).exists(), "without --allow-empty, a zero-product outcome writes nothing"
+        assert not Path(f"{out_b}.meta.json").exists(), "a failed run never gets a sidecar"
+
+
+@check("finish_run: a block AFTER rows were gathered is 'partial' (exit 6) with stop_reason 'blocked' — never 'complete', and no longer 'blocked'/exit 3. Changed 2026-10-14: exit 3 labelled partial data as a block, and diff_runs then refused the rows that were written")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=[_mk_product("a"), _mk_product("b")], out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=3, pages_completed=1, failed_pages=[2],
+            blocked=True, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_PARTIAL, code
+        meta = json.loads(Path(f"{out}.meta.json").read_text())
+        assert meta["status"] == "partial", meta["status"]
+        assert meta["stop_reason"] == "blocked", meta["stop_reason"]
+        assert meta["failed_pages"] == [2]
+        assert meta["product_count"] == 2, "the products it DID collect must still be written"
+
+
+@check("finish_run: zero products without --allow-empty writes neither file nor sidecar (a stale failure sidecar beside a previous good output would contradict data that is still good)")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=[], out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=1, failed_pages=None,
+            blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_ZERO_PRODUCTS
+        assert not Path(out).exists()
+        assert not Path(f"{out}.meta.json").exists()
+
+
+@check("finish_run: a page that was served or attempted but yielded NOTHING usable (parser exception, product page without product data), with zero rows, is 'parser_found_nothing' exit 5 — not 'empty' exit 4. Changed 2026-10-14: exit 4 told the reader the target was empty and sent them to check the URL instead of the parser")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=[], out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=0, failed_pages=[1],
+            blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_REMOTE_API_ERROR, code
+        assert not Path(out).exists()
+        out2 = str(Path(td) / "out2.json")
+        code = output_writer.finish_run(
+            products=[], out_path=out2, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=0, failed_pages=[1],
+            blocked=False, remote_api_error=False, allow_empty=True, started_at=0.0,
+        )
+        meta = json.loads(Path(f"{out2}.meta.json").read_text())
+        assert (meta["status"], meta["stop_reason"]) == ("parser_found_nothing", "parser_found_nothing"), meta
+
+
+@check("finish_run: partial (failed pages, some products) writes output and reports EXIT_PARTIAL")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=[_mk_product("a")], out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=3, pages_completed=2, failed_pages=[3],
+            blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_PARTIAL
+        meta = json.loads(Path(f"{out}.meta.json").read_text())
+        assert meta["status"] == "partial" and meta["failed_pages"] == [3]
+
+
+@check("finish_run: a clean run with products writes output and reports EXIT_OK/complete")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=[_mk_product("a"), _mk_product("b")], out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=1, failed_pages=None,
+            blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_OK
+        assert len(json.loads(Path(out).read_text())) == 2
+
+
+@check("EXIT_BAD_USAGE (2) is reachable from every engine's own run(): no target, a robots.txt-disallowed --url, an unparseable URL shape, and --scraper-api without a key")
+def _():
+    for mod in ENGINE_MODULES:
+        for argv in (
+            [],
+            ["--url", "https://www.g2.com/products/hubspot-sales-hub/reviews/2"],
+            ["--url", "https://www.g2.com/sponsored/whatever"],
+            ["--category", "crm", "--scraper-api"],
+        ):
+            code = asyncio_run_maybe(mod, _parse(mod, argv))
+            assert code == output_writer.EXIT_BAD_USAGE, f"{mod.__name__} {argv}: got {code}"
+
+
+@check("EXIT_CRASH (1) is reachable: an engine whose driver is absent reports a crash (not a silent zero-product 'complete'), and says which requirements file installs it")
+def _():
+    cases = [
+        (playwright_scraper, "async_playwright"),
+        (selenium_scraper, "webdriver"),
+        (puppeteer_scraper, "pyppeteer_launch"),
+    ]
+    for mod, attr in cases:
+        original = getattr(mod, attr)
+        setattr(mod, attr, None)
+        try:
+            code = asyncio_run_maybe(mod, _parse(mod, ["--category", "crm"]))
+            assert code == output_writer.EXIT_CRASH, f"{mod.__name__}: got {code}"
+        finally:
+            setattr(mod, attr, original)
+
+
+@check("EXIT_REMOTE_API_ERROR (5) is reachable without a crash: a Scraper API failure is a broken remote dependency, not a bug in this repo — a caller (CI/cron) must be able to tell those apart")
+def _():
+    class _FailingClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        def scrape_url(self, url, timeout=60, cdp_url=None):
+            raise scraper_api_client.TwoCaptchaError("upstream 502")
+
+    for mod in ENGINE_MODULES:
+        args = _parse(mod, ["--category", "crm", "--scraper-api", "--twocaptcha-key", "k"])
+        args.out = "unused.json"
+        products, blocked, remote_api_error, pages_completed, failed = mod._scrape_via_scraper_api(
+            args=args, start_url="https://www.g2.com/categories/crm", mode="category", client=_FailingClient(),
+        )
+        assert remote_api_error is True and products == [] and blocked is False, (
+            f"{mod.__name__}: got {(products, blocked, remote_api_error)!r}"
+        )
+
+
+@check("Product field order: family-common fields first, in that exact order, g2-specific fields after")
+def _():
+    expected_head = [
+        "sku", "source", "category", "title", "brand", "price", "currency",
+        "price_source", "product_url", "image_url", "scraped_at",
+    ]
+    assert output_writer.PRODUCT_FIELD_NAMES[: len(expected_head)] == expected_head, output_writer.PRODUCT_FIELD_NAMES
+    tail = output_writer.PRODUCT_FIELD_NAMES[len(expected_head):]
+    for name in ("rating_5", "rating_10", "review_count", "review_count_source",
+                 "product_id", "product_uuid", "product_slug", "vendor_id",
+                 "category_id", "product_type"):
+        assert name in tail, f"missing g2-specific field {name!r}"
+    # The two rating scales must stay two columns. A plain `rating` would be
+    # a 0-5 star rating and a 0-10 composite score sharing one name.
+    assert "rating" not in output_writer.PRODUCT_FIELD_NAMES, (
+        "a single `rating` column would merge g2.com's two DIFFERENT scales — see Product's docstring"
+    )
+
+
+@check("merge_pages dedupes by sku, last-write-wins, in PAGE order not arrival order")
+def _():
+    page1 = [_mk_product("a", price=10.0), _mk_product("b", price=20.0)]
+    page2 = [_mk_product("a", price=15.0), _mk_product("c", price=30.0)]
+    merged = output_writer.merge_pages([page1, page2])
+    assert [p.sku for p in merged] == ["a", "b", "c"], [p.sku for p in merged]
+    assert next(p for p in merged if p.sku == "a").price == 15.0
+
+
+@check("write_csv writes a header even for zero rows, in the Product field order")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.csv")
+        output_writer.write_csv([], out)
+        header = Path(out).read_text().splitlines()[0]
+        assert header.split(",") == output_writer.PRODUCT_FIELD_NAMES
+
+
+# --------------------------------------------------------------------------- #
+# proxy_pool — parsing, redaction (family-shared, unmodified)
+# --------------------------------------------------------------------------- #
+@check("proxy_pool rejects a malformed proxy string with ProxyParseError")
+def _():
+    try:
+        proxy_pool.load_proxies("not a proxy!!", None)
+        raise AssertionError("expected ProxyParseError")
+    except proxy_pool.ProxyParseError:
+        pass
+
+
+@check("proxy_pool parses a credentialed proxy and masks it in logs")
+def _():
+    proxies = proxy_pool.load_proxies("http://user:secretpass@host.example:8080", None)
+    assert len(proxies) == 1
+    p = proxies[0]
+    assert p.has_auth
+    masked = p.masked()
+    assert "secretpass" not in masked and "host.example" in masked
+    assert "secretpass" not in p.server_only()
+
+
+@check("redact_credentials scrubs URL userinfo AND key/token params, globally (an exception message is a log)")
+def _():
+    message = (
+        "connect_over_cdp failed: ws://g2user-zone-scraping_browser:secretpass@cb.2captcha.com:9222 "
+        "Call log:\n - ws://g2user-zone-scraping_browser:secretpass@cb.2captcha.com:9222\n"
+        "  clientKey=abcdEF123 also leaked here"
+    )
+    redacted = proxy_pool.redact_credentials(message)
+    assert "secretpass" not in redacted
+    assert "abcdEF123" not in redacted
+    assert redacted.count("***:***@") == 2, "must scrub EVERY occurrence, not just the first"
+
+
+@check("a failed --cdp-endpoint connection never leaks its credential into the raised error, under a REAL driver-shaped failure (playwright and puppeteer; selenium refuses a credentialed endpoint outright)")
+def _():
+    import unittest.mock as mock
+
+    bad_endpoint = "ws://g2user-zone-scraping_browser:secretpass@cb.2captcha.com:9222"
+
+    class _FakePW:
+        class chromium:
+            @staticmethod
+            async def connect_over_cdp(_endpoint):
+                # Exactly the documented shape: the driver
+                # repeats the endpoint, credentials and all, several times.
+                raise RuntimeError(
+                    f"could not connect: {_endpoint}\nCall log:\n - {_endpoint}\n - {_endpoint}"
+                )
+
+    async def _run_pw():
+        try:
+            await playwright_scraper._connect_over_cdp(_FakePW(), bad_endpoint)
+            raise AssertionError("expected a RuntimeError")
+        except RuntimeError as exc:
+            assert "secretpass" not in str(exc), str(exc)
+            assert exc.__cause__ is None, "the unredacted original must be dropped from the chain"
+
+    asyncio.run(_run_pw())
+
+    async def _fake_connect(browserWSEndpoint, **_kw):
+        raise RuntimeError(f"could not connect: {browserWSEndpoint}")
+
+    async def _run_pptr():
+        with mock.patch.object(puppeteer_scraper, "pyppeteer_connect", _fake_connect):
+            try:
+                await puppeteer_scraper._launch(headless=True, proxy=None, cdp_endpoint=bad_endpoint)
+                raise AssertionError("expected a RuntimeError")
+            except RuntimeError as exc:
+                assert "secretpass" not in str(exc), str(exc)
+                assert exc.__cause__ is None
+
+    asyncio.run(_run_pptr())
+
+
+@check("a failed fingerprint/random request never leaks the 2Captcha key into the raised error or the log (requests puts the full URL, query string included, into every HTTPError)")
+def _():
+    import unittest.mock as mock
+
+    import fingerprint_client
+    import requests
+
+    key = "supersecretkey123456"
+    client = scraper_api_client.TwoCaptchaClient(key)
+
+    def _boom(*_a, **_kw):
+        # Exactly what `requests` raises: the FULL URL, query string
+        # included, inside the exception text (a known leak path for this
+        # endpoint).
+        raise requests.exceptions.HTTPError(
+            f"500 Server Error for url: https://api.2captcha.com/fingerprint/random?key={key}&format=chromium"
+        )
+
+    with mock.patch.object(scraper_api_client.requests, "get", _boom):
+        try:
+            client.random_fingerprint()
+            raise AssertionError("expected a TwoCaptchaError")
+        except scraper_api_client.TwoCaptchaError as exc:
+            assert key not in str(exc), str(exc)
+            assert exc.__cause__ is None, "the unredacted original must be dropped from the chain"
+        # ...and the caller degrades to no profile rather than crashing.
+        profile = fingerprint_client.fetch_fingerprint(client)
+    assert profile is None, "a failed fingerprint fetch degrades to no profile, never a crash"
+
+
+@check("selenium refuses a CREDENTIALED --cdp-endpoint outright with EXIT_BAD_USAGE (a standing, named exception), rather than silently dropping the credential")
+def _():
+    code = selenium_scraper.run(_parse(selenium_scraper, [
+        "--category", "crm",
+        "--cdp-endpoint", "ws://g2user-zone-scraping_browser:secretpass@cb.2captcha.com:9222",
+    ]))
+    assert code == output_writer.EXIT_BAD_USAGE, code
+    assert selenium_scraper._cdp_endpoint_has_credentials("ws://u:p@host:9222") is True
+    assert selenium_scraper._cdp_endpoint_has_credentials("ws://host:9222") is False
+
+
+# --------------------------------------------------------------------------- #
+# captcha_solver — detection, DataDome's unsolvable-vendor path, injection
+# --------------------------------------------------------------------------- #
+@check("captcha_solver.detect_from_html finds generic bot-challenge markers")
+def _():
+    assert captcha_solver.detect_from_html("<html>please complete the g-recaptcha below</html>")
+    assert not captcha_solver.detect_from_html("<html><body>ordinary page, no widgets</body></html>")
+
+
+@check("DataDome is detected on a real-shaped g2.com wall by the GENERIC marker list alone (no extra wiring needed), and g2_parser's own BOT_CHALLENGE_MARKERS add the two g2.com-specific spellings so a log line can name WHICH deployment was seen")
+def _():
+    assert captcha_solver.detect_from_html(DATADOME_WALL_HTML), "generic list must catch DataDome unaided"
+    assert "datadome" in captcha_solver.GENERIC_BOT_CHALLENGE_MARKERS
+    assert gp.BOT_CHALLENGE_MARKERS == ("datadomejstag", "dd.g2.com")
+    for marker in gp.BOT_CHALLENGE_MARKERS:
+        assert marker in DATADOME_WALL_HTML.lower(), marker
+
+
+@check("a DataDome wall with NO visible slider challenge reports action='unsupported_vendor' + vendor='datadome' — NOT the vague 'detected_unidentified_widget' — because DataDome's own device-check tag is present but there is currently nothing to solve on this page")
+def _():
+    # Corrected 2026-09-22: DataDome itself DOES have a
+    # real 2Captcha task type — CaptchaType.DATADOME_SLIDER, see the
+    # dedicated check below — so this fixture (DataDome's tag with no
+    # slider iframe, the ordinary case on most page loads) is no longer
+    # "DataDome can never be solved," it's "nothing to solve on THIS page."
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        api_key = "fake"
+
+    assert captcha_solver.identify_widget(DATADOME_WALL_HTML) is None, "no iframe in this fixture -> no extractable widget"
+    assert captcha_solver.identify_unsupported_vendor(DATADOME_WALL_HTML) == "datadome"
+    result = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url="https://www.g2.com/categories/crm",
+        html=DATADOME_WALL_HTML, count_product_links=gp.count_result_cards,
+        extra_markers=gp.BOT_CHALLENGE_MARKERS,
+    )
+    assert result["action"] == "unsupported_vendor", result
+    assert result["vendor"] == "datadome", result
+    # DATADOME_SLIDER DOES exist now (see the dedicated checks below) — the
+    # old assumption that no CaptchaType could ever name it was the bug.
+    assert any(t == captcha_solver.CaptchaType.DATADOME_SLIDER for t in captcha_solver.CaptchaType)
+
+
+@check("a DataDome page WITH a real slider iframe is identified as CaptchaType.DATADOME_SLIDER, with the iframe src carried through as captcha_url (HTML-entity-decoded)")
+def _():
+    signal = captcha_solver.identify_widget(DATADOME_SLIDER_WALL_HTML)
+    assert signal is not None, "must find the slider iframe"
+    assert signal.captcha_type == captcha_solver.CaptchaType.DATADOME_SLIDER
+    assert signal.captcha_url.startswith("https://geo.captcha-delivery.com/captcha/?"), signal.captcha_url
+    assert "&amp;" not in signal.captcha_url, "must be HTML-entity-decoded, not raw markup"
+    assert "&" in signal.captcha_url
+
+
+@check("a DataDome page with the OTHER confirmed shape — /interstitial/, not /captcha/ — is ALSO identified as CaptchaType.DATADOME_SLIDER (added 2026-09-22 after this exact shape was missed on a real g2.com run and silently reported unsupported_vendor instead of attempted)")
+def _():
+    signal = captcha_solver.identify_widget(DATADOME_INTERSTITIAL_WALL_HTML)
+    assert signal is not None, "must find the /interstitial/ iframe too, not just /captcha/"
+    assert signal.captcha_type == captcha_solver.CaptchaType.DATADOME_SLIDER
+    assert signal.captcha_url.startswith("https://geo.captcha-delivery.com/interstitial/?"), signal.captcha_url
+    assert "&amp;" not in signal.captcha_url
+    # The real regression this guards against: solve_when_blocked() checks
+    # identify_widget() FIRST and only falls back to
+    # identify_unsupported_vendor() when that returns None (see this
+    # module's own comment above _UNSUPPORTED_VENDOR_MARKERS) — so what
+    # actually matters is solve_when_blocked()'s own routing, not whether
+    # identify_unsupported_vendor() (a standalone marker search that still
+    # matches "datadome" regardless) would also match this page.
+    result = captcha_solver.solve_when_blocked(
+        client=None, page_url="https://www.g2.com/categories/crm",
+        html=DATADOME_INTERSTITIAL_WALL_HTML, count_product_links=gp.count_result_cards,
+        extra_markers=gp.BOT_CHALLENGE_MARKERS,
+        # proxy=None, client=None — same as the existing "NO proxy" check
+        # above: DATADOME_SLIDER's proxy-required guard in _task_payload()
+        # raises before `client` is ever touched, so this still proves the
+        # routing without needing a real/fake client.
+    )
+    assert result["action"] == "warning_no_proxy", (
+        "must route through the DATADOME_SLIDER solve path (which then "
+        f"complains about the missing proxy), not 'unsupported_vendor': {result}"
+    )
+
+
+@check("the REAL scrubbed g2.com capture (tests/fixtures/g2_datadome_interstitial.html — the first live --cdp-endpoint run, 2026-09-22) is identified as CaptchaType.DATADOME_SLIDER, not reported as unsupported_vendor")
+def _():
+    fixture_path = Path(__file__).parent / "tests" / "fixtures" / "g2_datadome_interstitial.html"
+    real_html = fixture_path.read_text(encoding="utf-8")
+    assert "geo.captcha-delivery.com/interstitial/" in real_html, "fixture must still contain the real iframe shape"
+    assert 'title="DataDome Device Check"' in real_html
+    signal = captcha_solver.identify_widget(real_html)
+    assert signal is not None, "the real capture must be recognized as a solvable DataDome challenge"
+    assert signal.captcha_type == captcha_solver.CaptchaType.DATADOME_SLIDER
+    assert signal.captcha_url.startswith("https://geo.captcha-delivery.com/interstitial/?"), signal.captcha_url
+    # Confirms the scrub didn't accidentally leave a real single-use token behind.
+    for leaked_prefix in ("AHrlqAAAAAMAzHjDxiNG", "229542D5C186C7F5A5BB", "pg9Z1U1y5BqoS3mpc38t"):
+        assert leaked_prefix not in real_html, f"scrubbed fixture still contains a real token: {leaked_prefix}"
+
+
+@check("a SECOND real scrubbed g2.com capture (tests/fixtures/g2_datadome_captcha_banned_ip.html — the first real PROXY-mode run, 2026-09-22) confirms the /captcha/ path is ALSO real, not just 2Captcha's own documented shape — and carries a real t=bv (banned-IP) marker this repo had never seen before")
+def _():
+    fixture_path = Path(__file__).parent / "tests" / "fixtures" / "g2_datadome_captcha_banned_ip.html"
+    real_html = fixture_path.read_text(encoding="utf-8")
+    assert "geo.captcha-delivery.com/captcha/" in real_html, "fixture must still contain the real /captcha/ iframe shape"
+    assert 'title="DataDome CAPTCHA"' in real_html
+    assert "t=bv" in real_html, "fixture must still carry the real banned-IP marker that triggered the 2Captcha rejection"
+    signal = captcha_solver.identify_widget(real_html)
+    assert signal is not None
+    assert signal.captcha_type == captcha_solver.CaptchaType.DATADOME_SLIDER
+    assert signal.captcha_url.startswith("https://geo.captcha-delivery.com/captcha/?"), signal.captcha_url
+    for leaked_prefix in ("AHrlqAAAAAMAIb9c2R7M", "229542D5C186C7F5A5BB", "0JtQjAIQwoWdsfsQT057", "e4f173767bec32fc76ef"):
+        assert leaked_prefix not in real_html, f"scrubbed fixture still contains a real token: {leaked_prefix}"
+
+
+@check("solve_when_blocked() reports action='warning_proxy_banned' — not the generic 'warning_solver_error' — when 2Captcha rejects a DataDomeSliderTask because the challenge's own t= marker says the proxy's IP is already banned (a REAL 2Captcha response, confirmed live 2026-09-22: 'ERROR_BAD_PARAMETERS ... your IP address is banned')")
+def _():
+    class _BannedIPClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        api_key = "fake"
+        def solve_and_wait(self, task):
+            raise scraper_api_client.TwoCaptchaError(
+                'createTask failed: ERROR_BAD_PARAMETERS Your captcha_url value contains "t=bv", '
+                "that means your IP address is banned."
+            )
+
+    result = captcha_solver.solve_when_blocked(
+        client=_BannedIPClient(), page_url="https://www.g2.com/categories/crm",
+        html=DATADOME_SLIDER_WALL_HTML, count_product_links=gp.count_result_cards,
+        extra_markers=gp.BOT_CHALLENGE_MARKERS,
+        proxy={"type": "http", "address": "eu.proxy.2captcha.com", "port": 2334, "login": "l", "password": "p"},
+        user_agent="Mozilla/5.0",
+    )
+    assert result["action"] == "warning_proxy_banned", result
+    assert "banned" in result["detail"].lower()
+
+
+@check("solve_when_blocked() for a DataDome slider challenge with NO proxy supplied returns 'warning_no_proxy' — never a crash, never a silently-skipped solve — because DataDomeSliderTask has no proxyless variant")
+def _():
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        api_key = "fake"
+        def solve_and_wait(self, task):  # pragma: no cover - must not be reached
+            raise AssertionError("must not call 2Captcha without a proxy for DataDomeSliderTask")
+
+    result = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url="https://www.g2.com/categories/crm",
+        html=DATADOME_SLIDER_WALL_HTML, count_product_links=gp.count_result_cards,
+        extra_markers=gp.BOT_CHALLENGE_MARKERS,
+        # proxy=None, user_agent=None — the point of this check
+    )
+    assert result["action"] == "warning_no_proxy", result
+    assert "proxy" in result["detail"].lower()
+
+
+@check("solve_when_blocked() for a DataDome slider challenge WITH proxy+user_agent builds a real DataDomeSliderTask (proxyType/proxyAddress/proxyPort/captchaUrl/userAgent) and reports action='solved'; parse_datadome_cookie() turns the cookie-shaped solution into a driver-ready dict")
+def _():
+    seen_tasks = []
+
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        api_key = "fake"
+        def solve_and_wait(self, task):
+            seen_tasks.append(task)
+            return json.dumps({"cookie": "datadome=SOLVEDVALUE123; Path=/; Secure; SameSite=Lax"})
+
+    result = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url="https://www.g2.com/categories/crm",
+        html=DATADOME_SLIDER_WALL_HTML, count_product_links=gp.count_result_cards,
+        extra_markers=gp.BOT_CHALLENGE_MARKERS,
+        proxy={"type": "http", "address": "203.0.113.9", "port": 8000, "login": "u", "password": "p"},
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) fake-smoke-test-ua",
+    )
+    assert result["action"] == "solved", result
+    assert result["captcha_type"] == "datadome_slider"
+    assert len(seen_tasks) == 1
+    task = seen_tasks[0]
+    assert task["type"] == "DataDomeSliderTask"
+    assert task["proxyType"] == "http" and task["proxyAddress"] == "203.0.113.9" and task["proxyPort"] == 8000
+    assert task["proxyLogin"] == "u" and task["proxyPassword"] == "p"
+    assert task["captchaUrl"].startswith("https://geo.captcha-delivery.com/captcha/?")
+    assert task["userAgent"] == "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) fake-smoke-test-ua"
+
+    cookie = captcha_solver.parse_datadome_cookie(result["token"])
+    assert cookie == {
+        "name": "datadome", "value": "SOLVEDVALUE123",
+        "path": "/", "secure": True, "same_site": "Lax",
+    }, cookie
+
+
+@check("_task_payload() refuses a DataDome slider task with no user_agent even when a proxy IS supplied — the second required-input guard, not just the proxy one")
+def _():
+    signal = captcha_solver.identify_widget(DATADOME_SLIDER_WALL_HTML)
+    try:
+        captcha_solver._task_payload(
+            signal, "https://www.g2.com/categories/crm", proxyless=False,
+            proxy={"type": "http", "address": "203.0.113.9", "port": 8000},
+            user_agent=None,
+        )
+        raise AssertionError("must raise without user_agent")
+    except captcha_solver.TwoCaptchaError as exc:
+        assert "user_agent" in str(exc)
+
+
+@check("parse_datadome_cookie() raises TwoCaptchaError (never a bare exception) on a malformed solution — the same 'solver error is a warning' contract every other branch of this module honors")
+def _():
+    for bad in ("not json at all", json.dumps({"no_cookie_key": "x"}), json.dumps("a string, not a dict")):
+        try:
+            captcha_solver.parse_datadome_cookie(bad)
+            raise AssertionError(f"must raise for {bad!r}")
+        except captcha_solver.TwoCaptchaError:
+            pass
+
+
+@check("a HEALTHY g2.com listing page — which also carries DataDome's tag, because every g2.com page does — is NOT treated as blocked: solve_when_blocked sees the rendered cards and skips solving entirely")
+def _():
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        api_key = "fake"
+
+    html = listing_html(cards=3)
+    assert captcha_solver.detect_from_html(html, gp.BOT_CHALLENGE_MARKERS), "fixture must trip the marker check"
+    result = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url="https://www.g2.com/categories/crm", html=html,
+        count_product_links=gp.count_result_cards, extra_markers=gp.BOT_CHALLENGE_MARKERS,
+    )
+    assert result["action"] == "skipped_products_present", result
+
+
+@check("captcha_solver.identify_widget still extracts a Turnstile sitekey (the family-shared solvable path is intact, even though g2.com's own confirmed defense isn't solvable)")
+def _():
+    html = '<div class="cf-turnstile" data-sitekey="0x4AAAAAAABkMYin"></div>'
+    signal = captcha_solver.identify_widget(html)
+    assert signal is not None and signal.captcha_type == captcha_solver.CaptchaType.CLOUDFLARE_TURNSTILE
+    assert signal.sitekey == "0x4AAAAAAABkMYin"
+
+
+@check("captcha_solver.build_injection_script builds real JS per widget type, and returns None for reCAPTCHA v3 (no generic injection point exists) rather than JS that would silently do nothing")
+def _():
+    script = captcha_solver.build_injection_script(captcha_solver.CaptchaType.CLOUDFLARE_TURNSTILE, "tok123")
+    assert script and "cf-turnstile-response" in script and "tok123" in script
+    script = captcha_solver.build_injection_script(captcha_solver.CaptchaType.RECAPTCHA_V2, "tok123")
+    assert script and "g-recaptcha-response" in script
+    assert captcha_solver.build_injection_script(captcha_solver.CaptchaType.RECAPTCHA_V3, "tok123") is None
+
+
+@check("all three engines actually call build_injection_script from their 'solved' branch — a solved (paid-for) token that is never written back into the page would be money spent for nothing")
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "build_injection_script" in src, f"{path} no longer imports/calls build_injection_script"
+        assert 'CaptchaType(result["captcha_type"])' in src, f"{path} doesn't build a CaptchaType from the solved result"
+
+
+# --------------------------------------------------------------------------- #
+# The two AST-level regression checks this family added on 2026-09-22 —
+# both for bugs that really shipped, in a sibling repo, and both written
+# here so they cannot quietly reappear in g2-scraper's own three engines.
+# --------------------------------------------------------------------------- #
+@check(
+    "BUG CLASS 1 (g2_parser.py's module docstring): EVERY function that takes an 'autosolve' "
+    "parameter actually calls the Captcha.setAutoSolve helper somewhere in its body — "
+    "playwright/puppeteer only, selenium is exempt because it cannot authenticate a "
+    "--cdp-endpoint at all and therefore has no such helper. shein-scraper shipped "
+    "a puppeteer scrape_product_page() that ACCEPTED `autosolve` and never armed anything, so a "
+    "direct --url <product page> --cdp-endpoint run silently got no auto-solve and no warning. "
+    "This repo has THREE page-loading functions per engine (category, product, pricing) and this "
+    "check walks the AST of every one of them."
+)
+def _():
+    import ast as _ast
+
+    HELPER_NAME = "_enable_scraping_browser_auto_solve"
+    for path in ("playwright_scraper.py", "puppeteer_scraper.py"):
+        src = (ROOT / path).read_text(encoding="utf-8")
+        tree = _ast.parse(src, filename=path)
+        checked = []
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            arg_names = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+            if "autosolve" not in arg_names:
+                continue
+            checked.append(node.name)
+            calls_helper = any(
+                isinstance(n, _ast.Call)
+                and (
+                    (isinstance(n.func, _ast.Name) and n.func.id == HELPER_NAME)
+                    or (isinstance(n.func, _ast.Attribute) and n.func.attr == HELPER_NAME)
+                )
+                for n in _ast.walk(node)
+            )
+            # A function that only FORWARDS autosolve to another function
+            # which does arm it is equally fine — that is still full
+            # coverage of the page it loads, just one hop away.
+            forwards_autosolve = any(
+                isinstance(n, _ast.Call)
+                and any(kw.arg == "autosolve" for kw in n.keywords)
+                for n in _ast.walk(node)
+            )
+            assert calls_helper or forwards_autosolve, (
+                f"{path}: {node.name}() takes an 'autosolve' parameter but neither calls "
+                f"{HELPER_NAME}() nor forwards autosolve to something that does — captcha "
+                f"auto-solve would silently never be armed on this page/navigation path when "
+                f"--cdp-endpoint + --solve-captcha are set."
+            )
+        # All three of this repo's real page shapes must be represented.
+        for required in ("scrape_category", "scrape_product_page", "scrape_pricing_page"):
+            assert required in checked, (
+                f"{path}: {required}() does not take an 'autosolve' parameter — every function "
+                f"that loads a real page must be able to arm auto-solve (there are three page "
+                f"shapes on g2.com, and all three get it)."
+            )
+
+
+@check(
+    "BUG CLASS 2 (g2_parser.py's module docstring): EVERY call to an engine's _maybe_solve_captcha() "
+    "passes count_product_links as an explicit keyword argument, shaped for the page THAT call site "
+    "is looking at. captcha_solver.solve_when_blocked() and each engine's wrapper both make it a "
+    "required keyword-only argument with no default, so a missing one is already a plain TypeError "
+    "at runtime — this AST check catches it at review/CI time, before any engine has to run, and "
+    "additionally asserts the counter matches the page shape rather than merely being present."
+)
+def _():
+    import ast as _ast
+
+    HELPER_NAME = "_maybe_solve_captcha"
+    EXPECTED_COUNTER = {
+        "scrape_category": "count_result_cards",
+        "scrape_product_page": "count_product_page_data",
+        "scrape_pricing_page": "count_pricing_tiers",
+    }
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        tree = _ast.parse(src, filename=path)
+        seen_functions = set()
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            if node.name not in EXPECTED_COUNTER:
+                continue
+            seen_functions.add(node.name)
+            calls = [
+                n for n in _ast.walk(node)
+                if isinstance(n, _ast.Call)
+                and (
+                    (isinstance(n.func, _ast.Name) and n.func.id == HELPER_NAME)
+                    or (isinstance(n.func, _ast.Attribute) and n.func.attr == HELPER_NAME)
+                )
+            ]
+            assert calls, (
+                f"{path}: {node.name}() never calls {HELPER_NAME}() — a captcha on this page shape "
+                f"would never even be looked at"
+            )
+            for call in calls:
+                kwargs = {kw.arg: kw for kw in call.keywords}
+                assert "count_product_links" in kwargs, (
+                    f"{path}: {node.name}()'s call to {HELPER_NAME}() does not pass "
+                    f"count_product_links explicitly"
+                )
+                value = kwargs["count_product_links"].value
+                rendered = _ast.dump(value)
+                expected = EXPECTED_COUNTER[node.name]
+                assert expected in rendered, (
+                    f"{path}: {node.name}() passes the WRONG page-shaped counter to {HELPER_NAME}() "
+                    f"— expected {expected}, got {rendered}. A listing-shaped counter on a detail "
+                    f"page reads 0 on every normal load (bug class 2)."
+                )
+        for required in EXPECTED_COUNTER:
+            assert required in seen_functions, f"{path}: no {required}() found (this test may be stale)"
+
+
+@check(
+    "BEHAVIORAL proof of the same bug class, on real g2.com page shapes: a COMPLETELY NORMAL "
+    "product /reviews page carries DataDome's tag (every g2.com page does) and has zero listing "
+    "cards by construction. Checked with the LISTING-shaped counter it reads as '0 products, "
+    "possibly blocked' and reports a DataDome block on a page that was never blocked; checked with "
+    "the DETAIL-shaped counter it is correctly recognised as fine and no solve is attempted. Same "
+    "for the pricing page with its own counter."
+)
+def _():
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        api_key = "fake"
+
+    url = "https://www.g2.com/products/hubspot-sales-hub/reviews"
+    html = product_html()
+    assert captcha_solver.detect_from_html(html, gp.BOT_CHALLENGE_MARKERS), "fixture must trip the marker check"
+    assert gp.count_result_cards(html) == 0, "a product page has zero listing cards, by definition"
+    assert gp.count_product_page_data(html) == 1, "fixture must parse as a real product page"
+
+    wrong_shape = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url=url, html=html,
+        count_product_links=gp.count_result_cards, extra_markers=gp.BOT_CHALLENGE_MARKERS,
+    )
+    right_shape = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url=url, html=html,
+        count_product_links=gp.count_product_page_data, extra_markers=gp.BOT_CHALLENGE_MARKERS,
+    )
+    assert wrong_shape["action"] != "skipped_products_present", (
+        "this assertion documents the OLD bug shape, not a requirement — if it starts failing it "
+        "means count_result_cards began recognising product pages, which would make the fix moot, "
+        "not broken"
+    )
+    assert wrong_shape["action"] == "unsupported_vendor", wrong_shape
+    assert right_shape["action"] == "skipped_products_present", right_shape
+
+    pricing_url = "https://www.g2.com/products/hubspot-sales-hub/pricing"
+    pricing_with_dd = PRICING_HTML.replace("<body>", "<body><script>window.DataDomeJsTag={};</script>")
+    assert gp.count_pricing_tiers(pricing_with_dd) == 4
+    assert gp.count_result_cards(pricing_with_dd) == 0
+    pricing_right = captcha_solver.solve_when_blocked(
+        client=_FakeClient(), page_url=pricing_url, html=pricing_with_dd,
+        count_product_links=gp.count_pricing_tiers, extra_markers=gp.BOT_CHALLENGE_MARKERS,
+    )
+    assert pricing_right["action"] == "skipped_products_present", pricing_right
+
+
+@check("each engine's own _maybe_solve_captcha() wrapper makes count_product_links a REQUIRED keyword-only argument with no default — the same choice captcha_solver.solve_when_blocked() made, so no call site can quietly inherit a counter that is wrong for its page")
+def _():
+    import ast as _ast
+
+    for path in ENGINE_FILES:
+        tree = _ast.parse((ROOT / path).read_text(encoding="utf-8"), filename=path)
+        found = False
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name == "_maybe_solve_captcha":
+                found = True
+                kwonly = [a.arg for a in node.args.kwonlyargs]
+                assert "count_product_links" in kwonly, f"{path}: not keyword-only"
+                idx = kwonly.index("count_product_links")
+                assert node.args.kw_defaults[idx] is None, (
+                    f"{path}: count_product_links has a default — a call site could inherit the "
+                    f"wrong page shape silently, which is exactly bug class 2"
+                )
+        assert found, f"{path}: no _maybe_solve_captcha() found (this test may be stale)"
+    # And the shared module it wraps keeps the same contract.
+    import inspect
+    sig = inspect.signature(captcha_solver.solve_when_blocked)
+    param = sig.parameters["count_product_links"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+
+@check(
+    "DataDome fix (2026-09-22): every _maybe_solve_captcha() call site in all three engines "
+    "passes proxy=/user_agent= — required for captcha_solver.CaptchaType.DATADOME_SLIDER's "
+    "DataDomeSliderTask to ever succeed (it has no proxyless path, unlike every other type). "
+    "Also confirms each engine's own _maybe_solve_captcha() wrapper actually accepts both params "
+    "and forwards them into solve_when_blocked() rather than swallowing them."
+)
+def _():
+    import ast as _ast
+
+    CALL_SITE_FUNCTIONS = ("scrape_category", "scrape_product_page", "scrape_pricing_page")
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        tree = _ast.parse(src, filename=path)
+
+        wrapper_accepts_both = False
+        wrapper_forwards_both = False
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name == "_maybe_solve_captcha":
+                arg_names = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+                wrapper_accepts_both = "proxy" in arg_names and "user_agent" in arg_names
+                for n in _ast.walk(node):
+                    if (
+                        isinstance(n, _ast.Call)
+                        and (
+                            (isinstance(n.func, _ast.Name) and n.func.id == "solve_when_blocked")
+                            or (isinstance(n.func, _ast.Attribute) and n.func.attr == "solve_when_blocked")
+                        )
+                    ):
+                        fwd_kwargs = {kw.arg for kw in n.keywords}
+                        wrapper_forwards_both = "proxy" in fwd_kwargs and "user_agent" in fwd_kwargs
+        assert wrapper_accepts_both, f"{path}: _maybe_solve_captcha() doesn't accept proxy=/user_agent="
+        assert wrapper_forwards_both, (
+            f"{path}: _maybe_solve_captcha() doesn't forward proxy=/user_agent= into "
+            f"solve_when_blocked() — DataDomeSliderTask would always fail with warning_no_proxy "
+            f"even when a --proxy was configured for the run"
+        )
+
+        seen = set()
+        for node in _ast.walk(tree):
+            if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                continue
+            if node.name not in CALL_SITE_FUNCTIONS:
+                continue
+            calls = [
+                n for n in _ast.walk(node)
+                if isinstance(n, _ast.Call)
+                and (
+                    (isinstance(n.func, _ast.Name) and n.func.id == "_maybe_solve_captcha")
+                    or (isinstance(n.func, _ast.Attribute) and n.func.attr == "_maybe_solve_captcha")
+                )
+            ]
+            for call in calls:
+                seen.add(node.name)
+                kwargs = {kw.arg for kw in call.keywords}
+                assert "proxy" in kwargs and "user_agent" in kwargs, (
+                    f"{path}: {node.name}()'s call to _maybe_solve_captcha() is missing "
+                    f"proxy=/user_agent= — {sorted(kwargs)}"
+                )
+        assert seen == set(CALL_SITE_FUNCTIONS), (
+            f"{path}: expected all of {CALL_SITE_FUNCTIONS} to call _maybe_solve_captcha() with "
+            f"a captcha check present, only found calls in {sorted(seen)} (this test may be stale)"
+        )
+
+
+@check(
+    "DataDome fix (2026-09-22): every engine has a code path that calls "
+    "captcha_solver.parse_datadome_cookie() and applies the result via ITS OWN driver's native "
+    "cookie API when a DataDome slider challenge is solved (build_injection_script() returns None "
+    "for this type on purpose — a solve that's never applied is the exact 'documented feature "
+    "doesn't work' anti-pattern this family has shipped before)."
+)
+def _():
+    src = {path: (ROOT / path).read_text(encoding="utf-8") for path in ENGINE_FILES}
+
+    for path, text in src.items():
+        assert "parse_datadome_cookie" in text, f"{path}: never imports/calls parse_datadome_cookie()"
+        assert "DATADOME_SLIDER" in text, f"{path}: has no DATADOME_SLIDER-specific branch at all"
+
+    # Each engine's own native cookie call, not a generic string check —
+    # the point is that the RIGHT api for THAT driver is used.
+    assert "context.add_cookies(" in src["playwright_scraper.py"], (
+        "playwright_scraper.py: no context.add_cookies(...) call — Playwright's own native cookie API"
+    )
+    assert "driver.add_cookie(" in src["selenium_scraper.py"], (
+        "selenium_scraper.py: no driver.add_cookie(...) call — Selenium's own native cookie API"
+    )
+    assert "page.setCookie(" in src["puppeteer_scraper.py"], (
+        "puppeteer_scraper.py: no page.setCookie(...) call — pyppeteer's own native cookie API"
+    )
+    # And each reloads/refreshes afterward — a cookie sitting in the jar
+    # with nothing re-requesting the page is a solve that does nothing.
+    assert "page.reload(" in src["playwright_scraper.py"]
+    assert "driver.refresh()" in src["selenium_scraper.py"]
+    assert "page.reload(" in src["puppeteer_scraper.py"]
+
+
+# --------------------------------------------------------------------------- #
+# env_config — G2_* keys, placeholder detection, precedence
+# --------------------------------------------------------------------------- #
+@check("env_config.ENV_KEYS matches .env.example exactly, in both directions")
+def _():
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    import re as _re
+    # Active `KEY=` lines plus commented-out `# KEY=value` examples (G2_URL
+    # ships commented so a copied .env cannot override a typed --category).
+    documented = {m.group(1) for m in (_re.match(r"^(?:# )?([A-Z][A-Z0-9_]*)=", line) for line in example.splitlines()) if m}
+    assert documented == set(env_config.ENV_KEYS), (documented, set(env_config.ENV_KEYS))
+
+
+@check("env_config uses G2_ prefixed keys, not a leftover SHEIN_/LIDL_/other-site name from the repo this was ported from")
+def _():
+    for key in env_config.ENV_KEYS:
+        assert key == "TWOCAPTCHA_KEY" or key.startswith("G2_"), f"unexpected env key {key!r}"
+    assert set(env_config.ENV_KEYS) == {"TWOCAPTCHA_KEY", "G2_PROXY", "G2_CDP_ENDPOINT", "G2_URL"}
+
+
+@check("env_config has exactly ONE _is_placeholder implementation and it treats a braced {...} fragment as unset (a named defect class: two independent checks for the same thing WILL drift apart)")
+def _():
+    assert env_config._is_placeholder("")
+    assert env_config._is_placeholder(None)
+    assert env_config._is_placeholder("ws://{login}-zone-scraping_browser:{password}@cb.2captcha.com:9222")
+    assert not env_config._is_placeholder("a-real-looking-value-123")
+
+
+@check("env_config.apply_env never overrides an explicitly-set CLI flag, and every engine's argparse destinations line up with ENV_KEYS' targets")
+def _():
+    import argparse
+    import os as _os
+
+    ns = argparse.Namespace(proxy="http://explicit:pass@host:1")
+    _os.environ["G2_PROXY"] = "http://from-env:pass@host:2"
+    try:
+        env_config.apply_env(ns, dotenv_path="/nonexistent/.env")
+        assert ns.proxy == "http://explicit:pass@host:1"
+    finally:
+        del _os.environ["G2_PROXY"]
+
+    for mod in ENGINE_MODULES:
+        args = _parse(mod, ["--category", "crm"])
+        for dest in env_config.ENV_KEYS.values():
+            assert hasattr(args, dest), f"{mod.__name__}: no --{dest.replace('_', '-')} for an ENV_KEYS target"
+
+
+@check(".env.example round-trips through the real loader with every credential reading as unset — a copied example must never be treated as a real credential")
+def _():
+    import argparse
+    ns = argparse.Namespace(**{dest: None for dest in env_config.ENV_KEYS.values()})
+    env_config.apply_env(ns, dotenv_path=str(ROOT / ".env.example"))
+    for dest in env_config.ENV_KEYS.values():
+        assert getattr(ns, dest) is None, (
+            f"a pasted .env.example value was accepted as a real credential for {dest!r}: "
+            f"{getattr(ns, dest)!r}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# g2_parser — URL shapes, robots.txt, the three page parsers, the two scales
+# --------------------------------------------------------------------------- #
+@check("URL builders produce the confirmed-real g2.com shapes (a product's canonical URL ALWAYS ends in /reviews; page=1 is emitted as the bare URL)")
+def _():
+    assert gp.category_url("crm") == "https://www.g2.com/categories/crm"
+    assert gp.category_url("crm", 1) == "https://www.g2.com/categories/crm"
+    assert gp.category_url("crm", 4) == "https://www.g2.com/categories/crm?page=4"
+    assert gp.product_url("hubspot-sales-hub") == "https://www.g2.com/products/hubspot-sales-hub/reviews"
+    assert gp.pricing_url("hubspot-sales-hub") == "https://www.g2.com/products/hubspot-sales-hub/pricing"
+    assert gp.grids_json_url("crm") == "https://www.g2.com/categories/crm/grids.json"
+
+
+@check("slug extraction round-trips for both product and category URLs (the engines rebuild every ?page=N URL from the slug rather than string-editing the caller's --url)")
+def _():
+    assert gp.slug_from_product_url("https://www.g2.com/products/hubspot-sales-hub/reviews") == "hubspot-sales-hub"
+    assert gp.category_slug_from_url("https://www.g2.com/categories/crm?page=3") == "crm"
+    assert gp.category_slug_from_url("https://www.g2.com/categories/crm/grids.json") is None
+    assert gp.category_slug_from_url("https://www.g2.com/products/x/reviews") is None
+
+
+@check(
+    "BUG found live-testing 2026-09-22, now fixed: page_number_from_url() recovers the `?page=N` "
+    "a caller's --url carried, the missing counterpart to category_slug_from_url() that every "
+    "engine's scrape_category() rebuilds its pagination from. Before this, this module's OWN "
+    "docstring example one function up (`--url '.../categories/crm?page=2'`) silently started "
+    "over at page 1 instead of picking up at page 2."
+)
+def _():
+    assert gp.page_number_from_url("https://www.g2.com/categories/crm?page=3") == 3
+    assert gp.page_number_from_url("https://www.g2.com/categories/crm") == 1
+    assert gp.page_number_from_url(None) == 1
+    # Garbage/non-positive page values degrade to "start over", not a crash.
+    assert gp.page_number_from_url("https://www.g2.com/categories/crm?page=abc") == 1
+    assert gp.page_number_from_url("https://www.g2.com/categories/crm?page=0") == 1
+    assert gp.page_number_from_url("https://www.g2.com/categories/crm?page=-5") == 1
+
+
+@check(
+    "all three engines' scrape_category() actually START their pagination loop at "
+    "gp.page_number_from_url(start_url), not a hardcoded 1 — the structural half of the check "
+    "above, since scrape_category() needs a real browser to exercise behaviourally offline"
+)
+def _():
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "start_page = gp.page_number_from_url(start_url) if slug else 1" in src, (
+            f"{path}: scrape_category() must derive its starting page from the caller's --url, "
+            f"not assume page 1"
+        )
+        assert "for page_num in range(start_page, start_page + args.max_pages):" in src, (
+            f"{path}: pagination loop must start at start_page, not a hardcoded 1"
+        )
+        # The two `page_num == 1` special cases ("this is the first request
+        # of the run") must have moved to `page_num == start_page` too — a
+        # stray literal `1` here would silently misfire the "first page
+        # failed" / "first page had zero products" branches whenever
+        # start_page != 1.
+        assert "page_num == 1" not in src, (
+            f"{path}: a literal 'page_num == 1' survived the start_page fix — "
+            f"should be 'page_num == start_page'"
+        )
+
+
+@check("make_sku prefers the URL SLUG (the one identifier present on BOTH a listing card and that product's own detail page) and falls back to a DETERMINISTIC fingerprint, never a random value — diff_runs.py must see the same sku for the same product across two runs")
+def _():
+    assert gp.make_sku("hubspot-sales-hub", "https://www.g2.com/products/hubspot-sales-hub/reviews") == "hubspot-sales-hub"
+    a = gp.make_sku(None, "https://www.g2.com/products/x/reviews")
+    b = gp.make_sku(None, "https://www.g2.com/products/x/reviews")
+    assert a == b and a.startswith("fp_")
+
+
+@check("is_disallowed_path honours the STRICTER ClaudeBot rule set by default: /products/{slug}/reviews (this scraper's target) is ALLOWED, /products/{slug}/reviews/<anything> is DISALLOWED — and ai_crawler_rules=False makes the difference auditable rather than baked in")
+def _():
+    allowed = "/products/hubspot-sales-hub/reviews"
+    sub = "/products/hubspot-sales-hub/reviews/2"
+    assert gp.is_disallowed_path(allowed) is False
+    assert gp.is_disallowed_path(sub) is True
+    assert gp.is_disallowed_path(sub + "?filters=x") is True
+    assert gp.is_disallowed_path("/products/hubspot-sales-hub/reviews/") is True
+    # Full URLs, not just bare paths.
+    assert gp.is_disallowed_path("https://www.g2.com" + sub) is True
+    assert gp.is_disallowed_path("https://www.g2.com" + allowed) is False
+    # The general User-agent:* group alone does NOT carry this rule — that
+    # is exactly the difference the AI-crawler group adds, and the reason
+    # this repo opts into the stricter set by default.
+    assert gp.is_disallowed_path(sub, ai_crawler_rules=False) is False
+    assert gp.is_disallowed_path("/categories/crm") is False
+    assert gp.is_disallowed_path("") is False
+
+
+@check("is_known_scrape_target allowlists exactly the four URL shapes this repo can parse, and never accepts a /reviews/ form that is_disallowed_path would then refuse (two guards must not disagree about the same URL)")
+def _():
+    assert gp.is_known_scrape_target("https://www.g2.com/categories/crm")
+    assert gp.is_known_scrape_target("https://www.g2.com/categories/crm?page=9")
+    assert gp.is_known_scrape_target("https://www.g2.com/categories/crm/grids.json")
+    assert gp.is_known_scrape_target("https://www.g2.com/products/hubspot-sales-hub/reviews")
+    assert gp.is_known_scrape_target("https://www.g2.com/products/hubspot-sales-hub/pricing")
+    assert not gp.is_known_scrape_target("https://www.g2.com/products/hubspot-sales-hub/reviews/")
+    assert not gp.is_known_scrape_target("https://www.g2.com/sponsored/x")
+    assert not gp.is_known_scrape_target("")
+
+
+@check("parse_category_listing reads the confirmed-real card shape: the data-event-options JSON blob (product/product_id/vendor_id/category/product_type), the .elv-star-wrapper 0-5 rating, the isolated review count, the image, and a canonical /reviews product URL")
+def _():
+    html = listing_html(cards=3)
+    products = gp.parse_category_listing(html, "crm", "https://www.g2.com/categories/crm")
+    assert len(products) == 3, len(products)
+    p = products[0]
+    assert p.sku == "product-1" and p.product_slug == "product-1"
+    assert p.source == "g2.com"
+    assert p.title == "Product 1"
+    assert p.category == "CRM", "G2's own display name from the card JSON beats the slug"
+    assert p.product_url == "https://www.g2.com/products/product-1/reviews"
+    assert p.image_url and p.image_url.startswith("https://images.g2crowd.com/")
+    assert p.rating_5 == 4.4
+    assert p.rating_10 is None, "the 0-10 composite score exists only on a product page"
+    assert p.review_count == 27555 and p.review_count_source == "listing_card"
+    assert p.product_id == 501 and p.vendor_id == 469 and p.category_id == 179
+    assert p.product_type == "Software"
+    assert p.brand is None, "no vendor NAME is exposed on a listing card — only vendor_id"
+    assert p.price is None and p.currency is None and p.price_source is None, (
+        "g2.com carries no price on a listing card at all"
+    )
+
+
+@check("parse_category_listing falls back to the caller's category slug when the card JSON has none, and one malformed card costs only itself — never the other rows on the page")
+def _():
+    good = _card("ok-product", "OK Product", 777)
+    broken = (
+        '<div class="content-card category-product-card">'
+        "<a data-event-options='{not valid json' href=\"/products/broken/reviews\">Broken</a>"
+        "</div>"
+    )
+    linkless = '<div class="content-card category-product-card"><span>no link at all</span></div>'
+    html = f"<html><body>{good}{broken}{linkless}</body></html>"
+    products = gp.parse_category_listing(html, "crm", "https://www.g2.com/categories/crm")
+    skus = {p.sku for p in products}
+    assert "ok-product" in skus, "a healthy card must survive its broken siblings"
+    assert "broken" in skus, "a card with unparseable JSON still yields its URL-derived row"
+    broken_row = next(p for p in products if p.sku == "broken")
+    assert broken_row.category == "crm", "falls back to the slug the caller was iterating"
+    assert broken_row.product_id is None
+
+
+@check("safe listing parsing preserves parser failure state so engines cannot report it as an empty/complete page")
+def _():
+    import unittest.mock as mock
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("selector engine exploded")
+
+    with mock.patch.object(gp, "parse_category_listing", _boom):
+        result = gp.parse_category_listing_safely(listing_html(), "crm", "u")
+        assert result.failed is True and result.products == []
+        assert gp.safe_parse_category_listing(listing_html(), "crm", "u") == []
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "gp.parse_category_listing_safely(" in src
+        assert "gp.safe_parse_category_listing(" not in src
+
+
+@check("count_result_cards is the LISTING-shaped counter and never raises into a captcha decision")
+def _():
+    assert gp.count_result_cards(listing_html(cards=5)) == 5
+    assert gp.count_result_cards(product_html()) == 0
+    assert gp.count_result_cards(PRICING_HTML) == 0
+    assert gp.count_result_cards("") == 0
+    assert gp.count_result_cards("<html><body>not even close</body></html>") == 0
+
+
+@check("pagination markup is only a hint: engines probe reconstructed URLs and stop on data, never solely on a missing/disabled Next selector")
+def _():
+    assert gp.has_next_page(listing_html(next_disabled=False)) is True
+    assert gp.has_next_page(listing_html(next_disabled=True)) is False
+    assert gp.has_next_page("<html><body>no pagination here</body></html>") is False
+    assert gp.current_page_number(listing_html()) == 1
+    assert gp.current_page_number("<html><body>nothing</body></html>") is None
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        marker = "if not gp.has_next_page(html):"
+        start = src.index(marker)
+        block = src[start:start + 500]
+        assert "break" not in block, f"{path}: pagination still stops solely on the Next selector"
+
+
+@check("parse_product_page reads the SoftwareApplication JSON-LD (skipping the BreadcrumbList beside it) and puts G2's 0-10 composite score in rating_10 — NOT rating_5, and never both from one page")
+def _():
+    url = "https://www.g2.com/products/hubspot-sales-hub/reviews"
+    p = gp.parse_product_page(product_html(best_rating=10, rating_value=8.9), url)
+    assert p is not None
+    assert p.title == "HubSpot Sales Hub"
+    assert p.sku == "hubspot-sales-hub" and p.product_slug == "hubspot-sales-hub"
+    assert p.rating_10 == 8.9
+    assert p.rating_5 is None, "a 0-10 composite score must never land in the 0-5 column"
+    assert p.review_count == 14333 and p.review_count_source == "json_ld"
+    assert p.image_url and p.image_url.startswith("https://images.g2crowd.com/")
+    assert p.price is None and p.currency is None, "a product page carries no price on g2.com"
+
+
+@check("parse_product_page takes the rating SCALE from the page's own bestRating rather than assuming it: bestRating 5 fills rating_5 (and leaves rating_10 empty), and an unrecognised bestRating leaves BOTH empty rather than guessing which column a number belongs in")
+def _():
+    url = "https://www.g2.com/products/hubspot-sales-hub/reviews"
+    five = gp.parse_product_page(product_html(best_rating=5, rating_value=4.5), url)
+    assert five is not None
+    assert five.rating_5 == 4.5 and five.rating_10 is None
+
+    ten = gp.parse_product_page(product_html(best_rating=10, rating_value=8.9), url)
+    assert ten.rating_10 == 8.9 and ten.rating_5 is None
+    # Never both, from one page, in either direction.
+    for row in (five, ten):
+        assert not (row.rating_5 is not None and row.rating_10 is not None)
+
+    weird = gp.parse_product_page(product_html(best_rating=100, rating_value=87.0), url)
+    assert weird is not None
+    assert weird.rating_5 is None and weird.rating_10 is None, (
+        "an unknown scale must leave both columns empty, not land a number in the wrong one"
+    )
+
+
+@check("parse_product_page returns None (never raises) for a page with no usable SoftwareApplication block, and count_product_page_data is the matching DETAIL-shaped counter")
+def _():
+    url = "https://www.g2.com/products/x/reviews"
+    assert gp.parse_product_page("<html><body>nothing here</body></html>", url) is None
+    assert gp.parse_product_page(listing_html(), url) is None
+    empty_block = (
+        '<html><head><script type="application/ld+json">'
+        '{"@type":"SoftwareApplication"}</script></head><body></body></html>'
+    )
+    assert gp.parse_product_page(empty_block, url) is None, "an empty SoftwareApplication block is not a product"
+    assert gp.count_product_page_data(product_html()) == 1
+    assert gp.count_product_page_data(listing_html()) == 0
+    assert gp.count_product_page_data("") == 0
+
+
+@check("parse_pricing_page reads the confirmed-real tier line shape, skips the page's own summary sentence and footnote (both of which contain a $ amount), and count_pricing_tiers is the matching PRICING-shaped counter")
+def _():
+    tiers = gp.parse_pricing_page(PRICING_HTML, "https://www.g2.com/products/hubspot-sales-hub/pricing")
+    assert len(tiers) == 4, [t.tier_name for t in tiers]
+    names = [t.tier_name for t in tiers]
+    assert names == ["Free HubSpot CRM", "Sales Hub Starter", "Sales Hub Professional", "Sales Hub Enterprise"]
+    assert tiers[0].price == 0.0 and tiers[0].currency == "USD"
+    assert tiers[1].price == 20.0 and tiers[1].price_unit == "1 Core Seat Per Month"
+    assert tiers[1].raw_line == "Sales Hub Starter — $20 / 1 Core Seat Per Month"
+    assert all("pricing editions" not in (t.raw_line or "").lower() for t in tiers)
+    assert gp.count_pricing_tiers(PRICING_HTML) == 4
+
+
+@check("parse_pricing_page degrades to [] on non-matching HTML rather than raising — it is BEST-EFFORT text parsing (g2.com ships no pricing JSON-LD at all), and an empty list means 'no pricing could be read', never 'this product is free'")
+def _():
+    for html in ("", "<html><body>Contact us for pricing.</body></html>", listing_html(), product_html(),
+                 "<html><body><div>Some Tier — free</div></body></html>"):
+        result = gp.parse_pricing_page(html, "https://www.g2.com/products/x/pricing")
+        assert result == [], result
+        assert gp.count_pricing_tiers(html) == 0
+    # A price with no currency symbol is prose, not a tier.
+    assert gp.parse_pricing_page("<html><body><div>Starter — 20 per month</div></body></html>") == []
+
+
+@check("apply_pricing_tiers fills price/currency from the LOWEST priced tier and stamps price_source='pricing_page_text', distinct from the structured sources other family members use, so a consumer can tell a best-effort text-scraped price apart at a glance")
+def _():
+    product = _mk_product("hubspot-sales-hub")
+    assert product.price is None
+    tiers = gp.parse_pricing_page(PRICING_HTML)
+    returned = gp.apply_pricing_tiers(product, tiers)
+    assert returned is product, "documented as mutate-and-return"
+    assert product.price == 0.0 and product.currency == "USD"
+    assert product.price_source == "pricing_page_text"
+    # A no-op when nothing is priced — never a zero written over a real value.
+    untouched = _mk_product("other", price=42.0)
+    gp.apply_pricing_tiers(untouched, [])
+    assert untouched.price == 42.0
+
+
+@check("diagnose_unexpected_page tells a real listing, a product page and a DataDome wall apart without anyone having to grep a captured page by hand")
+def _():
+    listing = gp.diagnose_unexpected_page(listing_html(cards=3))
+    assert "category-cards=3" in listing and "datadome-tag=yes" in listing
+    product = gp.diagnose_unexpected_page(product_html(datadome=False))
+    assert "software-application-jsonld=yes" in product and "category-cards=0" in product
+    wall = gp.diagnose_unexpected_page(DATADOME_WALL_HTML)
+    assert "category-cards=0" in wall and "datadome-tag=yes" in wall
+    assert "diagnostic unavailable" not in gp.diagnose_unexpected_page("")
+
+
+@check("a full listing page round-trips through finish_run() as a clean 'complete' run, with the g2-specific columns intact in both JSON and CSV")
+def _():
+    products = gp.parse_category_listing(listing_html(cards=4), "crm", "https://www.g2.com/categories/crm")
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=products, out_path=out, fmt="json", engine="playwright",
+            url="https://www.g2.com/categories/crm", pages_requested=1, pages_completed=1,
+            failed_pages=None, blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_OK
+        rows = json.loads(Path(out).read_text())
+        assert len(rows) == 4
+        assert set(rows[0]) == set(output_writer.PRODUCT_FIELD_NAMES)
+        assert rows[0]["rating_5"] == 4.4 and rows[0]["rating_10"] is None
+        meta = json.loads(Path(f"{out}.meta.json").read_text())
+        assert meta["status"] == "complete" and meta["engine"] == "playwright"
+
+        out_csv = str(Path(td) / "out.csv")
+        output_writer.write_csv(products, out_csv)
+        header = Path(out_csv).read_text().splitlines()[0]
+        assert header.split(",") == output_writer.PRODUCT_FIELD_NAMES
+
+
+@check("the pricing-only row an engine builds for a `--url .../pricing` run is identical in all three engines, and is [] when no tier could be read (so the run reports 'empty' rather than writing a row with nothing in it)")
+def _():
+    url = "https://www.g2.com/products/hubspot-sales-hub/pricing"
+    tiers = gp.parse_pricing_page(PRICING_HTML, url)
+    rows = [mod._pricing_only_product(url, tiers) for mod in ENGINE_MODULES]
+    for row in rows:
+        assert len(row) == 1
+        p = row[0]
+        assert p.sku == "hubspot-sales-hub" and p.product_slug == "hubspot-sales-hub"
+        assert p.product_url == "https://www.g2.com/products/hubspot-sales-hub/reviews"
+        assert p.price == 0.0 and p.price_source == "pricing_page_text"
+        assert p.title is None and p.rating_5 is None, "nothing invented that the page didn't carry"
+    for mod in ENGINE_MODULES:
+        assert mod._pricing_only_product(url, []) == []
+
+
+@check(
+    "END-TO-END through each engine's own run(): the browserless --scraper-api path, driven by a "
+    "fake client that returns the synthetic fixtures, produces a written file plus sidecar and the "
+    "right exit code for all three page shapes in all three engines — a category listing "
+    "(EXIT_OK), a product /reviews page (EXIT_OK), and a DataDome wall (EXIT_BLOCKED, with NO file "
+    "and NO sidecar written). This is the closest this repo can get to an "
+    "end-to-end engine test without network access to g2.com."
+)
+def _():
+    import unittest.mock as mock
+
+    class _FakeClient:
+        solve_budget = scraper_api_client.SolveBudget()  # one allowance per fake run
+        def __init__(self, body, status=200):
+            self._body, self._status = body, status
+
+        def scrape_url(self, url, timeout=60, cdp_url=None):
+            return scraper_api_client.ScrapeResult(target_status=self._status, headers={}, body=self._body)
+
+    cases = [
+        ("category", ["--category", "crm"], listing_html(cards=4), output_writer.EXIT_OK, 4),
+        ("product", ["--product", "hubspot-sales-hub"], product_html(), output_writer.EXIT_OK, 1),
+        ("pricing", ["--url", "https://www.g2.com/products/hubspot-sales-hub/pricing"], PRICING_HTML,
+         output_writer.EXIT_OK, 1),
+        ("blocked", ["--category", "crm"], DATADOME_WALL_HTML, output_writer.EXIT_BLOCKED, 0),
+    ]
+    for mod in ENGINE_MODULES:
+        for label, argv, body, expected_code, expected_rows in cases:
+            with tempfile.TemporaryDirectory() as td:
+                out = str(Path(td) / "out.json")
+                args = _parse(mod, argv + ["--scraper-api", "--twocaptcha-key", "k", "--out", out])
+                with mock.patch.object(mod, "TwoCaptchaClient", lambda *a, **kw: _FakeClient(body)):
+                    code = asyncio_run_maybe(mod, args)
+                assert code == expected_code, f"{mod.__name__}/{label}: got exit {code}, expected {expected_code}"
+                if expected_code == output_writer.EXIT_OK:
+                    rows = json.loads(Path(out).read_text())
+                    assert len(rows) == expected_rows, f"{mod.__name__}/{label}: {len(rows)} rows"
+                    meta = json.loads(Path(f"{out}.meta.json").read_text())
+                    assert meta["status"] == "complete" and meta["engine"] == mod.ENGINE_NAME
+                else:
+                    assert not Path(out).exists(), f"{mod.__name__}/{label}: a blocked, zero-product run wrote a file"
+                    assert not Path(f"{out}.meta.json").exists(), (
+                        f"{mod.__name__}/{label}: a failed run must never leave a sidecar"
+                    )
+
+
+# --------------------------------------------------------------------------- #
+# diff_runs — added/removed/changed, refuses a non-complete run
+# --------------------------------------------------------------------------- #
+@check("diff_runs reports added/removed/price-changed correctly against two real finish_run() outputs")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        old_out, new_out = str(Path(td) / "old.json"), str(Path(td) / "new.json")
+        output_writer.finish_run(
+            products=[_mk_product("a", price=10.0), _mk_product("b", price=20.0)],
+            out_path=old_out, fmt="json", engine="test", url="u", pages_requested=1, pages_completed=1,
+            failed_pages=None, blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        output_writer.finish_run(
+            products=[_mk_product("a", price=12.0), _mk_product("c", price=30.0)],
+            out_path=new_out, fmt="json", engine="test", url="u", pages_requested=1, pages_completed=1,
+            failed_pages=None, blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        result = diff_runs.diff(old_out, new_out)
+        assert result["added"] == ["c"], result["added"]
+        assert result["removed"] == ["b"], result["removed"]
+        assert len(result["changed"]) == 1 and result["changed"][0]["sku"] == "a"
+
+
+@check("diff_runs refuses to compare a non-'complete' run rather than silently diffing partial data")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        old_out, new_out = str(Path(td) / "old.json"), str(Path(td) / "new.json")
+        output_writer.finish_run(
+            products=[_mk_product("a")], out_path=old_out, fmt="json", engine="test", url="u",
+            pages_requested=2, pages_completed=1, failed_pages=[2],
+            blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        output_writer.finish_run(
+            products=[_mk_product("a")], out_path=new_out, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=1, failed_pages=None,
+            blocked=False, remote_api_error=False, allow_empty=False, started_at=0.0,
+        )
+        try:
+            diff_runs.diff(old_out, new_out)
+            raise AssertionError("expected a refusal — the old run is 'partial', not 'complete'")
+        except SystemExit:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# scraper_api_client — family-shared, unmodified
+# --------------------------------------------------------------------------- #
+@check("scraper_api_client.TwoCaptchaClient._require_key rejects a missing/empty key")
+def _():
+    client = scraper_api_client.TwoCaptchaClient("")
+    try:
+        client._require_key()
+        raise AssertionError("expected TwoCaptchaAuthError")
+    except scraper_api_client.TwoCaptchaAuthError:
+        pass
+
+
+@check("scraper_api_client honors --captcha-api / --scraper-api-url overrides, not the module-level defaults")
+def _():
+    client = scraper_api_client.TwoCaptchaClient(
+        "fakekey", api_base="https://mock.example.test", scraper_api_base="https://mock-scraper.example.test",
+    )
+    assert client.api_base == "https://mock.example.test" != scraper_api_client.API_BASE
+    assert client.scraper_api_base == "https://mock-scraper.example.test" != scraper_api_client.SCRAPER_API_BASE
+
+
+@check("all three engines define --scraper-api-cdp/--scraper-api-country/--scraper-api-profile-id, and pass cdp_url through to scraper_api_client.scrape_url (added 2026-09-28, closing the 'no captcha solving, no locale pinning' gap --scraper-api's own help text used to document as simply unsolved)")
+def _():
+    for mod in ENGINE_MODULES:
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert '"--scraper-api-cdp"' in src, f"{mod.__name__}: no --scraper-api-cdp flag"
+        assert '"--scraper-api-country"' in src, f"{mod.__name__}: no --scraper-api-country flag"
+        assert '"--scraper-api-profile-id"' in src, f"{mod.__name__}: no --scraper-api-profile-id flag"
+        assert "cdp_url=cdp_url" in src, f"{mod.__name__}: _scrape_via_scraper_api is not called with cdp_url"
+        assert "scraping_browser_connection_url(" in src, f"{mod.__name__}: --scraper-api-cdp never builds a Scraping Browser URL"
+        assert "--scraper-api-cdp requires --scraper-api" in src, f"{mod.__name__}: --scraper-api-cdp isn't guarded to require --scraper-api"
+
+
+@check("BEHAVIORAL proof (not just structural) of the same fix, all three engines: --scraper-api-cdp actually builds a country/profile-pinned Scraping Browser URL and it reaches scraper_api_client.scrape_url's cdp_url argument; without the flag cdp_url stays None (regression: default --scraper-api behavior unchanged); --scraper-api-cdp without --scraper-api is EXIT_BAD_USAGE, not a silent no-op")
+def _():
+    for mod in ENGINE_MODULES:
+        captured = {}
+        original = scraper_api_client.TwoCaptchaClient.scrape_url
+
+        def _fake_scrape_url(self, url, *, data_format="raw", timeout=60, wait_for=None, cdp_url=None):
+            captured["cdp_url"] = cdp_url
+            return scraper_api_client.ScrapeResult(target_status=200, headers={}, body=product_html())
+
+        scraper_api_client.TwoCaptchaClient.scrape_url = _fake_scrape_url
+        try:
+            # --scraper-api-cdp without --scraper-api: EXIT_BAD_USAGE, all
+            # three engines (checked before any network-shaped call is made).
+            bad_args = _parse(mod, ["--url", "https://www.g2.com/products/hubspot-sales-hub/reviews", "--scraper-api-cdp"])
+            rc = asyncio_run_maybe(mod, bad_args)
+            assert rc == output_writer.EXIT_BAD_USAGE, f"{mod.__name__}: --scraper-api-cdp without --scraper-api should be EXIT_BAD_USAGE, got {rc}"
+
+            # With the flag: cdp_url is built and reaches scrape_url,
+            # carrying the requested country + profile id.
+            with tempfile.TemporaryDirectory() as td:
+                on_args = _parse(mod, [
+                    "--url", "https://www.g2.com/products/hubspot-sales-hub/reviews",
+                    "--twocaptcha-key", "fake-key-for-test-only",
+                    "--scraper-api", "--scraper-api-cdp",
+                    "--scraper-api-country", "us", "--scraper-api-profile-id", "smoke-test-profile",
+                    "--out", str(Path(td) / "out.json"), "--allow-empty",
+                ])
+                asyncio_run_maybe(mod, on_args)
+            cdp_url = captured.get("cdp_url")
+            assert cdp_url, f"{mod.__name__}: --scraper-api-cdp did not produce a cdp_url"
+            assert "-country-us" in cdp_url, f"{mod.__name__}: cdp_url does not carry the requested country: {cdp_url!r}"
+            assert "-pid-smoke-test-profile" in cdp_url, f"{mod.__name__}: cdp_url does not carry the requested profile id: {cdp_url!r}"
+
+            # Without the flag: unchanged from before this feature existed.
+            captured.clear()
+            with tempfile.TemporaryDirectory() as td:
+                off_args = _parse(mod, [
+                    "--url", "https://www.g2.com/products/hubspot-sales-hub/reviews",
+                    "--twocaptcha-key", "fake-key-for-test-only",
+                    "--scraper-api",
+                    "--out", str(Path(td) / "out.json"), "--allow-empty",
+                ])
+                asyncio_run_maybe(mod, off_args)
+            assert captured.get("cdp_url") is None, f"{mod.__name__}: cdp_url should be None without --scraper-api-cdp, got {captured.get('cdp_url')!r}"
+        finally:
+            scraper_api_client.TwoCaptchaClient.scrape_url = original
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-14 audit fixes: atomic writes, CSV formula guard, paid-solve budget,
+# 404 / parser-failure / partial outcomes, G2_URL precedence, credential scan,
+# .env* ignore, private-citation guard.
+# --------------------------------------------------------------------------- #
+class _FakeResponse:
+    def __init__(self, status):
+        self.status = status
+
+
+class _FakePage:
+    """Just enough of a Playwright page for the scrape functions: every
+    goto answers with the next (status, html) the test queued, or the last
+    one again."""
+    def __init__(self, answers, context):
+        self._answers = list(answers)
+        self._html = ""
+        self.context = context
+        self.gotos = 0
+
+    async def goto(self, url, **_kw):
+        self.gotos += 1
+        status, html = self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+        self._html = html
+        return _FakeResponse(status)
+
+    async def wait_for_timeout(self, _ms):
+        return None
+
+    async def content(self):
+        return self._html
+
+    async def evaluate(self, _js):
+        return "Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0 Safari/537.36"
+
+    async def reload(self, **_kw):
+        return None
+
+
+class _FakeContext:
+    def __init__(self, browser):
+        self.browser = browser
+        self.routes = []
+
+    async def route(self, pattern, handler):
+        # Media blocking installs one behind a proxy pool.
+        self.routes.append((pattern, handler))
+
+    async def new_page(self):
+        page = _FakePage(self.browser.answers, self)
+        self.browser.pages.append(page)
+        return page
+
+    async def add_cookies(self, _cookies):
+        return None
+
+    async def close(self):
+        return None
+
+
+class _FakeBrowser:
+    def __init__(self, answers):
+        self.answers = answers
+        self.pages = []
+
+    async def new_context(self, **_kw):
+        return _FakeContext(self)
+
+
+class _CountingSolverClient:
+    """Stands in for TwoCaptchaClient: no network, counts purchases."""
+    def __init__(self):
+        self.api_key = "fake"
+        self.solve_budget = scraper_api_client.SolveBudget()
+        self.purchases = 0
+
+    def solve_and_wait(self, task):
+        self.purchases += 1
+        return json.dumps({"cookie": "datadome=X; Path=/; Secure; SameSite=Lax"})
+
+
+def _pw_args(argv, td):
+    args = _parse(playwright_scraper, argv + ["--out", str(Path(td) / "out.json"), "--retry-delay", "0", "--page-delay", "0"])
+    return args
+
+
+@check("paid-solve budget: one page buys at most ONE solve across every --block-retries attempt and proxy rotation (Playwright driven end to end through a fake browser; measured before the fix: 3 purchases at the default --block-retries 2, 6 at 5)")
+def _():
+    for block_retries in (0, 2, 5):
+        with tempfile.TemporaryDirectory() as td:
+            args = _pw_args(["--category", "crm", "--max-pages", "1", "--block-retries", str(block_retries)], td)
+            proxies = proxy_pool.load_proxies("http://login:password@10.0.0.1:8080", None)
+            pool = proxy_pool.ProxyPool(proxies, block_retries=100)
+            client = _CountingSolverClient()
+            browser = _FakeBrowser([(403, DATADOME_SLIDER_WALL_HTML)])
+            start = gp.category_url("crm")
+            for _attempt in range(args.block_retries + 1):  # the same loop run() uses
+                merged, blocked, *_ = asyncio.run(playwright_scraper.scrape_category(
+                    args=args, start_url=start, browser=browser, proxy_pool=pool,
+                    client=client, autosolve=False, user_agent=None,
+                ))
+                if not (blocked and not merged):
+                    break
+            assert client.purchases == 1, (block_retries, client.purchases)
+
+
+class _TimeoutPage(_FakePage):
+    async def goto(self, url, **_kw):
+        self.gotos += 1
+        raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+
+
+class _TimeoutBrowser(_FakeBrowser):
+    async def new_context(self, **_kw):
+        context = _FakeContext(self)
+
+        async def new_page():
+            page = _TimeoutPage(self.answers, context)
+            self.pages.append(page)
+            return page
+        context.new_page = new_page
+        return context
+
+
+@check("a first page that never loads through a proxy pool still rotates on every --block-retries attempt, and when the LAST attempt also never loaded the run ends as remote_api_error (exit 5), not blocked (exit 3): the site never answered. Seen 2026-10-20: a proxy refusing its credential produced only navigation timeouts and the run reported a block")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        args = _pw_args(["--category", "crm", "--max-pages", "1", "--block-retries", "2", "--retries", "0"], td)
+        proxies = proxy_pool.load_proxies("http://login:password@10.0.0.1:8080", None)
+        pool = proxy_pool.ProxyPool(proxies, block_retries=100)
+        browser = _TimeoutBrowser([(200, "")])
+        attempts = 0
+        for _attempt in range(args.block_retries + 1):  # the same loop run() uses
+            attempts += 1
+            merged, blocked, remote_api_error, pages_completed, failed_pages = asyncio.run(
+                playwright_scraper.scrape_category(
+                    args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=pool,
+                    client=None, autosolve=False, user_agent=None,
+                ))
+            if not (blocked and not merged):
+                break
+        assert attempts == 3, f"a load failure must keep rotating through --block-retries, stopped after {attempts}"
+        assert blocked == output_writer.LOAD_FAILED and not remote_api_error, (blocked, remote_api_error)
+        out = str(Path(td) / "out.json")
+        code = output_writer.finish_run(
+            products=merged, out_path=out, fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=pages_completed, failed_pages=failed_pages,
+            blocked=blocked, remote_api_error=remote_api_error, allow_empty=True, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_REMOTE_API_ERROR, code
+        meta = json.loads(Path(f"{out}.meta.json").read_text())
+        assert meta["status"] == "remote_api_error" and meta["stop_reason"] == "remote_api_error", meta
+        # A real block on the last attempt is still exit 3.
+        code = output_writer.finish_run(
+            products=[], out_path=str(Path(td) / "b.json"), fmt="json", engine="test", url="u",
+            pages_requested=1, pages_completed=0, failed_pages=[1],
+            blocked=True, remote_api_error=False, allow_empty=True, started_at=0.0,
+        )
+        assert code == output_writer.EXIT_BLOCKED, code
+
+
+@check("paid-solve budget is checked inside solve_when_blocked BEFORE the purchase: a second call for the same page returns budget_exhausted without calling solve_and_wait, another page still gets its own allowance")
+def _():
+    client = _CountingSolverClient()
+    kw = dict(html=DATADOME_SLIDER_WALL_HTML, count_product_links=gp.count_result_cards,
+              extra_markers=gp.BOT_CHALLENGE_MARKERS,
+              proxy={"type": "http", "address": "10.0.0.1", "port": 8080, "login": "l", "password": "p"},
+              user_agent="Mozilla/5.0")
+    first = captcha_solver.solve_when_blocked(client=client, page_url="https://www.g2.com/categories/crm", **kw)
+    second = captcha_solver.solve_when_blocked(client=client, page_url="https://www.g2.com/categories/crm", **kw)
+    other = captcha_solver.solve_when_blocked(client=client, page_url="https://www.g2.com/categories/crm?page=2", **kw)
+    assert first["action"] == "solved" and second["action"] == "budget_exhausted", (first, second)
+    assert other["action"] == "solved"
+    assert client.purchases == 2, client.purchases
+    for mod in ENGINE_MODULES:
+        assert "budget_exhausted" in mod.STILL_BLOCKED_ACTIONS, mod.__name__
+
+
+@check("every engine creates its ONE TwoCaptchaClient (which owns the per-page solve budget) in run() BEFORE the --block-retries loop, so a retry or rotation never gets a fresh allowance")
+def _():
+    import ast
+    for path in ENGINE_FILES:
+        tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+        run_fn = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "run")
+        client_lines = [n.lineno for n in ast.walk(run_fn) if isinstance(n, ast.Call)
+                        and getattr(n.func, "id", None) == "TwoCaptchaClient"]
+        loops = [n for n in ast.walk(run_fn) if isinstance(n, (ast.For, ast.AsyncFor))
+                 and isinstance(n.target, ast.Name) and n.target.id == "block_attempt"]
+        assert client_lines and loops, path
+        for loop in loops:
+            inside = [n for n in ast.walk(loop) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "TwoCaptchaClient"]
+            assert not inside, f"{path}: a TwoCaptchaClient is created inside the block-retries loop"
+
+
+@check("HTTP 404 is 'not found', not 'blocked': a product slug answering 404 is fetched ONCE (no block retries) and the run is empty (exit 4), never exit 3")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        args = _pw_args(["--product", "no-such-product", "--block-retries", "2"], td)
+        browser = _FakeBrowser([(404, "<html><head><title>Page not found | G2</title></head><body>404</body></html>")])
+        products, blocked, remote, done, failed = asyncio.run(playwright_scraper.scrape_product_page(
+            args=args, start_url=gp.product_url("no-such-product"), browser=browser, proxy_pool=None,
+            client=None, autosolve=False, user_agent=None,
+        ))
+        assert (products, blocked, remote, failed) == ([], False, False, []), (blocked, remote, failed)
+        code = output_writer.finish_run(products=products, out_path=args.out, fmt="json", engine="t", url="u",
+                                        pages_requested=1, pages_completed=done, failed_pages=failed,
+                                        blocked=blocked, remote_api_error=remote, allow_empty=False, started_at=0.0)
+        assert code == output_writer.EXIT_ZERO_PRODUCTS, code
+        assert sum(p.gotos for p in browser.pages) == 1
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "not_found = status == 404" in src and "status != 404" in src, f"{path}: 404 handling missing"
+        assert "not_found = result.target_status == 404" in src, f"{path}: Scraper API 404 handling missing"
+
+
+@check("a product page served with HTTP 200 and NO product data is a parser failure: page 1 is recorded as failed and the run exits 5 (parser_found_nothing), not 4")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        args = _pw_args(["--product", "hubspot-sales-hub"], td)
+        browser = _FakeBrowser([(200, "<html><head><title>HubSpot | G2</title></head><body>no json-ld</body></html>")])
+        products, blocked, remote, done, failed = asyncio.run(playwright_scraper.scrape_product_page(
+            args=args, start_url=gp.product_url("hubspot-sales-hub"), browser=browser, proxy_pool=None,
+            client=None, autosolve=False, user_agent=None,
+        ))
+        assert (products, blocked, failed) == ([], False, [1]), (blocked, failed)
+        code = output_writer.finish_run(products=products, out_path=args.out, fmt="json", engine="t", url="u",
+                                        pages_requested=1, pages_completed=done, failed_pages=failed,
+                                        blocked=blocked, remote_api_error=remote, allow_empty=False, started_at=0.0)
+        assert code == output_writer.EXIT_REMOTE_API_ERROR, code
+    for path in ENGINE_FILES:
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert src.count("return products, blocked, False, 0, [1]") == 2, f"{path}: browser and Scraper API product paths must both record the failed page"
+
+
+@check("a block on listing page 2 after page 1 produced rows is recorded in failed_pages and reported as partial (exit 6) with the page-1 rows written")
+def _():
+    with tempfile.TemporaryDirectory() as td:
+        args = _pw_args(["--category", "crm", "--max-pages", "3"], td)
+        browser = _FakeBrowser([(200, listing_html(cards=3)), (403, DATADOME_WALL_HTML)])
+        products, blocked, remote, done, failed = asyncio.run(playwright_scraper.scrape_category(
+            args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=None,
+            client=None, autosolve=False, user_agent=None,
+        ))
+        assert len(products) == 3 and blocked and failed == [2], (len(products), blocked, failed)
+        code = output_writer.finish_run(products=products, out_path=args.out, fmt="json", engine="t", url="u",
+                                        pages_requested=3, pages_completed=done, failed_pages=failed,
+                                        blocked=blocked, remote_api_error=remote, allow_empty=False, started_at=0.0)
+        assert code == output_writer.EXIT_PARTIAL, code
+        meta = json.loads(Path(f"{args.out}.meta.json").read_text())
+        assert (meta["status"], meta["stop_reason"], meta["failed_pages"]) == ("partial", "blocked", [2]), meta
+
+
+@check("output writes are atomic: a failure part-way through json.dump leaves the previous good file byte-identical and no temp file behind")
+def _():
+    import os as _os
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.json")
+        output_writer.write_json([_mk_product("a")], out)
+        good = Path(out).read_bytes()
+        original_dump = output_writer.json.dump
+
+        def _half_then_fail(obj, f, **kw):
+            f.write("[{\"sku\": ")
+            raise OSError("disk full (injected)")
+        output_writer.json.dump = _half_then_fail
+        try:
+            try:
+                output_writer.write_json([_mk_product("b")], out)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("the injected failure did not propagate")
+        finally:
+            output_writer.json.dump = original_dump
+        assert Path(out).read_bytes() == good, "the previous good output was damaged"
+        assert sorted(_os.listdir(td)) == ["out.json"], _os.listdir(td)
+
+
+@check("output file modes: a new file gets 0o666 & ~umask (checked under 022 and 002), an existing file keeps its own mode — never a flat 0600 or 0644")
+def _():
+    import os as _os
+    import stat as _stat
+    with tempfile.TemporaryDirectory() as td:
+        for umask, expected in ((0o022, 0o644), (0o002, 0o664)):
+            old = _os.umask(umask)
+            try:
+                p = str(Path(td) / f"new_{umask:o}.json")
+                output_writer.write_json([], p)
+                output_writer.write_meta(p, status="complete", stop_reason="complete", engine="t", url="u",
+                                         pages_requested=1, pages_completed=1, product_count=0, started_at=0.0)
+            finally:
+                _os.umask(old)
+            for q in (p, f"{p}.meta.json"):
+                got = _stat.S_IMODE(_os.stat(q).st_mode)
+                assert got == expected, (oct(umask), q, oct(got))
+        p = str(Path(td) / "tight.csv")
+        output_writer.write_csv([], p)
+        _os.chmod(p, 0o600)
+        output_writer.write_csv([_mk_product("a")], p)
+        assert _stat.S_IMODE(_os.stat(p).st_mode) == 0o600
+
+
+@check("CSV formula guard: formula-shaped STRING cells get a leading apostrophe in CSV only, numbers are untouched, JSON keeps the site's bytes, and csv_cells_escaped is in the sidecar UNDER the caller's extra")
+def _():
+    import csv as _csv
+    rows = [_mk_product("a", price=-5.0, title='=HYPERLINK("http://x")', category="+cmd")]
+    with tempfile.TemporaryDirectory() as td:
+        out = str(Path(td) / "out.csv")
+        code = output_writer.finish_run(products=rows, out_path=out, fmt="csv", engine="t", url="u",
+                                        pages_requested=1, pages_completed=1, failed_pages=None, blocked=False,
+                                        remote_api_error=False, allow_empty=False, started_at=0.0)
+        assert code == output_writer.EXIT_OK
+        with open(out, newline="", encoding="utf-8") as f:
+            row = next(_csv.DictReader(f))
+        assert row["title"] == '\'=HYPERLINK("http://x")', row["title"]
+        assert row["category"] == "'+cmd" and row["price"] == "-5.0", row
+        meta = json.loads(Path(f"{out}.meta.json").read_text())
+        assert meta["csv_cells_escaped"] == 2, meta
+        out_j = str(Path(td) / "out.json")
+        output_writer.finish_run(products=rows, out_path=out_j, fmt="json", engine="t", url="u",
+                                 pages_requested=1, pages_completed=1, failed_pages=None, blocked=False,
+                                 remote_api_error=False, allow_empty=False, started_at=0.0)
+        assert json.loads(Path(out_j).read_text())[0]["title"] == '=HYPERLINK("http://x")'
+        out2 = str(Path(td) / "out2.csv")
+        output_writer.finish_run(products=rows, out_path=out2, fmt="csv", engine="t", url="u",
+                                 pages_requested=1, pages_completed=1, failed_pages=None, blocked=False,
+                                 remote_api_error=False, allow_empty=False, started_at=0.0,
+                                 extra_meta={"csv_cells_escaped": "caller wins"})
+        assert json.loads(Path(f"{out2}.meta.json").read_text())["csv_cells_escaped"] == "caller wins"
+
+
+@check("G2_URL from the environment or .env never overrides a TYPED --category/--product; --url still outranks both")
+def _():
+    import os as _os
+    _os.environ["G2_URL"] = "https://www.g2.com/products/hubspot-sales-hub/reviews"
+    try:
+        for mod in ENGINE_MODULES:
+            args = env_config.apply_env(_parse(mod, ["--category", "crm"]), dotenv_path="/nonexistent/.env")
+            assert args.url is None, (mod.__name__, args.url)
+            assert mod._resolve_start_url(args) == (gp.category_url("crm"), "category")
+            args = env_config.apply_env(_parse(mod, []), dotenv_path="/nonexistent/.env")
+            assert args.url == _os.environ["G2_URL"], "with no target flag typed, G2_URL still applies"
+    finally:
+        del _os.environ["G2_URL"]
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "\nG2_URL=" not in example, ".env.example must ship G2_URL commented out"
+
+
+@check("numeric retry flags reject negatives with an argparse error naming the flag, in all three engines (--proxy-block-retries used to accept -1)")
+def _():
+    import contextlib as _ctx
+    import io as _io
+    for mod in ENGINE_MODULES:
+        for flag in ("--proxy-block-retries", "--block-retries", "--retries"):
+            err = _io.StringIO()
+            with _ctx.redirect_stderr(err):
+                try:
+                    _parse(mod, ["--category", "crm", flag, "-1"])
+                except SystemExit as exc:
+                    assert exc.code == 2
+                else:
+                    raise AssertionError(f"{mod.__name__}: {flag} -1 was accepted")
+            assert "error:" in err.getvalue() and flag in err.getvalue(), err.getvalue()
+
+
+@check(".gitignore ignores every .env* copy (.env.bak, .env.local, .env.save) and keeps .env.example")
+def _():
+    if not (ROOT / ".git").exists():
+        return  # inside the Docker build there is no repository to ask
+    for name in (".env", ".env.bak", ".env.local", ".env.save"):
+        r = subprocess.run(["git", "check-ignore", "-q", name], cwd=ROOT)
+        assert r.returncode == 0, f"{name} is not ignored"
+    r = subprocess.run(["git", "check-ignore", "-q", ".env.example"], cwd=ROOT)
+    assert r.returncode == 1, ".env.example must not be ignored"
+
+
+@check("credential scan rules: an unquoted .env line, a bare 32-hex key, and a JSON-escaped apiKey are each caught; a venv is recognised by pyvenv.cfg whatever its name; smoke_test.py is not exempt from the key-shape rule")
+def _():
+    scanner = ROOT / ".github" / "ci_checks.py"
+    if not scanner.exists():
+        return  # stripped from the Docker build context on purpose
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("ci_checks_under_test", scanner)
+    ci = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(ci)
+    key = "3f" * 16
+    assert ci.ENV_ASSIGNMENT.search(f"TWOCAPTCHA_KEY={key}")
+    assert ci.TWOCAPTCHA_KEY_SHAPE.search(f'key = "{key}"')
+    assert ci.SECRET_ASSIGNMENT.search('{\\"apiKey\\": \\"k9x2m4p7q1w8e5r3t6y0\\"}')
+    assert not ci.ENV_ASSIGNMENT.search("api_key = args.twocaptcha_key")
+    assert "twocaptcha_key_shape" not in ci.RULE_EXEMPTIONS.get("smoke_test.py", set())
+    with tempfile.TemporaryDirectory() as td:
+        ci.ROOT = Path(td)
+        (Path(td) / "myenv" / "lib").mkdir(parents=True)
+        (Path(td) / "myenv" / "pyvenv.cfg").write_text("home = /usr\n")
+        assert ci._inside_virtualenv("myenv/lib/vendored.py")
+        assert not ci._inside_virtualenv("src/vendored.py")
+
+
+@check("no shipped file cites the private instruction file or its section numbers (the public cannot open it; state the rule in the repo's own words)")
+def _():
+    if not (ROOT / ".git").exists():
+        return
+    banned = ("CLAUDE" + ".md", "claude_" + "2scraper", "2scraper_" + "repo_rules", "play" + "book", "\u00a7")
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True).stdout.split(b"\0")
+    hits = []
+    for raw in tracked:
+        if not raw:
+            continue
+        rel = raw.decode()
+        try:
+            text = (ROOT / rel).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError, IsADirectoryError):
+            continue
+        for token in banned:
+            if token in text:
+                hits.append(f"{rel}: {token!r}")
+    assert not hits, hits
+
+
+# --------------------------------------------------------------------------- #
+# Traffic savers: the proxy pre-check and media blocking
+# --------------------------------------------------------------------------- #
+def _status_proxy(status):
+    """A local stand-in for a proxy gateway that answers every request,
+    CONNECT included, with `status`. Returns (server, port, hits)."""
+    import http.server
+    import socketserver
+    import threading
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _answer(self):
+            hits.append((self.command, self.path))
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Proxy-Authenticate", 'Basic realm="stub"')
+            self.end_headers()
+        do_CONNECT = do_GET = do_HEAD = _answer
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1], hits
+
+
+class _BrowserStarted(Exception):
+    """Raised by a fake driver launch: the run got past the pre-check."""
+
+
+def _with_fake_drivers(fn):
+    """Run fn(started) with every engine's driver entry point replaced by a
+    fake that records the launch and raises _BrowserStarted. Restored after."""
+    import contextlib
+    import io
+    import logging
+    started = []
+
+    class _PW:
+        async def __aenter__(self):
+            started.append("playwright")
+            raise _BrowserStarted()
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def _pyp(**_kw):
+        started.append("puppeteer")
+        raise _BrowserStarted()
+
+    class _Chrome:
+        def __init__(self, **_kw):
+            started.append("selenium")
+            raise _BrowserStarted()
+
+    class _Opts:
+        def __init__(self):
+            self.debugger_address = None
+            self.binary_location = None
+
+        def add_argument(self, _a):
+            pass
+
+        def set_capability(self, *_a):  # the proxy meter's performance log
+            pass
+
+        def to_capabilities(self):
+            return {}
+
+    saved = {
+        (playwright_scraper, "async_playwright"): playwright_scraper.async_playwright,
+        (puppeteer_scraper, "pyppeteer_launch"): puppeteer_scraper.pyppeteer_launch,
+        (puppeteer_scraper, "pyppeteer_connect"): puppeteer_scraper.pyppeteer_connect,
+        (selenium_scraper, "webdriver"): selenium_scraper.webdriver,
+        (selenium_scraper, "Options"): selenium_scraper.Options,
+        (selenium_scraper, "Service"): selenium_scraper.Service,
+    }
+    playwright_scraper.async_playwright = lambda: _PW()
+    puppeteer_scraper.pyppeteer_launch = puppeteer_scraper.pyppeteer_connect = _pyp
+    selenium_scraper.webdriver = type("wd", (), {"Chrome": _Chrome})
+    selenium_scraper.Options, selenium_scraper.Service = _Opts, None
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    buf = io.StringIO()
+    root.handlers = [logging.StreamHandler(buf)]
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            return fn(started, buf)
+    finally:
+        root.handlers = saved_handlers
+        for (mod, name), value in saved.items():
+            setattr(mod, name, value)
+
+
+_SECRET_UP = "user" + ":S3cretPw@"
+
+
+@check("proxy pre-check: on a gateway 407 or 402 each engine exits 5 BEFORE any browser starts, after exactly ONE request (CONNECT to www.g2.com:443 for robots.txt), names G2_PROXY without printing the credential, writes only <out>.latest_attempt.meta.json (failed / proxy_auth_failed), and leaves no data or dataset sidecar")
+def _():
+    for mod in ENGINE_MODULES:
+        for status, words in ((407, "refused the credential"), (402, "balance exhausted")):
+            server, port, hits = _status_proxy(status)
+            try:
+                with tempfile.TemporaryDirectory() as td:
+                    out = str(Path(td) / "out.json")
+                    args = _parse(mod, ["--category", "crm", "--out", out,
+                                        "--proxy", "http://" + _SECRET_UP + "127.0.0.1:%d" % port])
+
+                    def go(started, buf, args=args):
+                        return asyncio_run_maybe(mod, args), list(started), buf.getvalue()
+                    code, started, text = _with_fake_drivers(go)
+                    label = f"{mod.__name__} {status}"
+                    assert code == output_writer.EXIT_REMOTE_API_ERROR, (label, code)
+                    assert started == [], (label, started)
+                    assert hits == [("CONNECT", "www.g2.com:443")], (label, hits)
+                    assert words in text and "G2_PROXY" in text, (label, text[-400:])
+                    assert "S3cretPw" not in text, label
+                    assert sorted(p.name for p in Path(td).iterdir()) == ["out.json.latest_attempt.meta.json"], (
+                        label, sorted(p.name for p in Path(td).iterdir()))
+                    meta = json.loads((Path(td) / "out.json.latest_attempt.meta.json").read_text())
+                    assert (meta["status"], meta["stop_reason"], meta["data_updated"]) == (
+                        "failed", "proxy_auth_failed", False), (label, meta)
+                    assert "S3cretPw" not in json.dumps(meta), label
+                    if mod is selenium_scraper:
+                        assert "sends NO proxy credentials" in text, text[-400:]
+            finally:
+                server.shutdown()
+                server.server_close()
+
+
+@check("proxy pre-check: a 403 through the tunnel, an unreachable proxy, no proxy at all, and --cdp-endpoint are NOT a verdict on the proxy — every engine goes on to start its browser exactly as before (and no pre-check request is sent without a local proxy)")
+def _():
+    proxy_meter.start(None, active=False)  # no meter left active by an earlier run
+    real = proxy_pool.precheck_proxy
+    for mod in ENGINE_MODULES:
+        server, port, hits = _status_proxy(403)
+        try:
+            args = _parse(mod, ["--category", "crm", "--out", "/nonexistent/o.json", "--retries", "0",
+                                "--block-retries", "0", "--proxy", "http://127.0.0.1:%d" % port])
+            started = _with_fake_drivers(lambda s, b, args=args: (asyncio_run_maybe(mod, args), list(s))[1])
+            assert started and len(hits) == 1, (mod.__name__, "403", started, hits)
+        finally:
+            server.shutdown()
+            server.server_close()
+        args = _parse(mod, ["--category", "crm", "--out", "/nonexistent/o.json", "--retries", "0",
+                            "--block-retries", "0", "--proxy", "http://127.0.0.1:1"])
+        started = _with_fake_drivers(lambda s, b, args=args: (asyncio_run_maybe(mod, args), list(s))[1])
+        assert started, (mod.__name__, "unreachable")
+
+        def _forbidden(*_a, **_k):
+            raise AssertionError("pre-check sent")
+        proxy_pool.precheck_proxy = _forbidden
+        try:
+            for extra in ([], ["--proxy", "http://127.0.0.1:1", "--cdp-endpoint", "http://127.0.0.1:1"]):
+                args = _parse(mod, ["--category", "crm", "--out", "/nonexistent/o.json", "--retries", "0",
+                                    "--block-retries", "0"] + extra)
+                started = _with_fake_drivers(lambda s, b, args=args: (asyncio_run_maybe(mod, args), list(s))[1])
+                assert started, (mod.__name__, extra, "a pre-check was sent or the browser never started")
+        finally:
+            proxy_pool.precheck_proxy = real
+    assert proxy_pool.robots_url("https://u" + ":p@www.g2.com/categories/crm?page=2") == "https://www.g2.com/robots.txt"
+    assert proxy_pool.precheck_proxy("socks5://127.0.0.1:1", "https://www.g2.com/robots.txt") is None
+
+
+@check("proxy pre-check probes the exit the run will use first: ProxyPool.peek() is next() without advancing, and Proxy.url() keeps (URL-quoted) credentials for the HTTP client")
+def _():
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies(None, None) + [
+        proxy_pool.parse_proxy_line("http://a:b@10.0.0.1:1"), proxy_pool.parse_proxy_line("10.0.0.2:2")])
+    first = pool.peek()
+    assert first is pool.peek() and pool.next() is first and pool.peek().host == "10.0.0.2"
+    assert proxy_pool.parse_proxy_line("10.0.0.3:3:lo:g#n%1").url() == "http://lo:g%23n%251@10.0.0.3:3"
+    assert proxy_pool.parse_proxy_line("10.0.0.4:4").url() == "http://10.0.0.4:4"
+    assert proxy_pool.ProxyPool([]).peek() is None
+
+
+@check("media blocking policy: blocked behind a local proxy; --load-media keeps it; nothing with no proxy or over CDP; the hidden --force-block-media forces it; the Playwright route aborts image/media/font and continues everything else")
+def _():
+    from argparse import Namespace as ns
+    sb = proxy_pool.should_block_media
+    assert sb(ns(load_media=False), proxy_in_use=True)
+    assert not sb(ns(load_media=True), proxy_in_use=True)
+    assert not sb(ns(load_media=False), proxy_in_use=False)
+    assert not sb(ns(load_media=False), proxy_in_use=True, over_cdp=True)
+    assert sb(ns(load_media=False, force_block_media=True), proxy_in_use=False)
+
+    class Route:
+        def __init__(self, kind):
+            self.request = ns(resource_type=kind)
+            self.done = None
+
+        def abort(self, reason=None):
+            self.done = "abort"
+
+        def continue_(self):
+            self.done = "continue"
+    class AsyncRoute(Route):
+        async def abort(self, reason=None):
+            self.done = "abort"
+
+        async def continue_(self):
+            self.done = "continue"
+    for kind, want in (("image", "abort"), ("media", "abort"), ("font", "abort"),
+                       ("document", "continue"), ("script", "continue"), ("xhr", "continue"),
+                       ("fetch", "continue"), ("stylesheet", "continue")):
+        r = Route(kind)
+        proxy_pool.playwright_media_route(r)
+        assert r.done == want, (kind, r.done)
+        # playwright_scraper.py drives Playwright's ASYNC API, where abort()
+        # and continue_() are coroutines: the handler must await them, or
+        # every request hangs (measured on a real browser before this fix).
+        r = AsyncRoute(kind)
+        asyncio.run(proxy_pool.playwright_media_route_async(r))
+        assert r.done == want, ("async", kind, r.done)
+
+
+@check("media blocking, Playwright: scrape_category installs the route on the context behind a proxy pool, and not with --load-media, with no proxy, or over --cdp-endpoint; --force-block-media installs it without a proxy")
+def _():
+    proxy_meter.start(None, active=False)  # no meter left active by an earlier run
+    for argv, with_pool, want in (([], True, True), (["--load-media"], True, False), ([], False, False),
+                                  (["--cdp-endpoint", "ws://127.0.0.1:1"], False, False),
+                                  (["--force-block-media"], False, True)):
+        with tempfile.TemporaryDirectory() as td:
+            args = _pw_args(["--category", "crm", "--max-pages", "1"] + argv, td)
+            pool = proxy_pool.ProxyPool(proxy_pool.load_proxies("http://10.0.0.1:8080", None)) if with_pool else None
+            browser = _FakeBrowser([(200, listing_html(cards=3, next_disabled=True))])
+            asyncio.run(playwright_scraper.scrape_category(
+                args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=pool,
+                client=None, autosolve=False, user_agent=None))
+            routes = browser.pages[0].context.routes
+            assert routes == ([("**/*", proxy_pool.playwright_media_route_async)] if want else []), (argv, with_pool, routes)
+
+
+@check("media blocking, pyppeteer: CDP Fetch pauses only Image/Media/Font and fails what it paused, behind a proxy only; every page the engine opens goes through _block_media_if_needed")
+def _():
+    proxy_meter.start(None, active=False)  # no meter left active by an earlier run
+    from argparse import Namespace as ns
+
+    class Client:
+        def __init__(self):
+            self.sent, self.handlers = [], {}
+
+        def on(self, name, fn):
+            self.handlers[name] = fn
+
+        async def send(self, cmd, params=None):
+            self.sent.append((cmd, params))
+
+    proxy = proxy_pool.parse_proxy_line("http://10.0.0.1:8080")
+    for argv, px, want in (([], proxy, True), (["--load-media"], proxy, False), ([], None, False),
+                           (["--cdp-endpoint", "ws://127.0.0.1:1"], proxy, False),
+                           (["--force-block-media"], None, True)):
+        client = Client()
+
+        async def session(client=client):
+            return client
+        page = ns(target=ns(createCDPSession=session))
+        args = _parse(puppeteer_scraper, ["--category", "crm"] + argv)
+
+        async def drive(page=page, args=args, px=px, client=client):
+            got = await puppeteer_scraper._block_media_if_needed(page, args, px)
+            if "Fetch.requestPaused" in client.handlers:
+                client.handlers["Fetch.requestPaused"]({"requestId": "r1", "resourceType": "Image"})
+                await asyncio.sleep(0)
+            return got
+        got = asyncio.run(drive())
+        enabled = [p for c, p in client.sent if c == "Fetch.enable"]
+        if want:
+            assert got and len(enabled) == 1, (argv, client.sent)
+            assert sorted(p["resourceType"] for p in enabled[0]["patterns"]) == ["Font", "Image", "Media"]
+            assert client.sent[-1] == ("Fetch.failRequest", {"requestId": "r1", "errorReason": "BlockedByClient"})
+        else:
+            assert not got and not client.sent, (argv, client.sent)
+    src = (ROOT / "puppeteer_scraper.py").read_text(encoding="utf-8")
+    assert src.count("await _block_media_if_needed(page, args, proxy)") == src.count("await browser.newPage()") == 3, (
+        "every page puppeteer_scraper opens must go through _block_media_if_needed")
+
+
+@check("media blocking, Selenium: _build_driver blocks images/video/fonts by URL (not scripts or styles) when asked, sets driver.media_blocked, and every driver the engine builds passes should_block_media")
+def _():
+    proxy_meter.start(None, active=False)  # no meter left active by an earlier run
+    class Drv:
+        def __init__(self, **_kw):
+            self.cdp = []
+
+        def execute_cdp_cmd(self, cmd, params):
+            self.cdp.append((cmd, params))
+
+    class Opts:
+        def __init__(self):
+            self.debugger_address = None
+            self.binary_location = None
+
+        def add_argument(self, _a):
+            pass
+
+        def set_capability(self, *_a):  # the proxy meter's performance log
+            pass
+
+        def to_capabilities(self):
+            return {}
+    saved = (selenium_scraper.webdriver, selenium_scraper.Options, selenium_scraper.Service)
+    selenium_scraper.webdriver = type("wd", (), {"Chrome": Drv})
+    selenium_scraper.Options, selenium_scraper.Service = Opts, None
+    try:
+        proxy = proxy_pool.parse_proxy_line("http://10.0.0.1:8080")
+        on = selenium_scraper._build_driver(headless=True, proxy=proxy, cdp_endpoint=None, block_media=True)
+        off = selenium_scraper._build_driver(headless=True, proxy=proxy, cdp_endpoint=None, block_media=False)
+    finally:
+        selenium_scraper.webdriver, selenium_scraper.Options, selenium_scraper.Service = saved
+    blocked = dict(on.cdp).get("Network.setBlockedURLs", {}).get("urls", [])
+    assert on.media_blocked is True and all(p in blocked for p in ("*.jpg", "*.webp?*", "*.mp4", "*.woff2")), blocked
+    assert not any(p.startswith(("*.js", "*.css")) for p in blocked), blocked
+    assert off.media_blocked is False and off.cdp == [], off.cdp
+    src = (ROOT / "selenium_scraper.py").read_text(encoding="utf-8")
+    assert src.count("driver = _build_driver(") == src.count("block_media=should_block_media(") == 3
+
+
+@check("every browser engine documents --load-media in --help and hides the --force-block-media test switch")
+def _():
+    for mod in ENGINE_MODULES:
+        text = mod.build_arg_parser().format_help()
+        assert "--load-media" in text and "--force-block-media" not in text, mod.__name__
+        assert _parse(mod, ["--category", "crm"]).load_media is False
+
+
+# --------------------------------------------------------------------------- #
+# Proxy traffic meter and --proxy-budget-mb (proxy_meter.py; its byte counts
+# against a stub proxy, in real browsers, are in tests/test_proxy_meter.py
+# and local_e2e_test.py)
+# --------------------------------------------------------------------------- #
+def _listing_page(first: int, n: int, *, next_disabled: bool = False) -> str:
+    body = "".join(_card(f"product-{i}", f"Product {i}", 500 + i) for i in range(first, first + n))
+    return ("<html><head><title>Best CRM Software in 2026 | G2</title></head>"
+            f"<body>{body}{_pagination(next_disabled)}</body></html>")
+
+
+class _MeteredContext(_FakeContext):
+    def __init__(self, browser):
+        super().__init__(browser)
+        self.events = []
+
+    def on(self, name, fn):
+        self.events.append(name)
+
+    async def new_page(self):
+        page = _FakePage(self.browser.answers, self)
+        browser = self.browser
+        goto = page.goto
+
+        async def metered_goto(url, **kw):
+            browser.gotos.append(url)
+            proxy_meter.current().add(browser.cost)
+            return await goto(url, **kw)
+        page.goto = metered_goto
+        browser.pages.append(page)
+        return page
+
+
+class _MeteredBrowser(_FakeBrowser):
+    """Every navigation costs `cost` proxy bytes."""
+    def __init__(self, answers, cost):
+        super().__init__(answers)
+        self.cost, self.gotos = cost, []
+
+    async def new_context(self, **_kw):
+        return _MeteredContext(self)
+
+    async def close(self):
+        return None
+
+
+def _metered_pw_run(argv, answers, *, cost, proxy=True):
+    """playwright_scraper.run() through a fake Playwright whose navigations
+    cost `cost` bytes. Returns (rc, output text, rows, meta, attempt, browser)."""
+    import contextlib
+    import io
+    browser = _MeteredBrowser(answers, cost)
+
+    class _PW:
+        async def __aenter__(self):
+            async def launch(**_kw):
+                return browser
+            return type("pw", (), {"chromium": type("c", (), {"launch": staticmethod(launch)})})()
+
+        async def __aexit__(self, *a):
+            return False
+    saved = playwright_scraper.async_playwright
+    playwright_scraper.async_playwright = lambda: _PW()
+    buf = io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out.json"
+            out.write_text("[]")  # a previous run's data
+            args = _parse(playwright_scraper, argv + ["--out", str(out), "--retry-delay", "0", "--page-delay", "0",
+                                                      "--retries", "0"]
+                          + (["--proxy", "http://127.0.0.1:1"] if proxy else []))
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = asyncio.run(playwright_scraper.run(args))
+
+            def read(suffix):
+                path = Path(str(out) + suffix)
+                return json.loads(path.read_text()) if path.exists() else None
+            return rc, buf.getvalue(), read(""), read(".meta.json"), \
+                read(output_writer.ATTEMPT_META_SUFFIX), browser
+    finally:
+        playwright_scraper.async_playwright = saved
+        proxy_meter.start(None, active=False)
+
+
+@check("proxy budget: once the metered bytes pass --proxy-budget-mb the category run fetches no further page — the rows already read are kept, exit 6, stop_reason proxy_budget_exceeded, the sidecar carries proxy_bytes / proxy_budget_bytes / proxy_budget_exceeded, and one 'Proxy traffic' line is printed")
+def _():
+    pages = [(200, _listing_page(1, 3)), (200, _listing_page(4, 3)), (200, _listing_page(7, 3))]
+    rc, text, rows, meta, attempt, browser = _metered_pw_run(
+        ["--category", "crm", "--max-pages", "3", "--proxy-budget-mb", "0.001"], pages, cost=600)
+    assert rc == output_writer.EXIT_PARTIAL and len(browser.gotos) == 2, (rc, browser.gotos, text[-600:])
+    assert rows is not None and len(rows) == 6, rows
+    assert (meta["status"], meta["stop_reason"]) == ("partial", "proxy_budget_exceeded"), meta
+    assert (meta["proxy_bytes"], meta["proxy_budget_bytes"], meta["proxy_budget_exceeded"]) == (1200, 1000, True), meta
+    assert text.count("Proxy traffic: 0.0 MB of 0.001 MB budget") == 1, text[-600:]
+
+
+@check("proxy budget: spent before any row was read -> exit 5, not 4 or 3, and no --block-retries rotation spends more; the previous data and .meta.json stay, and <out>.latest_attempt.meta.json records the stop and the bytes")
+def _():
+    for html in (_listing_page(1, 0), DATADOME_WALL_HTML):
+        rc, text, rows, meta, attempt, browser = _metered_pw_run(
+            ["--category", "crm", "--block-retries", "3", "--proxy-budget-mb", "0.001"], [(200, html)], cost=5000)
+        assert rc == output_writer.EXIT_REMOTE_API_ERROR and len(browser.gotos) == 1, (rc, browser.gotos)
+        assert rows == [] and meta is None, (rows, meta)
+        assert (attempt["stop_reason"], attempt["proxy_bytes"], attempt["proxy_budget_exceeded"],
+                attempt["data_updated"]) == ("proxy_budget_exceeded", 5000, True, False), attempt
+
+
+@check("proxy budget: with no local proxy nothing is metered or stopped (proxy_bytes null, no 'Proxy traffic' line); --proxy-budget-mb 0 is unlimited; under the default 10 MB the run is complete and records its bytes")
+def _():
+    pages = [(200, _listing_page(1, 3, next_disabled=True)), (200, _listing_page(1, 0))]
+    rc, text, rows, meta, _a, _b = _metered_pw_run(["--category", "crm", "--max-pages", "2", "--proxy-budget-mb", "0.001"],
+                                                  pages, cost=10 ** 9, proxy=False)
+    assert rc == 0 and meta["proxy_bytes"] is None and meta["proxy_budget_exceeded"] is False, (rc, meta)
+    assert "Proxy traffic" not in text
+    rc, text, rows, meta, _a, _b = _metered_pw_run(["--category", "crm", "--max-pages", "2", "--proxy-budget-mb", "0"],
+                                                  pages, cost=10 ** 9)
+    assert rc == 0 and meta["proxy_budget_bytes"] is None and meta["proxy_bytes"] == 2 * 10 ** 9, (rc, meta)
+    rc, text, rows, meta, _a, _b = _metered_pw_run(["--category", "crm", "--max-pages", "2"], pages, cost=1000)
+    assert rc == 0 and (meta["proxy_bytes"], meta["proxy_budget_bytes"]) == (2000, 10 ** 7), (rc, meta)
+    assert "Proxy traffic: 0.0 MB of 10 MB budget" in text
+
+
+@check("proxy budget: --with-pricing opens no pricing page once the budget is spent (the product row is kept, exit 6)")
+def _():
+    rc, text, rows, meta, _a, browser = _metered_pw_run(
+        ["--product", "hubspot-sales-hub", "--with-pricing", "--proxy-budget-mb", "0.001"],
+        [(200, product_html())], cost=5000)
+    assert len(browser.gotos) == 1 and rc == output_writer.EXIT_PARTIAL and len(rows) == 1, (rc, browser.gotos)
+    assert meta["stop_reason"] == "proxy_budget_exceeded", meta
+
+
+@check("proxy budget: finish_run puts the budget stop above every other outcome — blocked, a load failure or failed pages still end 6 with rows and 5 without")
+def _():
+    import dataclasses
+    row = output_writer.Product(**{f.name: None for f in dataclasses.fields(output_writer.Product)
+                                   if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING})
+    row.sku = "p-1"
+    try:
+        for rows, blocked, failed, want in (([row], True, [], 6), ([], True, [], 5), ([], output_writer.LOAD_FAILED, [1], 5),
+                                            ([row], False, [2], 6), ([], False, [], 5)):
+            proxy_meter.start(0.001, active=True)
+            proxy_meter.current().add(5000)
+            with tempfile.TemporaryDirectory() as td:
+                out = str(Path(td) / "o.json")
+                rc = output_writer.finish_run(products=rows, out_path=out, fmt="json", engine="t", url="u",
+                                              pages_requested=2, pages_completed=1, failed_pages=failed,
+                                              blocked=blocked, remote_api_error=False, allow_empty=False,
+                                              started_at=0.0)
+                meta = json.loads(Path(out + (".meta.json" if rows else output_writer.ATTEMPT_META_SUFFIX)).read_text())
+            assert rc == want and meta["stop_reason"] == "proxy_budget_exceeded", (blocked, failed, rc, meta)
+            assert meta["proxy_budget_exceeded"] is True and meta["proxy_bytes"] == 5000, meta
+    finally:
+        proxy_meter.start(None, active=False)
+
+
+@check("proxy budget: --proxy-budget-mb is on every engine (default 10, 0 = unlimited, a negative or non-number value is a usage error naming the flag); every engine starts the meter before the pre-check, only for a LOCAL proxy, and checks the budget in its page loop, its navigation retries, its pricing loop and its block-retry loop")
+def _():
+    import contextlib
+    import io
+    for mod in ENGINE_MODULES:
+        parser = mod.build_arg_parser()
+        assert _parse(mod, ["--category", "crm"]).proxy_budget_mb == 10, mod.__name__
+        assert "--proxy-budget-mb" in parser.format_help(), mod.__name__
+        for bad in ("-1", "lots"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                try:
+                    parser.parse_args(["--category", "crm", "--proxy-budget-mb", bad])
+                    raise AssertionError("accepted " + bad)
+                except SystemExit as exc:
+                    assert exc.code == 2
+            assert "--proxy-budget-mb" in err.getvalue(), err.getvalue()
+        src = (ROOT / f"{mod.__name__}.py").read_text(encoding="utf-8")
+        assert src.index("proxy_meter.start(") < src.index("stopped = precheck_or_stop("), mod.__name__
+        assert "active=proxy_pool is not None and not args.cdp_endpoint" in src, mod.__name__
+        for marker in ("break  # --proxy-budget-mb is spent", "last_error = proxy_meter.STOP_REASON",
+                       "break  # --proxy-budget-mb: no further pricing page",
+                       "if not (blocked and not merged) or proxy_meter.exceeded():"):
+            assert marker in src, (mod.__name__, marker)
+
+
+@check("proxy meter wiring: Playwright counts a proxied context (requestfinished + requestfailed) with the budget route after the media route; pyppeteer opens a counting CDP session on every page behind a local proxy; Selenium turns the performance log on and tees it; none of it with no proxy or over --cdp-endpoint")
+def _():
+    from argparse import Namespace as ns
+    try:
+        for argv, with_pool, active, want_events, want_routes in (
+                ([], True, True, True, 2), (["--load-media"], True, True, True, 1),
+                (["--proxy-budget-mb", "0"], True, True, True, 1), ([], False, False, False, 0)):
+            with tempfile.TemporaryDirectory() as td:
+                args = _pw_args(["--category", "crm", "--max-pages", "1"] + argv, td)
+                proxy_meter.start(args.proxy_budget_mb, active=active)
+                pool = proxy_pool.ProxyPool(proxy_pool.load_proxies("http://10.0.0.1:8080", None)) if with_pool else None
+                browser = _MeteredBrowser([(200, listing_html(cards=3, next_disabled=True))], 0)
+                asyncio.run(playwright_scraper.scrape_category(
+                    args=args, start_url=gp.category_url("crm"), browser=browser, proxy_pool=pool,
+                    client=None, autosolve=False, user_agent=None))
+                ctx = browser.pages[0].context
+                assert (sorted(set(ctx.events)) == ["requestfailed", "requestfinished"]) is want_events, (argv, ctx.events)
+                assert len(ctx.routes) == want_routes, (argv, ctx.routes)
+                if want_routes == 2:
+                    assert ctx.routes[-1][1] == proxy_meter.current().playwright_budget_route_async
+
+        class Client:
+            def __init__(self):
+                self.sent = []
+
+            def on(self, *_a):
+                pass
+
+            async def send(self, cmd, params=None):
+                self.sent.append(cmd)
+        proxy = proxy_pool.parse_proxy_line("http://10.0.0.1:8080")
+        for argv, px, want in (([], proxy, True), (["--load-media"], proxy, True), ([], None, False),
+                               (["--cdp-endpoint", "ws://127.0.0.1:1"], proxy, False)):
+            client = Client()
+
+            async def session(client=client):
+                return client
+            args = _parse(puppeteer_scraper, ["--category", "crm"] + argv)
+            proxy_meter.start(10, active=px is not None and not args.cdp_endpoint)
+            asyncio.run(puppeteer_scraper._block_media_if_needed(ns(target=ns(createCDPSession=session)), args, px))
+            assert ("Network.enable" in client.sent) is want, (argv, px, client.sent)
+
+        class Drv:
+            def __init__(self, **kw):
+                self.options = kw.get("options")
+
+            def execute_cdp_cmd(self, *_a):
+                pass
+
+            def get_log(self, _kind):
+                return []
+
+        class Opts:
+            def __init__(self):
+                self.debugger_address, self.binary_location, self.caps = None, None, {}
+
+            def add_argument(self, _a):
+                pass
+
+            def set_capability(self, k, v):
+                self.caps[k] = v
+
+            def to_capabilities(self):
+                return dict(self.caps)
+        saved = (selenium_scraper.webdriver, selenium_scraper.Options, selenium_scraper.Service)
+        selenium_scraper.webdriver = type("wd", (), {"Chrome": Drv})
+        selenium_scraper.Options, selenium_scraper.Service = Opts, None
+        try:
+            for px, want in ((proxy, True), (None, False)):
+                proxy_meter.start(10, active=px is not None)
+                drv = selenium_scraper._build_driver(headless=True, proxy=px, cdp_endpoint=None)
+                assert (drv.options.caps.get("goog:loggingPrefs", {}).get("performance") == "ALL"
+                        and hasattr(drv, "_proxy_meter_poll")) is want, (px, drv.options.caps)
+        finally:
+            selenium_scraper.webdriver, selenium_scraper.Options, selenium_scraper.Service = saved
+    finally:
+        proxy_meter.start(None, active=False)
+
+
+@check("canary: the proxied run passes --proxy-budget-mb 10 and is followed by an always-run 'Proxy traffic' step that writes '**canary-live**: proxy traffic X.X MB of 10 MB' to the job summary, is red with '::error::stopped: proxy budget 10 MB exceeded' when the run stopped at the budget, and copes with a missing sidecar; the managed-browser job carries no proxy budget")
+def _():
+    if not (ROOT / ".github").is_dir():
+        return  # the Docker image ships no workflows; the repository's own CI runs this check
+    text = (ROOT / ".github" / "workflows" / "canary.yml").read_text(encoding="utf-8")
+    live, cdp = text.split("\n  canary-cdp:", 1)
+    assert "--out canary_out.json --dump-html --proxy-budget-mb 10" in live
+    step = live.split("- name: Proxy traffic", 1)
+    assert len(step) == 2 and live.index("--proxy-budget-mb 10") < live.index("- name: Proxy traffic")
+    body = step[1].split("- name:", 1)[0]
+    assert "if: always()" in body and "python3 .github/proxy_traffic_summary.py canary_out.json canary-live 10" in body
+    assert "--proxy-budget-mb" not in cdp
+    script = str(ROOT / ".github" / "proxy_traffic_summary.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        summary = Path(tmp) / "summary.md"
+        import os
+        env = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary))
+
+        def summarise(meta=None, attempt=None):
+            for suffix, data in ((".meta.json", meta), (".latest_attempt.meta.json", attempt)):
+                path = Path(tmp) / ("canary_out.json" + suffix)
+                if path.exists():
+                    path.unlink()
+                if data is not None:
+                    path.write_text(json.dumps(data), encoding="utf-8")
+            proc = subprocess.run([sys.executable, script, "canary_out.json", "canary-live", "10"], cwd=tmp, env=env,
+                                  capture_output=True, text=True, timeout=60)
+            return proc, (summary.read_text().splitlines()[-1] if summary.exists() else "")
+        proc, last = summarise({"proxy_bytes": 4_321_000, "proxy_budget_exceeded": False, "finished_at": 2})
+        assert proc.returncode == 0 and last == "**canary-live**: proxy traffic 4.3 MB of 10 MB", (proc.stdout, last)
+        proc, last = summarise(None, {"proxy_bytes": 10_200_000, "proxy_budget_exceeded": True, "finished_at": 3})
+        assert proc.returncode == 1 and "::error::stopped: proxy budget 10 MB exceeded" in proc.stdout, proc.stdout
+        proc, last = summarise({"proxy_bytes": 1, "proxy_budget_exceeded": False, "finished_at": 1},
+                               {"proxy_bytes": 10_200_000, "proxy_budget_exceeded": True, "finished_at": 5})
+        assert proc.returncode == 1, "the newer of the two sidecars is the run's"
+        proc, last = summarise()
+        assert proc.returncode == 0 and "not recorded" in last, proc.stdout
+
+
+@check("--cdp-endpoint: when the Scraping Browser API detects a challenge on a navigation, each CDP engine "
+       "waits for its solve to end and for real content, and then classifies the page by what was served — "
+       "not by the challenge's own HTTP 403 read 1.5 s after domcontentloaded (2026-11-05 canary: DataDome "
+       "interstitial, 'captcha solved' logged, page reported blocked). No detection: nothing waits. "
+       "No content after the solve: the 403 stands")
+def _():
+    interstitial = (ROOT / "tests" / "fixtures" / "g2_datadome_interstitial.html").read_text(encoding="utf-8")
+    served = listing_html(cards=5)
+    has_cards = lambda h: gp.count_result_cards(h) >= gp.MIN_CARD_MATCHES  # noqa: E731
+
+    class FakePage:
+        def __init__(self, pages, events, finish_after):
+            self.pages, self.events, self.finish_after, self.reads = list(pages), events, finish_after, 0
+
+        async def content(self):
+            self.reads += 1
+            return self.pages.pop(0) if len(self.pages) > 1 else self.pages[0]
+
+    def scenario(engine, pages, *, detected=True, document_status=200, finish_after=3):
+        events = captcha_solver.AutoSolveEvents()
+        mark = events.mark()
+        if detected:
+            events.on_detected()
+        page = FakePage(pages, events, finish_after)
+        slept = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+            if len(slept) == finish_after and detected:
+                events.on_finished()
+                events.document_status = document_status
+
+        original = engine.asyncio.sleep
+        engine.asyncio.sleep = fake_sleep
+        try:
+            result = asyncio.run(engine._settle_autosolve(page, events, mark, 403, interstitial, has_cards))
+        finally:
+            engine.asyncio.sleep = original
+        return result, slept, page
+
+    for engine in (playwright_scraper, puppeteer_scraper):
+        name = engine.__name__
+        (status, html), slept, page = scenario(engine, [interstitial, interstitial, served])
+        assert has_cards(html) and status == 200, (name, status)
+        assert len(slept) >= 3, (name, "returned before the solve finished", slept)
+        # The reload kept a 4xx document status: content still decides, and no 4xx is reported.
+        (status, html), _, _ = scenario(engine, [served], document_status=403)
+        assert has_cards(html) and status is None, (name, status)
+        # Nothing detected on this navigation: no wait, no read, original values back.
+        (status, html), slept, page = scenario(engine, [served], detected=False)
+        assert (status, html, slept, page.reads) == (403, interstitial, [], 0), (name, status, slept)
+        # Solve ended but the page never rendered content: the refusal stands, bounded wait.
+        (status, html), slept, _ = scenario(engine, [interstitial])
+        assert status == 403 and not has_cards(html), (name, status)
+        bound = captcha_solver.AUTOSOLVE_FINISH_TIMEOUT_S + captcha_solver.AUTOSOLVE_CONTENT_TIMEOUT_S
+        assert sum(slept) <= bound, (name, sum(slept))
+
+
+def run() -> int:
+    """All @check-decorated functions above already ran at import time
+    (that's the point — see the `check()` docstring) and self-registered
+    into RESULTS. This just reports them."""
+    passed = sum(1 for _, ok, _ in RESULTS if ok)
+    failed = [(n, d) for n, ok, d in RESULTS if not ok]
+    print(f"smoke_test: {passed}/{len(RESULTS)} checks passed")
+    for name, detail in failed:
+        print(f"  FAIL: {name}\n        {detail}")
+    return 0 if not failed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(run())
