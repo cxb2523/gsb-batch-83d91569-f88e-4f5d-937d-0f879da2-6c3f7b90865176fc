@@ -11,6 +11,8 @@ import io
 import logging
 import zlib
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from enum import StrEnum
 
 from defusedxml import ElementTree
 from defusedxml.common import DefusedXmlException
@@ -65,6 +67,35 @@ def parse(body: bytes) -> tuple[str | None, list[str]]:
     return root_type or None, locs
 
 
+class SitemapOutcome(StrEnum):
+    """How one attempt to read a sitemap ended.
+
+    ``not_requested`` and the other skip outcomes mean no HTTP request was sent,
+    unlike ``request_failed`` and ``http_error``.
+    """
+
+    urlset = "urlset"  # read a urlset; its page URLs were yielded
+    index = "index"  # read a sitemapindex; its children were considered
+    request_failed = "request_failed"  # the request raised RequestFailed
+    http_error = "http_error"  # a response arrived, but its status was not 2xx
+    not_sitemap = "not_sitemap"  # a 2xx body whose content is not a sitemap
+    off_host = "off_host"  # child on another host; not requested
+    follow_rejected = "follow_rejected"  # follow() returned False; not requested
+    depth_limited = "depth_limited"  # nesting past MAX_DEPTH; not requested
+    duplicate = "duplicate"  # the sitemap was already visited; not requested
+    not_requested = "not_requested"  # the session sent no request (dedupe/robots)
+
+
+@dataclass(frozen=True)
+class SitemapRecord:
+    """One sitemap read attempt, in the order the walk reached it."""
+
+    url: str
+    depth: int  # 0 for the top-level sitemap, 1 for its children, ...
+    outcome: SitemapOutcome
+    reason: str
+
+
 class SitemapWalk:
     """Async-iterable page URLs from a sitemap, following indexes on the same host.
 
@@ -72,6 +103,10 @@ class SitemapWalk:
     ``root_ok`` becomes True once the top-level sitemap has been read.
     ``follow(child_url)`` decides which child sitemaps of an index are read.
     ``kind`` is the request kind for every sitemap fetched.
+
+    Every sitemap the walk reaches -- the top-level map and each index child,
+    including ones that are skipped without a request -- gets one entry in
+    :attr:`records`, appended in visit order. Iterating still yields only page URLs.
     """
 
     def __init__(
@@ -88,33 +123,100 @@ class SitemapWalk:
         self.root_ok = False
         self.hosts = {hostname(sitemap_url)}
         self._visited: set[str] = set()
+        self._records: list[SitemapRecord] = []
+
+    @property
+    def records(self) -> list[SitemapRecord]:
+        """A read-only snapshot of every sitemap read attempt, in visit order."""
+        return list(self._records)
+
+    def _record(self, url: str, depth: int, outcome: SitemapOutcome, reason: str) -> None:
+        self._records.append(SitemapRecord(url, depth, outcome, reason))
 
     def __aiter__(self) -> AsyncIterator[str]:
         return self._walk(self.sitemap_url, 0)
 
     async def _walk(self, url: str, depth: int) -> AsyncIterator[str]:
-        if url in self._visited or depth > MAX_DEPTH:
+        if url in self._visited:
+            self._record(url, depth, SitemapOutcome.duplicate, "sitemap already visited")
+            return
+        if depth > MAX_DEPTH:
+            self._record(
+                url,
+                depth,
+                SitemapOutcome.depth_limited,
+                f"depth {depth} exceeds the maximum of {MAX_DEPTH}",
+            )
             return
         self._visited.add(url)
         try:
             response = await self.session.get(url, kind=self.kind)
         except RequestFailed as exc:
             logger.info("Sitemap request failed: %s", exc)
+            if isinstance(exc.cause, BaseException):
+                reason = f"{type(exc.cause).__name__}: {exc}"
+            else:
+                reason = str(exc)
+            self._record(url, depth, SitemapOutcome.request_failed, reason)
             return
-        if response is None or not response.ok:
+        if response is None:
+            # The session skipped the request itself (its own dedupe or robots.txt);
+            # nothing was sent, so this is not a request failure.
+            self._record(
+                url,
+                depth,
+                SitemapOutcome.not_requested,
+                "request not sent: skipped by the session",
+            )
+            return
+        if not response.ok:
+            self._record(
+                url, depth, SitemapOutcome.http_error, f"HTTP {response.status} response"
+            )
             return
         root, locs = parse(response.body)
         if depth == 0:
             self.hosts.add(hostname(response.url))
             self.root_ok = root is not None
+        if root is None:
+            self._record(
+                url, depth, SitemapOutcome.not_sitemap, "response body is not a sitemap"
+            )
+            return
         if root == "sitemapindex":
+            self._record(
+                url,
+                depth,
+                SitemapOutcome.index,
+                f"sitemapindex listing {len(locs)} child sitemap(s)",
+            )
             for loc in locs:
+                child_depth = depth + 1
                 if hostname(loc) not in self.hosts:
                     logger.info("Skipping off-host child sitemap %s", loc)
-                elif self.follow(loc):
-                    async for page in self._walk(loc, depth + 1):
+                    self._record(
+                        loc,
+                        child_depth,
+                        SitemapOutcome.off_host,
+                        f"host {hostname(loc)!r} is not one of the top-level sitemap's hosts",
+                    )
+                elif not self.follow(loc):
+                    self._record(
+                        loc,
+                        child_depth,
+                        SitemapOutcome.follow_rejected,
+                        "rejected by the follow callback",
+                    )
+                else:
+                    async for page in self._walk(loc, child_depth):
                         yield page
-        elif root == "urlset":
+        else:  # urlset
+            self._record(
+                url,
+                depth,
+                SitemapOutcome.urlset,
+                f"urlset yielding {len(locs)} page URL(s)",
+            )
             for loc in locs:
                 yield loc
 
