@@ -47,6 +47,19 @@ import { toast } from 'sonner';
 import { fetchActiveSubjects } from '../services/nats-service';
 import { subjectTracker, type SubjectActivity } from '../services/subject-tracker';
 import { getCustomTopics, addCustomTopic, removeCustomTopic } from '../services/custom-topics';
+import {
+  type CollectionSession,
+  type CollectedMessage,
+  startSession,
+  findActiveSession,
+  findLatestSession,
+  recordMessage,
+  stopSession,
+  interruptSession,
+  interruptAllSessions,
+  clearSessionMessages,
+  buildSessionExport,
+} from '../services/collection-sessions';
 import { TopicSkeleton } from '../components/ui/skeletons';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
@@ -211,30 +224,39 @@ const MessageItem = memo(({
   );
 });
 
-interface Message {
-  id: string;
-  subject: string;
-  data: string;
-  headers?: Record<string, string>;
-  timestamp: Date;
-  replyTo?: string;
-}
+// Messages are stored inside their collection session, not in a global array,
+// so what the user sees (and exports) always belongs to one auditable run.
+type Message = CollectedMessage;
 
-interface Subscription {
-  id: string;
-  subject: string;
-  queueGroup?: string;
-  messageCount: number;
-  isActive: boolean;
-  unsubscribe?: () => void;
-}
+const SESSION_STATUS_LABEL: Record<CollectionSession['status'], string> = {
+  collecting: 'Collecting',
+  stopped: 'Stopped',
+  interrupted: 'Interrupted',
+};
+
+const SESSION_STATUS_VARIANT: Record<CollectionSession['status'], 'default' | 'secondary' | 'destructive'> = {
+  collecting: 'default',
+  stopped: 'secondary',
+  interrupted: 'destructive',
+};
 
 
 const MessagesComponent = function Messages() {
-  const { connection, isConnected, config } = useNats();
+  const { connection, isConnected, config, error: connectionError } = useNats();
   const server = config.server;
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  // Collection sessions live only in memory: they describe live subscriptions,
+  // so a page reload starts clean and can never resurrect a stale "collecting"
+  // state. They are also independent from custom-topic bookmarks.
+  const [sessions, setSessions] = useState<CollectionSession[]>([]);
+  // Unsubscribe handles are functions, so they live in a ref keyed by session id
+  // rather than in serializable state.
+  const unsubscribeFns = useRef<Map<string, () => void>>(new Map());
+  // Mirror of sessions for event handlers, so subscribe can decide reuse
+  // synchronously without side effects inside a state updater.
+  const sessionsRef = useRef<CollectionSession[]>(sessions);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [topics, setTopics] = useState<string[]>([]);
   const [isLoadingTopics, setIsLoadingTopics] = useState(false);
@@ -294,10 +316,14 @@ const MessagesComponent = function Messages() {
   });
 
   // Memoized computations to prevent unnecessary re-renders
+  const selectedSession = useMemo(() => {
+    if (!selectedTopic) return undefined;
+    return findLatestSession(sessions, selectedTopic);
+  }, [sessions, selectedTopic]);
+
   const filteredMessages = useMemo(() => {
-    if (!selectedTopic) return [];
-    return messages.filter(m => m.subject === selectedTopic);
-  }, [messages, selectedTopic]);
+    return selectedSession?.messages ?? [];
+  }, [selectedSession]);
 
   // State for subject activities that updates when subjects change
   const [subjectActivities, setSubjectActivities] = useState<Map<string, SubjectActivity>>(new Map());
@@ -305,7 +331,7 @@ const MessagesComponent = function Messages() {
   // Memoized topic list data with stable references
   const topicListData = useMemo(() => {
     const selectedTopicRef = selectedTopic;
-    const subscriptionsRef = subscriptions;
+    const sessionsRef = sessions;
 
     // Filter out _INBOX topics if hideInboxTopics is true
     const filteredTopics = hideInboxTopics
@@ -315,7 +341,7 @@ const MessagesComponent = function Messages() {
     return filteredTopics.map((topic) => {
       const activity = subjectActivities.get(topic);
       const isSelected = selectedTopicRef === topic;
-      const isSubscribed = subscriptionsRef.some(s => s.subject === topic && s.isActive);
+      const isSubscribed = sessionsRef.some(s => s.subject === topic && s.status === 'collecting');
       const isCustom = customTopicsSet.has(topic);
 
       return {
@@ -326,7 +352,7 @@ const MessagesComponent = function Messages() {
         isCustom
       };
     });
-  }, [topics, subjectActivities, selectedTopic, subscriptions, hideInboxTopics, customTopicsSet]);
+  }, [topics, subjectActivities, selectedTopic, sessions, hideInboxTopics, customTopicsSet]);
   
   // Memoized topic list component to prevent re-renders
   const TopicListMemoized = useMemo(() => {
@@ -454,30 +480,30 @@ const MessagesComponent = function Messages() {
   }, [connection, publishForm]);
 
   const handleSubscribe = useCallback(async (data: SubscribeFormData) => {
-    
+
     if (!connection) {
       toast.error('Not connected to NATS server');
       return;
     }
 
+    // One active session per subject: reuse it instead of opening a parallel one.
+    const result = startSession(sessionsRef.current, data.subject, data.queueGroup);
+
+    if (result.reused) {
+      toast.info(`Already collecting on ${data.subject}`, {
+        description: 'The existing collection session is still running.',
+      });
+      return;
+    }
+
+    setSessions(result.sessions);
+    sessionsRef.current = result.sessions;
+    const sessionId = result.session.id;
+
     try {
-      const subscriptionId = `sub_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
-      
-      // Add to subscriptions list
-      const newSubscription: Subscription = {
-        id: subscriptionId,
-        subject: data.subject,
-        queueGroup: data.queueGroup,
-        messageCount: 0,
-        isActive: true,
-      };
-
-      setSubscriptions(prev => [...prev, newSubscription]);
-
       // Subscribe using our NatsService
       const unsubscribe = await connection.subscribe(data.subject, (msg: { subject: string; data: unknown; headers?: Record<string, string>; timestamp: number; reply?: string }) => {
-        
+
         const message: Message = {
           id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           subject: msg.subject,
@@ -487,44 +513,54 @@ const MessagesComponent = function Messages() {
           replyTo: msg.reply,
         };
 
-        setMessages(prev => [message, ...prev.slice(0, 999)]); // Keep only last 1000 messages
-        
-        // Update message count
-        setSubscriptions(prev => prev.map(s => 
-          s.id === subscriptionId ? { ...s, messageCount: s.messageCount + 1 } : s
-        ));
+        setSessions(prev => recordMessage(prev, sessionId, message));
       });
 
-      // Store the unsubscribe function for later use
-      setSubscriptions(prev => prev.map(s => 
-        s.id === subscriptionId ? { ...s, unsubscribe } : s
-      ));
+      unsubscribeFns.current.set(sessionId, unsubscribe);
 
-      toast.success(`Subscribed to ${data.subject}`);
+      toast.success(`Started collection on ${data.subject}`);
       subscribeForm.reset();
     } catch (err) {
       console.error('Subscribe error:', err);
+      const reason = err instanceof Error && err.message ? err.message : 'Failed to subscribe to subject';
+      setSessions(prev => interruptSession(prev, sessionId, reason));
       toast.error('Failed to subscribe to subject');
     }
   }, [connection, subscribeForm]);
 
-  const handleUnsubscribe = useCallback((subscriptionId: string) => {
-    setSubscriptions(prev => prev.map(s => {
-      if (s.id === subscriptionId) {
-        // Call the actual unsubscribe function
-        if (s.unsubscribe) {
-          try {
-            s.unsubscribe();
-          } catch (err) {
-            console.error('Error unsubscribing:', err);
-          }
-        }
-        return { ...s, isActive: false };
+  const handleUnsubscribe = useCallback((sessionId: string) => {
+    const unsubscribe = unsubscribeFns.current.get(sessionId);
+    if (unsubscribe) {
+      try {
+        unsubscribe();
+      } catch (err) {
+        console.error('Error unsubscribing:', err);
       }
-      return s;
-    }));
-    toast.success('Unsubscribed');
+      unsubscribeFns.current.delete(sessionId);
+    }
+    // The session stays in the list as "stopped" with its count frozen.
+    setSessions(prev => stopSession(prev, sessionId));
+    toast.success('Collection stopped');
   }, []);
+
+  // When the connection drops, every collecting session must become
+  // "interrupted" with a reason — never left showing as collecting. Old
+  // sessions are not resumed on reconnect; the user subscribes again.
+  const wasConnectedRef = useRef(isConnected);
+  useEffect(() => {
+    if (wasConnectedRef.current && !isConnected) {
+      const reason = connectionError
+        ? `Connection lost: ${connectionError}`
+        : 'Connection to NATS server lost';
+      unsubscribeFns.current.clear();
+      const hadCollecting = sessionsRef.current.some(s => s.status === 'collecting');
+      setSessions(prev => interruptAllSessions(prev, reason));
+      if (hadCollecting) {
+        toast.error('Collection sessions interrupted', { description: reason });
+      }
+    }
+    wasConnectedRef.current = isConnected;
+  }, [isConnected, connectionError]);
 
 
   const toggleHeaderExpansion = useCallback((messageId: string) => {
@@ -962,9 +998,16 @@ const MessagesComponent = function Messages() {
                     <CardTitle className="flex items-center gap-2">
                       <MessageSquare className="h-5 w-5" />
                       Messages for {selectedTopic} ({filteredMessages.length})
+                      {selectedSession && (
+                        <Badge variant={SESSION_STATUS_VARIANT[selectedSession.status]} className="text-xs">
+                          {SESSION_STATUS_LABEL[selectedSession.status]}
+                        </Badge>
+                      )}
                     </CardTitle>
                     <CardDescription>
-                      Messages received from this topic
+                      {selectedSession
+                        ? `Session started ${selectedSession.startedAt.toLocaleString()} · ${selectedSession.messageCount} message${selectedSession.messageCount === 1 ? '' : 's'}${selectedSession.lastMessageAt ? ` · last at ${selectedSession.lastMessageAt.toLocaleTimeString()}` : ''}${selectedSession.lastError ? ` · ${selectedSession.lastError}` : ''}`
+                        : 'Messages received from this topic'}
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
@@ -972,27 +1015,27 @@ const MessagesComponent = function Messages() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        const exportData = filteredMessages.map(msg => ({
-                          subject: msg.subject,
-                          data: msg.data,
-                          headers: msg.headers,
-                          timestamp: msg.timestamp.toISOString(),
-                          replyTo: msg.replyTo,
-                        }));
+                        if (!selectedSession) return;
+                        // Export the session for the selected topic: metadata
+                        // (subject, status, count, time range, last error) plus
+                        // the message detail. Works for empty and interrupted
+                        // sessions too — the status is exported as-is.
+                        const exportData = buildSessionExport(selectedSession);
                         const blob = new Blob([JSON.stringify(exportData, null, 2)], {
                           type: 'application/json',
                         });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
-                        a.download = `nats-${selectedTopic}-${new Date().toISOString().split('T')[0]}.json`;
+                        a.download = `nats-session-${selectedTopic}-${new Date().toISOString().split('T')[0]}.json`;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
-                        toast.success('Messages exported successfully');
+                        toast.success('Session exported successfully');
                       }}
-                      disabled={filteredMessages.length === 0}
+                      disabled={!selectedSession}
+                      title={selectedSession ? 'Export this collection session as JSON' : 'No collection session for this topic yet'}
                     >
                       <Download className="h-4 w-4" />
                     </Button>
@@ -1000,10 +1043,11 @@ const MessagesComponent = function Messages() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        setMessages(prev => prev.filter(m => m.subject !== selectedTopic));
+                        if (!selectedSession) return;
+                        setSessions(prev => clearSessionMessages(prev, selectedSession.id));
                         toast.success('Messages cleared');
                       }}
-                      disabled={filteredMessages.length === 0}
+                      disabled={!selectedSession || filteredMessages.length === 0}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -1011,10 +1055,9 @@ const MessagesComponent = function Messages() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        const isSubscribed = subscriptions.some(s => s.subject === selectedTopic && s.isActive);
-                        if (isSubscribed) {
-                          const sub = subscriptions.find(s => s.subject === selectedTopic && s.isActive);
-                          if (sub) handleUnsubscribe(sub.id);
+                        const active = selectedTopic ? findActiveSession(sessions, selectedTopic) : undefined;
+                        if (active) {
+                          handleUnsubscribe(active.id);
                         } else {
                           if (selectedTopic) {
                             handleSubscribe({ subject: selectedTopic, queueGroup: '' });
@@ -1023,7 +1066,7 @@ const MessagesComponent = function Messages() {
                       }}
                       className="flex items-center justify-center"
                     >
-                      {subscriptions.some(s => s.subject === selectedTopic && s.isActive) ? (
+                      {selectedTopic && findActiveSession(sessions, selectedTopic) ? (
                         <Square className="h-4 w-4" />
                       ) : (
                         <Play className="h-4 w-4" />
@@ -1041,24 +1084,26 @@ const MessagesComponent = function Messages() {
                             <div className="space-y-2">
                               <h3 className="text-lg font-semibold text-center">No messages yet</h3>
                               <p className="text-sm text-muted-foreground text-center max-w-sm mx-auto leading-relaxed">
-                                {subscriptions.some(s => s.subject === selectedTopic && s.isActive)
+                                {selectedSession?.status === 'collecting'
                                   ? "Waiting for messages on this topic..."
-                                  : "Subscribe to this topic to start receiving messages"}
+                                  : selectedSession?.status === 'interrupted'
+                                    ? `Collection was interrupted${selectedSession.lastError ? `: ${selectedSession.lastError}` : ''}. Subscribe again to start a new session.`
+                                    : "Subscribe to this topic to start receiving messages"}
                               </p>
                             </div>
                           </div>
-                          {subscriptions.some(s => s.subject === selectedTopic && s.isActive) ? (
+                          {selectedTopic && findActiveSession(sessions, selectedTopic) ? (
                             <Button
                               variant="outline"
                               onClick={() => {
-                                const sub = subscriptions.find(s => s.subject === selectedTopic && s.isActive);
-                                if (sub) handleUnsubscribe(sub.id);
+                                const active = findActiveSession(sessions, selectedTopic);
+                                if (active) handleUnsubscribe(active.id);
                               }}
                               className="mx-auto"
                               size="lg"
                             >
                               <Square className="mr-2 h-4 w-4" />
-                              Unsubscribe
+                              Stop Collection
                             </Button>
                           ) : (
                             <Button
@@ -1101,6 +1146,78 @@ const MessagesComponent = function Messages() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* Collection Sessions - auditable subscribe runs, kept after stop */}
+              {sessions.length > 0 && (
+                <Card className="flex-shrink-0">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Clock className="h-5 w-5" />
+                      Collection Sessions ({sessions.length})
+                    </CardTitle>
+                    <CardDescription>
+                      Each subscribe run is recorded here. Stopped and interrupted sessions are kept for review.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {[...sessions].reverse().map((session) => (
+                        <div
+                          key={session.id}
+                          className={`rounded-lg border p-3 space-y-1 cursor-pointer transition-colors ${
+                            selectedTopic === session.subject ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'
+                          }`}
+                          onClick={() => setSelectedTopic(session.subject)}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono text-sm truncate">{session.subject}</span>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <span className="text-xs text-muted-foreground">
+                                {session.messageCount} message{session.messageCount === 1 ? '' : 's'}
+                              </span>
+                              <Badge variant={SESSION_STATUS_VARIANT[session.status]} className="text-xs">
+                                {SESSION_STATUS_LABEL[session.status]}
+                              </Badge>
+                              {session.status === 'collecting' && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-5 w-5"
+                                  title="Stop collection"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleUnsubscribe(session.id);
+                                  }}
+                                >
+                                  <Square className="h-3 w-3" />
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
+                            <span>started {session.startedAt.toLocaleString()}</span>
+                            {session.lastMessageAt && (
+                              <>
+                                <span>•</span>
+                                <span>last message {session.lastMessageAt.toLocaleTimeString()}</span>
+                              </>
+                            )}
+                            {session.endedAt && (
+                              <>
+                                <span>•</span>
+                                <span>ended {session.endedAt.toLocaleTimeString()}</span>
+                              </>
+                            )}
+                          </div>
+                          {session.lastError && (
+                            <p className="text-xs text-destructive">{session.lastError}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
             </div>
           )}
         </div>
