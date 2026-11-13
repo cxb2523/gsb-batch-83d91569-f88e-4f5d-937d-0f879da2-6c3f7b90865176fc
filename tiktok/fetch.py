@@ -350,7 +350,7 @@ def _api_once(client, path, params, *, signed, base, host, referer):
 
 
 def api(path, params, *, country=None, countries=None, signed=True, boot=False, base=True, host=WWW,
-        budget=None, referer=None, not_found=(), bad_request=(), ok=(0,), label=None):
+        budget=None, referer=None, not_found=(), bad_request=(), ok=(0,), label=None, used=None):
     """One web API call -> the parsed JSON dict.
 
     countries    exit countries to try in order (default: `country` or the
@@ -364,6 +364,9 @@ def api(path, params, *, country=None, countries=None, signed=True, boot=False, 
     bad_request  upstream status codes that mean the params were refused
     ok           status codes returned to the caller as-is; any other code is
                  an upstream error naming the code
+    used         optional dict; on success receives {"country": <exit that
+                 answered>}, which may be a fallback rather than the first
+                 country asked (callers must not assume the order held)
     """
     order = countries or country_order(country)
     what = label or path
@@ -404,6 +407,8 @@ def api(path, params, *, country=None, countries=None, signed=True, boot=False, 
                 raise TikTokBadRequest(_status_message(payload) or f"status {status}")
             if status not in ok:
                 raise TikTokUpstreamError(f"{what}: upstream status {status} {_status_message(payload)}".strip())
+            if used is not None:
+                used["country"] = code
             return payload
     raise last or TikTokUpstreamError(f"{what} failed")
 

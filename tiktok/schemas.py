@@ -12,7 +12,7 @@ ONE param per input (tripadvisor QueryOrIdField convention, never a sibling
   music, playlist, collection, place, effect
               the numeric id or the entity's tiktok.com link
 """
-from marshmallow import validate
+from marshmallow import fields, validate
 
 from schema_fields import (BaseSchema, ChoiceField, CountryCodeField, DateField, LanguageCodeField, QueryField,
                            RefField, StrippedString)
@@ -79,6 +79,18 @@ USER_DESC = "username, @username, secUid or tiktok.com profile link"
 VIDEO_DESC = "video id, or a tiktok.com video / photo link, or a share link (vm.tiktok.com/…, tiktok.com/t/…)"
 
 
+class MaxPagesField(fields.Integer):
+    """How many search pages one request collects, back to back (default 3,
+    allowed 1-10). Out of range is a 400."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("load_default", search.DEFAULT_MAX_PAGES)
+        kwargs.setdefault("validate", validate.Range(
+            min=1, max=search.MAX_PAGES_LIMIT,
+            error=f"Must be between 1 and {search.MAX_PAGES_LIMIT}."))
+        super().__init__(strict=False, **kwargs)
+
+
 class EmptySchema(BaseSchema):
     pass
 
@@ -127,6 +139,7 @@ class SearchSchema(BaseSchema):
     query = QueryField(max_length=200)
     country = ExitCountryField()
     cursor = CursorField(pattern=SEARCH_CURSOR)
+    max_pages = MaxPagesField(metadata={"description": "pages to collect in this one request (1-10, default 3)"})
 
 
 class VideoSearchSchema(SearchSchema):
@@ -137,6 +150,7 @@ class VideoSearchSchema(SearchSchema):
 class UserSearchSchema(BaseSchema):
     query = QueryField(max_length=200)
     cursor = CursorField(pattern=SEARCH_CURSOR)
+    max_pages = MaxPagesField(metadata={"description": "pages to collect in this one request (1-10, default 3)"})
 
 
 class SuggestionsSchema(BaseSchema):

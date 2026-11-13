@@ -104,9 +104,45 @@ TikTok answers plain requests from an ordinary residential IP in a country where
 | User Followers / Following | `/users/followers`, `/users/following` | 30 accounts per page, each with counters |
 | User Playlists / Collections | `/users/playlists`, `/users/collections` | Playlists and public collections with covers & counts |
 | Resolve User | `/users/resolve` | Username ↔ ID ↔ secUid with follower count |
-| Search Videos | `/search/videos` | 20 per page; sort by relevance or likes, filter by date |
-| Search Users / Top / Live | `/search/users`, `/search/top`, `/search/live` | Accounts, TikTok's Top tab, live streams with viewer counts |
+| Search Videos | `/search/videos` | 20 per page; sort by relevance or likes, filter by date; up to 3 pages (`max_pages` 1-10) in one call |
+| Search Users / Top / Live | `/search/users`, `/search/top`, `/search/live` | Accounts, TikTok's Top tab, live streams with viewer counts; same `max_pages` paging |
 | Search Suggestions | `/search/suggestions` | What the search box suggests while typing |
+
+### Search paging (`/search/videos`, `/search/users`, `/search/top`, `/search/live`)
+
+Paging happens server-side: one request walks up to `max_pages` pages
+(default 3, allowed 1-10; anything else is a 400), reusing the first page's
+search id. Besides the merged results, every answer carries:
+
+| Field | Meaning |
+|---|---|
+| `pages[]` | One entry per page actually fetched: `{page, count, country, next_cursor}` — the exit country that answered it and the cursor for the next page (`null` on the last). |
+| `stop` | `{reason, message, last_page}` — why paging ended. |
+| `next_cursor` / `has_more` | The cursor to continue past the collected pages, or `null` when there is nothing more. |
+
+`stop.reason` is one of:
+
+- `done` — upstream reported `has_more` false (or `max_pages` was reached with a valid cursor; the message says which).
+- `cursor_stalled` — `has_more` was true but the next cursor was empty or repeated the current page. HTTP 200, the pages fetched so far are kept.
+- `upstream_error` — every exit and retry failed. HTTP 200, the pages fetched so far are kept.
+- `bad_cursor` — the incoming cursor has no numeric offset. HTTP 400, `pages` is empty.
+
+```bash
+curl "http://localhost:8000/search/videos?query=nasa&max_pages=2"
+```
+
+```json
+{
+  "query": "nasa",
+  "video_count": 40,
+  "pages": [
+    { "page": 1, "count": 20, "country": "US", "next_cursor": "20.20261005135356D987AA8C89367BE6C0E1" },
+    { "page": 2, "count": 20, "country": "US", "next_cursor": null }
+  ],
+  "stop": { "reason": "done", "message": "upstream reported has_more false", "last_page": 2 },
+  "next_cursor": null, "has_more": false
+}
+```
 | Hashtag Details / Videos | `/hashtags/details`, `/hashtags/videos` | Video count, total views; videos in ranked order |
 | Music Details / Videos | `/music/details`, `/music/videos` | Sound info with Apple Music / Spotify ids; videos using it |
 | Playlist / Collection Videos | `/playlists/details`, `/playlists/videos`, `/collections/videos` | Playlists and collections, 30 videos per page |

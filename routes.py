@@ -27,14 +27,35 @@ def query_dict():
     return {key: request.query.getunicode(key) for key in request.query.keys()}
 
 
+SEARCH_SCHEMAS = (schemas.VideoSearchSchema, schemas.UserSearchSchema, schemas.SearchSchema)
+
+
+def bad_cursor_body(error):
+    """A search schema rejected the cursor (mangled value) -> the same 400
+    contract the endpoint itself uses for an unparseable cursor: a stop of
+    reason `bad_cursor` and no pages."""
+    messages = (error.get("errors") or {}).get("cursor")
+    if not messages:
+        return None
+    message = "; ".join(messages) if isinstance(messages, list) else str(messages)
+    return {"error": f"Invalid cursor: {message}", "pages": [],
+            "stop": {"reason": search.BAD_CURSOR, "message": message, "last_page": 0}}
+
+
 def call(label, schema, fn):
     """Validate, run, map errors: bad params -> 400, missing entity -> 404,
     transport/blocks -> 500."""
     data, error = load_query(schema, query_dict())
     if error:
+        if schema in SEARCH_SCHEMAS:
+            body = bad_cursor_body(error)
+            if body:
+                return json_response(body, 400)
         return json_response(error, 400)
     try:
         return json_response(fn(**data))
+    except search.BadCursorExhausted as e:  # a cursor with no offset -> 400, pages so far kept
+        return json_response(e.body, 400)
     except ValueError as e:                # bad value
         return json_response({"error": str(e)}, 400)
     except BadRequest as e:                # upstream rejected the request (e.g. a bad cursor)
