@@ -177,7 +177,7 @@ decodo crawl results <id> --wait -o pages.ndjson
 decodo crawl cancel <id>
 ```
 
-`crawl results --wait` lets an agent start a crawl, keep working, and collect the pages later. With `--wait`, the CLI polls every `--poll-interval` seconds (default `5`) and gives up after `--timeout` seconds (default `3600`, exit code `6`); the crawl keeps running until you cancel it. The crawl id goes to stderr as soon as the crawl starts. A `truncated` or `cancelled` crawl prints a warning; a `faulted` crawl still prints its pages, then exits `7`.
+`crawl results --wait` lets an agent start a crawl, keep working, and collect the pages later. With `--wait`, the CLI polls every `--poll-interval` seconds (default `5`) and gives up waiting after `--timeout` seconds (default `3600`, exit code `6`); the crawl keeps running until you cancel it. When that deadline hits, the CLI first fetches and prints the pages completed so far (to stdout or `-o`), then prints the crawl id, the seconds waited, and the `decodo crawl cancel <id>` command to stderr. If fetching those results fails, the CLI exits with that error instead of printing pages. The crawl id goes to stderr as soon as the crawl starts. A `truncated` or `cancelled` crawl prints a warning; a `faulted` crawl still prints its pages, then exits `7`.
 
 > **Upgrading from 1.x:** `decodo search` used the `google_search` scrape target. Use `decodo google-search` or `decodo bing-search` for the previous behaviour.
 

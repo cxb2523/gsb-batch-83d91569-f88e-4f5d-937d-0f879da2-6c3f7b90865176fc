@@ -182,6 +182,93 @@ describe("createCrawlCommand", () => {
     ]);
   });
 
+  it("delivers the pages, then exits 6 when waiting times out", async () => {
+    api.getCrawlStatus.mockResolvedValue({
+      crawl_id: "abc",
+      status: "pending",
+      completed: 1,
+      discovered: 2,
+      failed: 0,
+      in_flight: 1,
+    });
+
+    await expect(
+      runDataCommand(createCrawlCommand(), [
+        "crawl",
+        "https://example.com",
+        "--wait",
+        "--poll-interval",
+        "1",
+        "--timeout",
+        "1",
+      ])
+    ).rejects.toThrow("process.exit:6");
+    expect(exitCode).toBe(6);
+    expect(api.getCrawlResults).toHaveBeenCalledWith("abc");
+    expect(stdout).toEqual([`${JSON.stringify(PAGES[0])}\n`]);
+    expect(stderr).toEqual([
+      "crawl abc started\n",
+      "Error: Crawl abc did not finish within 1s. It is still running; run `decodo crawl cancel abc` to stop it.",
+    ]);
+  });
+
+  it("prints progress and the timeout hint only once when waiting times out", async () => {
+    api.getCrawlStatus.mockResolvedValue({
+      crawl_id: "abc",
+      status: "pending",
+      completed: 0,
+      discovered: 1,
+      failed: 0,
+      in_flight: 1,
+    });
+
+    await expect(
+      runDataCommand(createCrawlCommand(), [
+        "crawl",
+        "https://example.com",
+        "--wait",
+        "--progress",
+        "--poll-interval",
+        "1",
+        "--timeout",
+        "1",
+      ])
+    ).rejects.toThrow("process.exit:6");
+
+    expect(
+      stderr.filter((line) => line.includes("decodo crawl cancel abc"))
+    ).toHaveLength(1);
+    expect(stderr).toContain(
+      "crawl abc pending: 0/1 pages, 0 failed, 1 in flight\n"
+    );
+    expect(stdout).toEqual([`${JSON.stringify(PAGES[0])}\n`]);
+  });
+
+  it("does not print pages when the results call fails after a timeout", async () => {
+    api.getCrawlStatus.mockResolvedValue({
+      crawl_id: "abc",
+      status: "pending",
+    });
+    api.getCrawlResults.mockRejectedValue(new Error("Service unavailable"));
+
+    await expect(
+      runDataCommand(createCrawlCommand(), [
+        "crawl",
+        "https://example.com",
+        "--wait",
+        "--poll-interval",
+        "1",
+        "--timeout",
+        "1",
+      ])
+    ).rejects.toThrow("process.exit:1");
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual([
+      "crawl abc started\n",
+      "Error: Service unavailable",
+    ]);
+  });
+
   it("exits 2 when a wait-only flag is used without --wait", async () => {
     await expect(
       runDataCommand(createCrawlCommand(), [
@@ -268,6 +355,54 @@ describe("createCrawlCommand", () => {
     expect(exitCode).toBeUndefined();
     expect(stderr).toEqual(["Warning: crawl abc ended with status cancelled"]);
     expect(stdout).toEqual([`${JSON.stringify(PAGES[0])}\n`]);
+  });
+
+  it("delivers results pages, then exits 6 when waiting times out", async () => {
+    api.getCrawlStatus.mockResolvedValue({
+      crawl_id: "abc",
+      status: "pending",
+    });
+
+    await expect(
+      runDataCommand(createCrawlCommand(), [
+        "crawl",
+        "results",
+        "abc",
+        "--wait",
+        "--poll-interval",
+        "1",
+        "--timeout",
+        "1",
+      ])
+    ).rejects.toThrow("process.exit:6");
+    expect(exitCode).toBe(6);
+    expect(api.getCrawlResults).toHaveBeenCalledWith("abc", { content: true });
+    expect(stdout).toEqual([`${JSON.stringify(PAGES[0])}\n`]);
+    expect(stderr).toEqual([
+      "Error: Crawl abc did not finish within 1s. It is still running; run `decodo crawl cancel abc` to stop it.",
+    ]);
+  });
+
+  it("does not print results pages when the results call fails after a timeout", async () => {
+    api.getCrawlStatus.mockResolvedValue({
+      crawl_id: "abc",
+      status: "pending",
+    });
+    api.getCrawlResults.mockRejectedValue(new Error("Service unavailable"));
+
+    await expect(
+      runDataCommand(createCrawlCommand(), [
+        "crawl",
+        "results",
+        "abc",
+        "--wait",
+        "--poll-interval",
+        "1",
+        "--timeout",
+        "1",
+      ])
+    ).rejects.toThrow("process.exit:1");
+    expect(stdout).toEqual([]);
   });
 
   it("exits 2 when results gets --timeout without --wait", async () => {

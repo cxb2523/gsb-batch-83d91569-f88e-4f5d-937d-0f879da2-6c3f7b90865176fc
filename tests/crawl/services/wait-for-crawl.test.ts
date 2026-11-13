@@ -1,5 +1,6 @@
-import { TimeoutError, type WebScrapingApi } from "@decodo/sdk-ts";
+import type { WebScrapingApi } from "@decodo/sdk-ts";
 import { describe, expect, it, vi } from "vitest";
+import { CrawlTimeoutError } from "../../../src/crawl/errors/crawl-timeout-error.js";
 import { waitForCrawl } from "../../../src/crawl/services/wait-for-crawl.js";
 
 function apiReturning(...statuses: string[]): WebScrapingApi {
@@ -49,15 +50,11 @@ describe("waitForCrawl", () => {
     expect(api.getCrawlStatus).toHaveBeenCalledTimes(2);
   });
 
-  it("throws a TimeoutError naming the cancel command", async () => {
+  it("throws a CrawlTimeoutError naming the crawl and the waited seconds", async () => {
     const api = apiReturning("pending", "pending");
 
     await expect(
       waitForCrawl(api, "abc", { pollIntervalMs: 2000, timeoutMs: 1000 })
-    ).rejects.toThrow(
-      new TimeoutError(
-        "Crawl abc did not finish within 1s. It is still running; run `decodo crawl cancel abc` to stop it."
-      )
-    );
+    ).rejects.toThrow(new CrawlTimeoutError("abc", 1));
   });
 });

@@ -1,9 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import {
-  type GetCrawlStatusResponse,
-  TimeoutError,
-  type WebScrapingApi,
-} from "@decodo/sdk-ts";
+import type { GetCrawlStatusResponse, WebScrapingApi } from "@decodo/sdk-ts";
+import { CrawlTimeoutError } from "../errors/crawl-timeout-error.js";
 
 export interface WaitForCrawlOptions {
   onStatus?: (status: GetCrawlStatusResponse) => void;
@@ -23,9 +20,7 @@ export async function waitForCrawl(
   while (status.status === "pending") {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      throw new TimeoutError(
-        `Crawl ${crawlId} did not finish within ${timeoutMs / 1000}s. It is still running; run \`decodo crawl cancel ${crawlId}\` to stop it.`
-      );
+      throw new CrawlTimeoutError(crawlId, timeoutMs / 1000);
     }
     await sleep(Math.min(pollIntervalMs, remainingMs));
     status = await api.getCrawlStatus(crawlId);

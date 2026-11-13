@@ -7,10 +7,9 @@ import {
   CRAWL_CONTENT_FORMATS,
   CRAWL_START_WAIT_ONLY_FLAGS,
 } from "../constants.js";
-import { assertCrawlSucceeded } from "../services/assert-crawl-succeeded.js";
 import { assertWaitFlags } from "../services/assert-wait-flags.js";
 import { buildCrawlRequest } from "../services/build-crawl-request.js";
-import { settleCrawl } from "../services/settle-crawl.js";
+import { deliverCrawlPages } from "../services/deliver-crawl-pages.js";
 import { writeCrawlPages } from "../services/write-crawl-pages.js";
 import type {
   CrawlOptions,
@@ -44,17 +43,17 @@ function createCrawlResultsCommand(): Command {
   ).action(
     createDataAction<CrawlResultsOptions>(async ({ api, input, options }) => {
       assertWaitFlags(options);
-      const status = options.wait
-        ? await settleCrawl(api, input, options)
-        : undefined;
+      if (!options.wait) {
+        writeCrawlPages(
+          await api.getCrawlResults(input, { content: options.content }),
+          options.output
+        );
+        return;
+      }
 
-      const pages = await api.getCrawlResults(input, {
+      await deliverCrawlPages(api, input, options, {
         content: options.content,
       });
-      writeCrawlPages(pages, options.output);
-      if (status) {
-        assertCrawlSucceeded(status);
-      }
     })
   );
 }
@@ -113,9 +112,7 @@ export function createCrawlCommand(): Command {
         }
 
         process.stderr.write(`crawl ${crawlId} started\n`);
-        const status = await settleCrawl(api, crawlId, options);
-        writeCrawlPages(await api.getCrawlResults(crawlId), options.output);
-        assertCrawlSucceeded(status);
+        await deliverCrawlPages(api, crawlId, options);
       })
     )
     .addCommand(createCrawlStatusCommand())
