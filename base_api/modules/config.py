@@ -85,6 +85,10 @@ class DownloadConfigRAW(BaseConfigDownload):
     chunk_size: int = 1024
     max_retries: int = 5
     resume_state_path: str | None = None
+    # Populated by download_raw on every exit (success or exception) with an
+    # auditable resume conclusion. Inspect it instead of guessing from the
+    # boolean return. None until the first download_raw call.
+    download_conclusion: Any = None
 
 
 @dataclass

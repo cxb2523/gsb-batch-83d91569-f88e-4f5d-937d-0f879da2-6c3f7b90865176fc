@@ -9,6 +9,7 @@ import os
 import re
 from pathlib import Path
 
+from .download_report import RawOutcome, make_conclusion
 from .errors import DownloadCancelled, NetworkRequestError
 from .progress_bars import Callback
 
@@ -20,6 +21,9 @@ class _Checkpoint:
         self.path = Path(path)
         self.lock = asyncio.Lock()
         self.restored = False
+        # True only when a checkpoint existed but was rejected because its
+        # stored ETag/Last-Modified no longer matches the current response.
+        self.validator_mismatch = False
         count = math.ceil(size / chunk_size) if mode == "multipart" else 1
         self.data = {
             "version": 1, "source": hashlib.sha256(source_url.encode()).hexdigest(),
@@ -35,6 +39,9 @@ class _Checkpoint:
                 return
             for name in ("etag", "last_modified"):
                 if saved.get(name) and saved[name] != self.data[name]:
+                    # The remote resource changed since the checkpoint was written;
+                    # callers must be told the old progress is deliberately dropped.
+                    self.validator_mismatch = True
                     return
             width = saved["chunk_size"]
             progress = saved["progress"]
@@ -114,7 +121,12 @@ async def download_raw(core, url, configuration):
     output = Path(configuration.path)
     checkpoint_path = configuration.resume_state_path or f"{output}.raw-state.json"
     event = configuration.stop_event
+    # A fresh conclusion is attached for every call and remains readable on both
+    # the successful return and every raised exception.
+    conclusion = make_conclusion(output)
+    configuration.download_conclusion = conclusion
     if _stopped(event):
+        conclusion.mark(RawOutcome.CANCELLED, mode=None)
         raise DownloadCancelled("Download cancelled.")
     core.initialize_session()
     session = core.session
@@ -136,10 +148,14 @@ async def download_raw(core, url, configuration):
         if response.url:
             url = str(response.url)
     except DownloadCancelled:
+        conclusion.mark(RawOutcome.CANCELLED)
         raise
-    except Exception:
+    except Exception as error:
         # An outage must not turn a persisted partial download into a fresh file.
         if Path(checkpoint_path).exists():
+            # Keep the strict no-fallback behaviour, but make the failure
+            # distinguishable from an ordinary fresh start in the conclusion.
+            conclusion.mark(RawOutcome.METADATA_FAILED, error=repr(error))
             raise
         core.logger.warning("RAW metadata unavailable; falling back to linear streaming", exc_info=True)
     finally:
@@ -148,6 +164,17 @@ async def download_raw(core, url, configuration):
     width = max(configuration.chunk_size, min(10 * 1024 * 1024, max(1, size // 10)))
     state = _Checkpoint(checkpoint_path, original_url, output, mode, size, width, headers)
     progress = list(state.data["progress"])
+    retained_bytes = sum(progress)
+    conclusion.mode = mode
+    conclusion.total_bytes = size
+    conclusion.retained_bytes = retained_bytes
+    if state.restored:
+        conclusion.reused_progress = True
+        conclusion.mark(RawOutcome.RESUMED)
+    elif state.validator_mismatch:
+        # Old checkpoint rejected because the remote ETag/Last-Modified changed;
+        # the transfer restarts from zero and the retained bytes are not reused.
+        conclusion.mark(RawOutcome.VALIDATOR_MISMATCH, reused_progress=False, retained_bytes=0)
     if not state.restored:
         # Create the zero-progress checkpoint before preallocation. An existing
         # full-size sparse file without a valid checkpoint is never considered complete.
@@ -160,7 +187,7 @@ async def download_raw(core, url, configuration):
     elif mode == "linear":
         with output.open("r+b") as file:
             file.truncate(progress[0])
-    core.logger.info("RAW %s: mode=%s retained_bytes=%s total=%s", output, mode, sum(progress), size)
+    core.logger.info("RAW %s: mode=%s retained_bytes=%s total=%s", output, mode, retained_bytes, size)
     bar = Callback() if configuration.callback is None else None
 
     def notify(position, total):
@@ -169,137 +196,154 @@ async def download_raw(core, url, configuration):
         elif bar:
             bar.text_progress_bar(downloaded=position, total=total)
 
-    if sum(progress):
-        notify(sum(progress), size)
+    if retained_bytes:
+        notify(retained_bytes, size)
     validator = state.data.get("etag")
     if not validator or validator.startswith("W/"):
         validator = state.data.get("last_modified")
 
-    if mode == "multipart":
-        width = state.data["chunk_size"]
-        durable = list(progress)
-        semaphore = asyncio.Semaphore(max(1, configuration.max_workers))
+    try:
+        if mode == "multipart":
+            width = state.data["chunk_size"]
+            durable = list(progress)
+            semaphore = asyncio.Semaphore(max(1, configuration.max_workers))
 
-        async def chunk(index):
-            start = index * width
-            end = min(start + width, size) - 1
+            async def chunk(index):
+                start = index * width
+                end = min(start + width, size) - 1
+                for attempt in range(configuration.max_retries + 1):
+                    if _stopped(event):
+                        return False
+                    offset = start + progress[index]
+                    if offset > end:
+                        return True
+                    response = None
+                    try:
+                        async with semaphore:
+                            # Workers queued before a stop must not issue requests afterwards.
+                            if _stopped(event):
+                                return False
+                            request_headers = {"Range": f"bytes={offset}-{end}", "Accept-Encoding": "identity"}
+                            if validator:
+                                request_headers["If-Range"] = validator
+                            response = await session.request("GET", url, headers=request_headers, stream=True,
+                                                             timeout=configuration.read_timeout, allow_redirects=True)
+                            response.raise_for_status()
+                            _range(response, offset, end, size)
+                            file = await asyncio.to_thread(output.open, "r+b")
+                            try:
+                                await asyncio.to_thread(file.seek, offset)
+                                async for data in response.aiter_content():
+                                    if _stopped(event):
+                                        return False
+                                    if not data:
+                                        continue
+                                    if start + progress[index] + len(data) > end + 1:
+                                        raise NetworkRequestError("Server exceeded the requested byte range")
+                                    await asyncio.to_thread(file.write, data)
+                                    progress[index] += len(data)
+                                    notify(sum(progress), size)
+                            finally:
+                                await asyncio.to_thread(file.close)
+                            if start + progress[index] != end + 1:
+                                raise NetworkRequestError("Byte range ended before all requested bytes arrived")
+                            # Only closed/flushed ranges enter checkpoints while other
+                            # workers are active. Partial ranges are saved after all exit.
+                            durable[index] = progress[index]
+                            await state.save(durable)
+                            return True
+                    except DownloadCancelled:
+                        return False
+                    except Exception:
+                        if attempt >= configuration.max_retries:
+                            raise
+                        core.logger.warning("Retrying RAW range %s at byte %s", index, start + progress[index],
+                                            exc_info=True)
+                    finally:
+                        await _close_response(response)
+                    await _retry_delay(event, min(2 ** attempt, 30))
+                return False
+
+            tasks = [asyncio.create_task(chunk(index)) for index in range(len(progress))]
+            try:
+                results = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await state.save(progress)
+            if _stopped(event):
+                raise DownloadCancelled("Download cancelled.")
+            if not all(results) or sum(progress) != size:
+                raise NetworkRequestError("RAW download did not complete every byte range")
+        else:
             for attempt in range(configuration.max_retries + 1):
                 if _stopped(event):
-                    return False
-                offset = start + progress[index]
-                if offset > end:
-                    return True
+                    raise DownloadCancelled("Download cancelled.")
+                offset = progress[0]
+                if size and offset == size:
+                    break
                 response = None
+                request_headers = {"Accept-Encoding": "identity"}
+                if offset:
+                    request_headers["Range"] = f"bytes={offset}-"
+                    if validator:
+                        request_headers["If-Range"] = validator
                 try:
-                    async with semaphore:
-                        # Workers queued before a stop must not issue requests afterwards.
-                        if _stopped(event):
-                            return False
-                        request_headers = {"Range": f"bytes={offset}-{end}", "Accept-Encoding": "identity"}
-                        if validator:
-                            request_headers["If-Range"] = validator
-                        response = await session.request("GET", url, headers=request_headers, stream=True,
-                                                         timeout=configuration.read_timeout, allow_redirects=True)
-                        response.raise_for_status()
-                        _range(response, offset, end, size)
-                        file = await asyncio.to_thread(output.open, "r+b")
-                        try:
-                            await asyncio.to_thread(file.seek, offset)
-                            async for data in response.aiter_content():
-                                if _stopped(event):
-                                    return False
-                                if not data:
-                                    continue
-                                if start + progress[index] + len(data) > end + 1:
-                                    raise NetworkRequestError("Server exceeded the requested byte range")
+                    response = await session.request("GET", url, headers=request_headers, stream=True,
+                                                     timeout=configuration.read_timeout, allow_redirects=True)
+                    response.raise_for_status()
+                    if offset and response.status_code == 200:
+                        core.logger.warning("Server ignored RAW resume range; restarting from byte zero")
+                        # A resumed linear transfer the server forces back to zero:
+                        # record it explicitly even if the restart later succeeds.
+                        conclusion.mark(RawOutcome.RANGE_IGNORED, reused_progress=False, retained_bytes=retained_bytes)
+                        progress[0] = 0
+                    elif offset:
+                        size = _range(response, offset, total=size or None)
+                    else:
+                        size = int(response.headers.get("Content-Length", 0))
+                    conclusion.total_bytes = size
+                    state.data["size"] = size
+                    file = await asyncio.to_thread(output.open, "ab" if progress[0] else "wb")
+                    try:
+                        async for data in response.aiter_content():
+                            if _stopped(event):
+                                raise DownloadCancelled("Download cancelled.")
+                            if data:
                                 await asyncio.to_thread(file.write, data)
-                                progress[index] += len(data)
-                                notify(sum(progress), size)
-                        finally:
-                            await asyncio.to_thread(file.close)
-                        if start + progress[index] != end + 1:
-                            raise NetworkRequestError("Byte range ended before all requested bytes arrived")
-                        # Only closed/flushed ranges enter checkpoints while other
-                        # workers are active. Partial ranges are saved after all exit.
-                        durable[index] = progress[index]
-                        await state.save(durable)
-                        return True
+                                progress[0] += len(data)
+                                notify(progress[0], size)
+                    finally:
+                        await asyncio.to_thread(file.close)
+                        await state.save(progress)
+                    if size and progress[0] != size:
+                        raise NetworkRequestError("RAW stream ended before its reported length")
+                    break
                 except DownloadCancelled:
-                    return False
+                    raise
                 except Exception:
                     if attempt >= configuration.max_retries:
                         raise
-                    core.logger.warning("Retrying RAW range %s at byte %s", index, start + progress[index],
-                                        exc_info=True)
+                    core.logger.warning("Retrying RAW stream from byte %s", progress[0], exc_info=True)
                 finally:
                     await _close_response(response)
                 await _retry_delay(event, min(2 ** attempt, 30))
-            return False
-
-        tasks = [asyncio.create_task(chunk(index)) for index in range(len(progress))]
-        try:
-            results = await asyncio.gather(*tasks)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await state.save(progress)
-        if _stopped(event):
-            raise DownloadCancelled("Download cancelled.")
-        if not all(results) or sum(progress) != size:
-            raise NetworkRequestError("RAW download did not complete every byte range")
-    else:
-        for attempt in range(configuration.max_retries + 1):
-            if _stopped(event):
-                raise DownloadCancelled("Download cancelled.")
-            offset = progress[0]
-            if size and offset == size:
-                break
-            response = None
-            request_headers = {"Accept-Encoding": "identity"}
-            if offset:
-                request_headers["Range"] = f"bytes={offset}-"
-                if validator:
-                    request_headers["If-Range"] = validator
-            try:
-                response = await session.request("GET", url, headers=request_headers, stream=True,
-                                                 timeout=configuration.read_timeout, allow_redirects=True)
-                response.raise_for_status()
-                if offset and response.status_code == 200:
-                    core.logger.warning("Server ignored RAW resume range; restarting from byte zero")
-                    progress[0] = 0
-                elif offset:
-                    size = _range(response, offset, total=size or None)
-                else:
-                    size = int(response.headers.get("Content-Length", 0))
-                state.data["size"] = size
-                file = await asyncio.to_thread(output.open, "ab" if progress[0] else "wb")
-                try:
-                    async for data in response.aiter_content():
-                        if _stopped(event):
-                            raise DownloadCancelled("Download cancelled.")
-                        if data:
-                            await asyncio.to_thread(file.write, data)
-                            progress[0] += len(data)
-                            notify(progress[0], size)
-                finally:
-                    await asyncio.to_thread(file.close)
-                    await state.save(progress)
-                if size and progress[0] != size:
-                    raise NetworkRequestError("RAW stream ended before its reported length")
-                break
-            except DownloadCancelled:
-                raise
-            except Exception:
-                if attempt >= configuration.max_retries:
-                    raise
-                core.logger.warning("Retrying RAW stream from byte %s", progress[0], exc_info=True)
-            finally:
-                await _close_response(response)
-            await _retry_delay(event, min(2 ** attempt, 30))
+    except DownloadCancelled as error:
+        # Cancellation is its own conclusion, never a failure.
+        conclusion.mark(RawOutcome.CANCELLED, error=repr(error), total_bytes=size)
+        raise
+    except Exception as error:
+        if conclusion.outcome in (RawOutcome.CANCELLED, RawOutcome.METADATA_FAILED):
+            raise
+        # Any terminal transfer error (short stream/range, exhausted retries)
+        # is reported as an incomplete byte range rather than a fresh start.
+        conclusion.mark(RawOutcome.INCOMPLETE, error=repr(error), total_bytes=size)
+        raise
     if _stopped(event):
+        conclusion.mark(RawOutcome.CANCELLED)
         raise DownloadCancelled("Download cancelled.")
     state.remove()
-    core.logger.info("RAW download complete: path=%s bytes=%s", output, sum(progress))
+    core.logger.info("RAW download complete: path=%s bytes=%s %s", output, sum(progress), conclusion)
     return True

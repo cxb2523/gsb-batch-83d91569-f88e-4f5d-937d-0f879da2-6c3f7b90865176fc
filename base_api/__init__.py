@@ -11,6 +11,8 @@ __all__ = [
     "Callback",
     "DownloadConfigHLS",
     "DownloadConfigRAW",
+    "RawOutcome",
+    "RawDownloadConclusion",
     "DataNotLoadedError",
     "ErrorAction",
     "ErrorHandler",
@@ -141,6 +143,7 @@ from base_api.modules.config import (
     make_iterator_config,
     default_on_error,
 )
+from base_api.modules.download_report import RawOutcome, RawDownloadConclusion
 from base_api.modules.static_functions import (
     str_to_bool,
     parse_duration,
