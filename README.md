@@ -1,0 +1,162 @@
+# CamoFox MCP
+
+AI-powered anti-detection browser automation for MCP-compatible AI agents.
+
+CamoFox MCP connects MCP clients such as Claude Desktop, VS Code, Cursor, and OpenClaw to the CamoFox browser server. It gives agents a practical browser toolset for navigation, interaction, search, extraction, downloads, and session reuse while relying on Camoufox-based anti-detection behavior underneath.
+
+## Key Features
+
+- 53 browser automation tools across navigation, interaction, observation, search, downloads, sessions, network capture, and batch workflows.
+- Anti-detection browser automation built on top of the CamoFox browser server and Camoufox.
+- Multi-tab workflows with tracked state, history, and cleanup.
+- Session persistence with cookie import, saved profiles, and optional auto-save.
+- Token-efficient accessibility snapshots with CSS-selector fallbacks for difficult SPA flows.
+- OpenClaw-compatible HTTP transport, plus standard stdio support for desktop MCP clients.
+
+## Quick Install
+
+You need both components running:
+
+1. `camofox-browser` handles the anti-detection browser.
+2. `camofox-mcp` exposes that browser to your MCP client.
+
+### Option A: `npx` + stdio
+
+Start the browser server:
+
+```bash
+npx camofox-browser@latest
+```
+
+Add CamoFox MCP to your MCP client:
+
+```json
+{
+  "servers": {
+    "camofox": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "camofox-mcp@latest"],
+      "env": {
+        "CAMOFOX_URL": "http://localhost:9377"
+      }
+    }
+  }
+}
+```
+
+### Option B: Docker
+
+Start the browser server:
+
+```bash
+docker run -d -p 9377:9377 --name camofox-browser ghcr.io/redf0x1/camofox-browser:latest
+```
+
+Run CamoFox MCP in HTTP mode for remote MCP clients such as OpenClaw:
+
+```bash
+docker run -p 3000:8080 --rm \
+  -e CAMOFOX_TRANSPORT=http \
+  -e CAMOFOX_HTTP_HOST=0.0.0.0 \
+  -e CAMOFOX_HTTP_API_KEY=replace-with-32-plus-random-chars \
+  -e CAMOFOX_URL=http://host.docker.internal:9377 \
+  ghcr.io/redf0x1/camofox-mcp:latest node dist/http.js
+```
+
+Configure your HTTP MCP client to connect to `http://localhost:3000/mcp` with
+`Authorization: Bearer replace-with-32-plus-random-chars`.
+
+Full client configuration examples live in [docs/getting-started.md](docs/getting-started.md).
+
+## Quick Verify
+
+Use `camofox-browser` `2.4.7` or newer. Browser `2.4.7` adds the supported Windows x64 headless portable distribution and hardens session-scoped navigation recovery without changing the MCP-facing REST request shapes used here. Browser `2.4.6` pins the Camoufox-compatible Playwright protocol dependency for fresh installs, `2.4.5` adds explicit browser auth modes including `CAMOFOX_AUTH_MODE=disabled` for trusted private agent networks, and `2.4.4` fixes the persistent-context cold-start `about:blank` page reuse path.
+
+Verify the browser server is reachable:
+
+```bash
+curl -fsS http://localhost:9377/health
+```
+
+Expected response includes `"ok":true` and `"running":true`.
+On a cold server with no active tabs yet, `browserConnected` can be `false`; create a tab to start a browser session.
+
+## Tool Categories
+
+| Category | Tool count | Docs |
+|---|---:|---|
+| Health | 1 | [Health](docs/tool-reference/health.md) |
+| Tabs | 3 | [Tabs](docs/tool-reference/tabs.md) |
+| Navigation | 4 | [Navigation](docs/tool-reference/navigation.md) |
+| Interaction | 8 | [Interaction](docs/tool-reference/interaction.md) |
+| Observation | 8 | [Observation](docs/tool-reference/observation.md) |
+| Search | 1 | [Search](docs/tool-reference/search.md) |
+| Session | 4 | [Session](docs/tool-reference/session.md) |
+| Profiles | 4 | [Profiles](docs/tool-reference/profiles.md) |
+| Downloads | 3 | [Downloads](docs/tool-reference/downloads.md) |
+| Extraction | 4 | [Extraction](docs/tool-reference/extraction.md) |
+| Batch workflows | 6 | [Batch](docs/tool-reference/batch.md) |
+| Presets | 1 | [Presets](docs/tool-reference/presets.md) |
+| Network capture | 6 | [Network capture](docs/tool-reference/README.md#network-capture) |
+
+## Network capture
+
+Network capture requires `camofox-browser` **2.5.0 or newer**. Older compatible browser versions remain usable for ordinary tools without `networkCapture`.
+
+Use `create_tab` with `networkCapture: {}` to record metadata from the initial navigation. For a session-wide capture, set `networkCapture.scope` to `session`, then reuse the returned session key and pass the capture key as `networkCapture.joinKey` when creating additional tabs. To start recording later, create the tab with `networkCapture.start` set to `false` and call `network_capture_start`.
+
+Use `network_list_requests` with `nextCursor` as the next `after` value, and `network_get_response` for one request's metadata. Call `network_capture_stop` before `network_export_har` for a stable export. Keep an enrolled tab open until the export finishes.
+
+If the browser enables body capture, set `networkCapture.captureBodies` to `true` at creation and use `includeBody: true` with `network_get_response`.
+
+Use `network_intercept` to replace exact-match fetch/XHR abort or static mock rules on an active tab capture. The browser operator must configure `CAMOFOX_API_KEY` and enable `CAMOFOX_NETWORK_INTERCEPTION=true`.
+
+See the [network tool reference](docs/tool-reference/README.md#network-capture) for all six tools, opt-in settings, and interception limits.
+
+The browser server must advertise network capture support. The `networkKey` returned by `create_tab` grants access to that capture and may appear in tool transcripts. Keep it private, and avoid forwarding capture results to untrusted recipients. Exports may contain application-specific URL paths.
+
+## Top Limitations
+
+- CamoFox MCP is not a standalone browser. You must run a compatible `camofox-browser` server separately.
+- MCP can share the camofox CLI default browser profile/context when `create_tab` uses `userId: "cli-default"` and `sessionKey: "default"`, but it cannot reliably attach to a tab the CLI already opened. Importing/adopting existing CLI tabs is a future feature.
+- Headed browser window size follows browser viewport/display-size behavior. Pass `viewport`, for example `{ "width": 1366, "height": 768 }`, or set `CAMOFOX_VIEWPORT=1366x768` / `--viewport 1366x768` for a default new-tab size. Supported defaults use width `320..3840` and height `240..2160`.
+- On Windows x64, `camofox-browser` 2.4.7 supports the portable distribution in `headless=true` mode. Headed and virtual-display modes remain unsupported on Windows; `toggle_display` will reject those modes there.
+- Accessibility-tree refs are the primary interaction model, but SPA and custom-component sites can require CSS selectors or rendered HTML tools.
+- If the browser server enforces authentication, API-key-gated operations need the same `CAMOFOX_API_KEY` on both sides.
+- For trusted private-network browser deployments using `CAMOFOX_AUTH_MODE=disabled`, leave `CAMOFOX_API_KEY` unset in CamoFox MCP. MCP then sends no outbound browser auth headers. Keep both browser and MCP access on a trusted private network.
+- If HTTP transport is exposed beyond loopback, set `CAMOFOX_HTTP_API_KEY` and require clients to send it as a Bearer token.
+- HTTP transport is mainly for remote MCP clients. Desktop MCP clients usually work best with stdio configuration.
+
+## Security
+
+Treat this as a browser control surface. In shared or networked environments, isolate the browser server, avoid exposing MCP endpoints broadly, and use `CAMOFOX_HTTP_API_KEY` for inbound HTTP MCP clients plus `CAMOFOX_API_KEY` when the browser server requires authentication. If the browser server runs `CAMOFOX_AUTH_MODE=disabled`, leave `CAMOFOX_API_KEY` unset and keep that browser endpoint on a trusted private network. Session profiles can contain sensitive cookies and should be stored accordingly.
+
+## Documentation
+
+Start at [docs/README.md](docs/README.md) for the documentation hub, then use [docs/getting-started.md](docs/getting-started.md) for setup, verification, and first workflow examples.
+
+## Contributing + License
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines, [SECURITY.md](SECURITY.md) for private vulnerability reporting, and [LICENSE](LICENSE) for the MIT license.
+
+## Custom search engines
+
+Set `CAMOFOX_SEARCH_URL_TEMPLATE` in the **MCP server** environment, for example
+`https://search.example/search?q={query}&language=en`, then call
+`web_search({ tabId: "tab_123", query: "café & tea", engine: "custom" })`.
+For SearXNG, use your instance's `/search?q={query}` URL. Restart MCP after changing
+its environment. Google remains the default; the 14 browser macros are unchanged.
+
+The template must be an absolute HTTP(S) URL with exactly one literal `{query}`
+in its path or query, never its host, credentials, or fragment. Credentials in URLs
+are rejected. The query is percent-encoded once, including Unicode and `&`.
+Invalid configuration fails startup without reflecting the URL or its tokens;
+`custom` without configuration returns an actionable error (no fallback).
+
+Custom search uses ordinary browser `navigate`, then `snapshot`, not a new macro
+or a direct MCP HTTP fetch to the search engine. Browser URL validation and existing
+private-network/SSRF policy remain authoritative, including redirects. Self-hosted
+or private SearXNG requires the browser's existing network policy to allow it;
+this setting does not grant access or weaken that policy. Do not store secrets
+in search URLs: navigated URLs can appear in tool output, browser history and logs.

@@ -1,0 +1,234 @@
+---
+name: skill
+title: CamoFox MCP for OpenClaw
+version: 1.17.0
+description: Anti-detection browser automation MCP skill for OpenClaw agents with 53 tools for navigation, interaction, observation, extraction, downloads, profiles, sessions, and stealth web search.
+author: redf0x1
+tags:
+  - mcp
+  - openclaw
+  - browser-automation
+  - anti-detection
+  - camofox
+  - web-scraping
+  - ai-agent
+license: MIT
+homepage: https://github.com/redf0x1/camofox-mcp#readme
+metadata:
+  title: CamoFox MCP for OpenClaw
+  version: 1.17.0
+  author: redf0x1
+  tags:
+    - mcp
+    - openclaw
+    - browser-automation
+    - anti-detection
+    - camofox
+    - web-scraping
+    - ai-agent
+  homepage: https://github.com/redf0x1/camofox-mcp#readme
+---
+
+# CamoFox MCP Skill
+
+CamoFox MCP gives OpenClaw agents a production-ready anti-detection browser automation toolkit over MCP HTTP transport. It connects OpenClaw to CamoFox Browser so agents can browse, click, type, extract content, manage cookies/sessions, run stealth search workflows, and download resources without the high block rates common with standard automation stacks.
+
+## Why this skill exists
+
+Most browser automation flows eventually hit CAPTCHAs, fingerprint checks, or bot detection. CamoFox is purpose-built for that reality:
+
+- Anti-detection fingerprinting per tab/session
+- Better resilience on sites that aggressively detect automation
+- Token-efficient accessibility snapshots for agent reasoning
+- Session persistence via cookie/profile tools
+- Built-in search macros across 14 engines
+
+## Setup
+
+### 1) Start CamoFox Browser
+
+CamoFox Browser must be running first (default `http://localhost:9377`).
+Use `camofox-browser` `2.4.7` or newer. Browser `2.4.7` adds supported Windows x64 headless portable use and session-scoped navigation recovery; browser `2.4.6` pins the Camoufox-compatible Playwright protocol dependency, `2.4.5` introduced explicit browser auth modes, and `2.4.4` fixed first-tab reuse for persistent contexts.
+
+### 2) Start CamoFox MCP in HTTP mode
+
+```bash
+CAMOFOX_TRANSPORT=http npx camofox-mcp@1.17.0
+```
+
+Optional examples:
+
+```bash
+CAMOFOX_TRANSPORT=http CAMOFOX_API_KEY=browser-server-key npx camofox-mcp@1.17.0
+CAMOFOX_TRANSPORT=http CAMOFOX_HTTP_HOST=0.0.0.0 CAMOFOX_HTTP_API_KEY=replace-with-32-plus-random-chars npx camofox-mcp@1.17.0
+CAMOFOX_TRANSPORT=http CAMOFOX_HTTP_PORT=8080 npx camofox-mcp@1.17.0
+CAMOFOX_VIEWPORT=1366x768 npx camofox-mcp@1.17.0
+```
+
+For browser `CAMOFOX_AUTH_MODE=disabled` on a trusted private agent network,
+leave `CAMOFOX_API_KEY` unset in CamoFox MCP so it sends no browser auth
+headers. Keep that browser endpoint private.
+
+`CAMOFOX_VIEWPORT` and `--viewport` set the default viewport for new tabs when
+`create_tab` does not provide an explicit `viewport`. Use `WIDTHxHEIGHT` format;
+width must be `320..3840` and height must be `240..2160`.
+
+### 3) Configure OpenClaw
+
+Add this MCP server:
+
+```json
+{
+  "mcpServers": {
+    "camofox": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+Alternative skill-generation flow:
+
+```bash
+npx @filiksyos/mcptoskill http://localhost:3000/mcp
+```
+
+## Trigger phrases
+
+Use this skill when the user asks for tasks like:
+
+- “Browse this site and extract the data”
+- “Automate this login/search/form flow”
+- “Use a stealth or anti-detection browser”
+- “Take a snapshot and click/type through this workflow”
+- “Collect all links/images/PDFs from this page section”
+- “Persist session cookies and restore later”
+- “Run web search in browser and summarize results”
+- “Download files and return metadata/content”
+
+## Tool catalog (53 tools)
+
+### Health (1)
+
+- `server_status` — Check CamoFox server health and browser connection. Call first to verify server is running. Returns version, browser status, and active tab count.
+
+### Tabs (3)
+
+- `create_tab` — Create a new browser tab with anti-detection fingerprinting. Supports URL, user/session isolation, viewport/display size, geo overrides, proxyProfile/raw proxy, and geoMode. To share the camofox CLI default browser profile/context, pass `userId: "cli-default"` and `sessionKey: "default"`; this creates a tracked MCP tab in that context but does not attach to a CLI tab that is already open.
+- `close_tab` — Close a browser tab and release resources. Always close tabs when done to free memory.
+- `list_tabs` — List all open browser tabs with URLs and titles. Use to discover available tabs or verify tab state.
+
+### Navigation (4)
+
+- `navigate` — Navigate a tab to a URL. Waits for page load. Use create_tab first, then navigate. Returns final URL (may differ due to redirects).
+- `go_back` — Navigate backward in browser history (Back button). Returns new page URL.
+- `go_forward` — Navigate forward in browser history (Forward button). Returns new page URL.
+- `refresh` — Reload the current page. Useful when page state is stale or after changes.
+
+### Interaction (8)
+
+- `click` — Click an element. Provide either ref (from snapshot) or CSS selector. Use snapshot first to discover element refs.
+- `type_text` — Type text into an input field. Provide either a ref (from snapshot) or a CSS selector. Use ref when available; otherwise use selector when snapshot doesn't assign refs (common with combobox/autocomplete inputs). Call snapshot first to find target element.
+- `scroll` — Scroll page up or down by pixel amount. Use to reveal content below the fold or navigate long pages.
+- `camofox_scroll_element` — Scroll a specific container element (modal dialog, scrollable div, sidebar). Use when page-level scroll doesn't reach content inside modals or overflow containers. Returns scroll position metadata to track progress.
+- `camofox_evaluate_js` — Execute JavaScript in the browser page context. Runs in isolated scope (invisible to page scripts — safe for anti-detection). Use for: extracting data not visible in accessibility snapshot, checking element properties, reading computed styles, manipulating DOM elements. Requires CAMOFOX_API_KEY only when browser-server authentication is enabled.
+- `camofox_hover` — Hover over an element to trigger tooltips, dropdown menus, or hover states. Use ref from snapshot or CSS selector.
+- `camofox_wait_for` — Wait for page to be fully ready (DOM loaded, network idle, framework hydration complete). Use after navigation or actions that trigger page changes.
+- `camofox_press_key` — Press a keyboard key. Use after type_text to submit forms (Enter), navigate between elements (Tab), move through suggestions (ArrowDown/ArrowUp), or dismiss dialogs (Escape). Common keys: Enter, Tab, Escape, ArrowDown, ArrowUp, Backspace, Space.
+
+### Observation (8)
+
+- `snapshot` — Get accessibility tree snapshot — the PRIMARY way to read page content. Returns element refs, roles, names and values. Token-efficient. Always prefer over screenshot. Element refs are used with click and type_text.
+- `screenshot` — Take a viewport or full-page visual screenshot in base64 PNG. Set `fullPage: true` for the entire scrollable page. Use ONLY for visual verification (CSS, layout, proof). Prefer snapshot for most tasks — much more token-efficient.
+- `get_links` — Get all hyperlinks on page with URLs and text. Useful for navigation discovery and site mapping.
+- `camofox_get_page_html` — Get rendered HTML from the live DOM. Use when accessibility snapshots miss dynamic or custom component content.
+- `camofox_query_selector` — Query a CSS selector in the live DOM and return element text, HTML, attributes, and visibility metadata.
+- `camofox_wait_for_text` — Wait for specific text to appear on the page. Useful for waiting for search results, form submissions, or dynamic content loading.
+- `camofox_wait_for_selector` — Wait for a CSS selector to appear in the live DOM. Useful for SPA and async-content workflows.
+- `youtube_transcript` — Fetch a YouTube transcript without opening a browser tab.
+
+### Network capture (6)
+
+Requires `camofox-browser` **2.5.0+**. Opt in at `create_tab` with `networkCapture: {}` for initial-navigation recording, or `{ start: false }` to prepare a capture. Retain the returned private `networkKey`; never put it in URLs or shared logs. For explicitly enrolled session tabs, reuse the same `userId` and `sessionKey` with `{ scope: "session", joinKey: networkKey }`.
+
+- `network_capture_start` — Start a prepared capture.
+- `network_capture_stop` — Stop recording; export before expiry or the last enrolled tab closes.
+- `network_list_requests` — Read paginated, sanitized request metadata.
+- `network_get_response` — Inspect a request. Bodies require browser-side enablement, explicit creation opt-in, and `includeBody: true`.
+- `network_export_har` — Export sanitized, metadata-only HAR 1.2 JSON.
+- `network_intercept` — Replace or clear up to four exact HTTP(S) fetch/XHR abort/static mock rules. Requires browser-side enablement; mock bodies are capped at 16384 UTF-8 bytes and statuses at 200..299 except 204/205, or 400..599. URL credentials and fragments are not allowed.
+
+See the [canonical network reference](../docs/tool-reference/README.md#network-capture) for parameters, limits, and examples. Ordinary tools remain compatible with the older browser versions described above.
+
+### Downloads (3)
+
+- `list_downloads` — List downloaded files with optional filtering by tab, status, extension, MIME type, and size range. Each download includes contentUrl for direct file retrieval.
+- `get_download` — Get a downloaded file. Images are always returned as viewable images. Recommended for AI agents: set includeContent=true to get non-image file content as base64 inline (max 256KB). Otherwise returns metadata only (including contentUrl).
+- `delete_download` — Delete a downloaded file from disk and registry.
+
+### Extraction (4)
+
+- `extract_resources` — Extract resources (images, links, media, documents) from a specific DOM container. Use a CSS selector or element ref from snapshot to scope extraction to a particular section of the page. This is useful for extracting all images from a specific post, all links from a table, etc.
+- `extract_structured` — Extract deterministic structured JSON from a page using the camofox-browser structured extraction schema.
+- `batch_download` — Extract resources from a DOM container and download them all. Combines extract_resources + download in one call. Useful for downloading all images from a chat, all PDFs from a table, etc.
+- `resolve_blobs` — Resolve blob: URLs to downloadable base64 data. Blob URLs are temporary browser objects (common in Telegram, WhatsApp, Discord) that cannot be downloaded directly. This tool converts them to base64 data URIs.
+
+### Search (1)
+
+- `web_search` — Search via the 14 macros supported by camofox-browser 2.4.7: google, youtube, amazon, reddit, reddit_subreddit, wikipedia, twitter, yelp, spotify, netflix, linkedin, instagram, tiktok, twitch. Call snapshot after to read results.
+
+### Session (4)
+
+- `import_cookies` — Import cookies for authenticated sessions. Provide cookies in a JSON string array. Restores login sessions without re-auth. Requires userId.
+- `get_stats` — Get session statistics: request counts, active tabs, uptime, performance metrics.
+- `camofox_close_session` — Close all browser tabs for a user session. Use for complete cleanup when done with a browsing session.
+- `toggle_display` — Switch a user session between headless, headed, and virtual display modes and return a VNC URL when available. On Windows x64 with camofox-browser 2.4.7, only `headless: true` is supported.
+
+### Batch workflows (6)
+
+- `fill_form` — Fill multiple form fields in one call. Provide an array of field entries, each with a ref or CSS selector and the text to type. Optionally specify a submit button to click after filling.
+- `type_and_submit` — Type text into a field and press a key (default: Enter). Useful for search boxes and single-field forms.
+- `navigate_and_snapshot` — Navigate to a URL and return the page snapshot. Combines navigate + wait + snapshot into one call.
+- `scroll_and_snapshot` — Scroll the page and take a snapshot. Useful for revealing content below the fold.
+- `camofox_scroll_element_and_snapshot` — Scroll a container element AND take a snapshot. Combines scroll_element + snapshot in one call. Perfect for incrementally loading lazy content in modals (e.g. Facebook group post comments). Returns both scroll position and page snapshot.
+- `batch_click` — Click multiple elements sequentially. Continues on error (clicks are independent). Returns per-click results.
+
+### Profiles (4)
+
+- `save_profile` — Save browser cookies from an active tab to a named profile on disk. Enables session persistence across restarts. Use after login to save authenticated state.
+- `load_profile` — Load a saved profile's cookies into an active browser tab. Restores login sessions without re-authentication. Use after create_tab to restore saved state.
+- `list_profiles` — List all saved browser profiles with metadata. Shows profile names, cookie counts, save dates, and descriptions.
+- `delete_profile` — Delete a saved browser profile from disk. Removes the profile's cookie data permanently.
+
+### Presets (1)
+
+- `list_presets` — List all available geo presets supported by the CamoFox server. Presets include locale, timezone, and optional geolocation.
+
+## What makes CamoFox unique
+
+- Stealth-first architecture for AI agents that need reliability on hostile sites
+- Rich tool surface (53 tools) combining low-level controls + high-level workflows
+- Snapshot-first design that reduces token burn while preserving actionable context
+- Built-in profile/session controls for long-running authenticated automations
+- Native HTTP MCP endpoint for OpenClaw and remote MCP-compatible clients
+
+## Custom search engines
+
+Set `CAMOFOX_SEARCH_URL_TEMPLATE` in the **MCP server** environment, for example
+`https://search.example/search?q={query}&language=en`, then call
+`web_search({ tabId: "tab_123", query: "café & tea", engine: "custom" })`.
+For SearXNG, use your instance's `/search?q={query}` URL. Restart MCP after changing
+its environment. Google remains the default; the 14 browser macros are unchanged.
+
+The template must be an absolute HTTP(S) URL with exactly one literal `{query}`
+in its path or query, never its host, credentials, or fragment. Credentials in URLs
+are rejected. The query is percent-encoded once, including Unicode and `&`.
+Invalid configuration fails startup without reflecting the URL or its tokens;
+`custom` without configuration returns an actionable error (no fallback).
+
+Custom search uses ordinary browser `navigate`, then `snapshot`, not a new macro
+or a direct MCP HTTP fetch to the search engine. Browser URL validation and existing
+private-network/SSRF policy remain authoritative, including redirects. Self-hosted
+or private SearXNG requires the browser's existing network policy to allow it;
+this setting does not grant access or weaken that policy. Do not store secrets
+in search URLs: navigated URLs can appear in tool output, browser history and logs.
