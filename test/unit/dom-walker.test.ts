@@ -1,0 +1,570 @@
+import { walkDOM, type AttributedCDPNode } from "../../src/parser/dom-walker.js";
+import { filterViewportOnly } from "../../src/parser/viewport-filter.js";
+import type { CDPNode, OSNode } from "../../src/types.js";
+
+function makeNode(
+  overrides: Partial<CDPNode> & { nodeName: string }
+): CDPNode {
+  return {
+    nodeId: 1,
+    backendNodeId: Math.floor(Math.random() * 10000),
+    nodeType: 1,
+    localName: overrides.nodeName.toLowerCase(),
+    nodeValue: "",
+    ...overrides,
+  };
+}
+
+function makeText(text: string): CDPNode {
+  return {
+    nodeId: 1,
+    backendNodeId: 0,
+    nodeType: 3,
+    nodeName: "#text",
+    localName: "",
+    nodeValue: text,
+  };
+}
+
+describe("walkDOM", () => {
+  it("keeps interactive elements and discards scripts", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "BUTTON",
+              backendNodeId: 100,
+              children: [makeText("Click")],
+            }),
+            makeNode({ nodeName: "SCRIPT", children: [makeText("alert(1)")] }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes, nodeMap } = walkDOM(root);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].tag).toBe("button");
+    expect(nodes[0].id).toBe("B1");
+    expect(nodes[0].children[0].text).toBe("Click");
+    expect(nodeMap.get("B1")).toBe(100);
+  });
+
+  it("collapses DIV wrappers and promotes children", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "DIV",
+              children: [
+                makeNode({
+                  nodeName: "DIV",
+                  children: [
+                    makeNode({
+                      nodeName: "A",
+                      backendNodeId: 200,
+                      attributes: ["href", "/test"],
+                      children: [makeText("Link")],
+                    }),
+                  ],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes, nodeMap } = walkDOM(root);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].tag).toBe("link");
+    expect(nodes[0].attributes["href"]).toBe("/test");
+    expect(nodeMap.get("L1")).toBe(200);
+  });
+
+  it("merges adjacent text nodes", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "H1",
+              children: [makeText("Hello"), makeText("World")],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].tag).toBe("h1");
+    expect(nodes[0].children).toHaveLength(1);
+    expect(nodes[0].children[0].text).toBe("Hello World");
+  });
+
+  it("removes empty collapsed nodes", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "DIV",
+              children: [
+                makeNode({ nodeName: "DIV", children: [] }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+    expect(nodes).toHaveLength(0);
+  });
+
+  it("discards aria-hidden subtrees", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "DIV",
+              attributes: ["aria-hidden", "true"],
+              children: [
+                makeNode({
+                  nodeName: "BUTTON",
+                  children: [makeText("Hidden Button")],
+                }),
+              ],
+            }),
+            makeNode({
+              nodeName: "BUTTON",
+              backendNodeId: 300,
+              children: [makeText("Visible")],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes, nodeMap } = walkDOM(root);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].tag).toBe("button");
+    expect(nodes[0].children[0].text).toBe("Visible");
+    expect(nodeMap.get("B1")).toBe(300);
+  });
+
+  it("preserves form structure with inputs", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "FORM",
+              backendNodeId: 400,
+              attributes: ["action", "/submit"],
+              children: [
+                makeNode({
+                  nodeName: "INPUT",
+                  backendNodeId: 401,
+                  attributes: ["type", "text", "name", "query", "placeholder", "Search..."],
+                }),
+                makeNode({
+                  nodeName: "BUTTON",
+                  backendNodeId: 402,
+                  children: [makeText("Go")],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes, nodeMap } = walkDOM(root);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].tag).toBe("form");
+    expect(nodes[0].id).toBe("F1");
+    expect(nodes[0].children).toHaveLength(2);
+    expect(nodes[0].children[0].tag).toBe("input");
+    expect(nodes[0].children[0].id).toBe("I1");
+    expect(nodes[0].children[0].attributes["placeholder"]).toBe("Search...");
+    expect(nodes[0].children[1].tag).toBe("button");
+    expect(nodes[0].children[1].id).toBe("B1");
+    expect(nodeMap.get("F1")).toBe(400);
+    expect(nodeMap.get("I1")).toBe(401);
+    expect(nodeMap.get("B1")).toBe(402);
+  });
+
+  it("truncates at MAX_DEPTH with [truncated] marker", () => {
+    let current: CDPNode = makeNode({
+      nodeName: "DIV",
+      children: [makeText("bottom")],
+    });
+    for (let i = 0; i < 600; i++) {
+      current = makeNode({ nodeName: "DIV", children: [current] });
+    }
+
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [current],
+    });
+
+    const { nodes } = walkDOM(root);
+    const findTruncated = (nodeList: OSNode[]): boolean => {
+      for (const node of nodeList) {
+        if (node.tag === "#text" && node.text === "[truncated]") return true;
+        if (findTruncated(node.children)) return true;
+      }
+      return false;
+    };
+    expect(findTruncated(nodes)).toBe(true);
+  });
+
+  it("merges adjacent text nodes without extra spaces", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "H1",
+              children: [makeText("Hello "), makeText("World")],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].children).toHaveLength(1);
+    expect(nodes[0].children[0].text).toBe("Hello World");
+  });
+
+  it("merges adjacent text nodes with space when original had no whitespace", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "H1",
+              children: [makeText("Hello"), makeText("World")],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+
+    expect(nodes[0].children[0].text).toBe("Hello World");
+  });
+
+  it("handles unicode emoji correctly in truncation", () => {
+    const longEmojiText = "👍".repeat(100);
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({
+              nodeName: "P",
+              children: [makeText(longEmojiText)],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+    expect(nodes.length).toBeGreaterThan(0);
+  });
+
+  it("handles empty children arrays gracefully", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          children: [
+            makeNode({ nodeName: "DIV", children: [] }),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+    expect(nodes.length).toBe(0);
+  });
+
+  it("does not promote offscreen text through collapsed wrappers", () => {
+    const markers = {
+      visible: "data-test-visible",
+      hidden: "data-test-hidden",
+      state: "data-test-state",
+    };
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "BODY",
+          attributes: [markers.visible, "1"],
+          children: [
+            makeNode({
+              nodeName: "MAIN",
+              attributes: [markers.visible, "1"],
+              children: [
+                makeNode({
+                  nodeName: "DIV",
+                  attributes: [markers.visible, "1"],
+                  children: [makeText("onscreen")],
+                }),
+                makeNode({
+                  nodeName: "DIV",
+                  children: [makeText("OFFSCREEN_SENTINEL")],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const walked = walkDOM(root, {
+      markerAttributes: markers,
+      viewportMarked: true,
+    });
+    const filtered = filterViewportOnly(walked.nodes);
+    const output = JSON.stringify(filtered.nodes);
+
+    expect(output).toContain("onscreen");
+    expect(output).not.toContain("OFFSCREEN_SENTINEL");
+  });
+
+  it("uses computed markers instead of contradictory inline declarations", () => {
+    const markers = {
+      visible: "data-test-visible",
+      hidden: "data-test-hidden",
+      state: "data-test-state",
+    };
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "DIV",
+          attributes: [
+            "style",
+            "--display:none;display:none;display:block",
+            markers.visible,
+            "1",
+          ],
+          children: [makeText("COMPUTED_VISIBLE")],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root, { markerAttributes: markers });
+    expect(JSON.stringify(nodes)).toContain("COMPUTED_VISIBLE");
+  });
+
+  it("tracks direct text visibility independently from its container", () => {
+    const markers = {
+      visible: "data-test-visible",
+      hidden: "data-test-hidden",
+      state: "data-test-state",
+      text: "data-test-text",
+    };
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "MAIN",
+          attributes: [markers.visible, "1", markers.text, "0"],
+          children: [
+            makeText("DIRECT ONSCREEN"),
+            makeNode({ nodeName: "SPAN", children: [] }),
+            makeText("DIRECT OFFSCREEN"),
+          ],
+        }),
+      ],
+    });
+
+    const walked = walkDOM(root, {
+      markerAttributes: markers,
+      viewportMarked: true,
+    });
+    const output = JSON.stringify(filterViewportOnly(walked.nodes).nodes);
+
+    expect(output).toContain("DIRECT ONSCREEN");
+    expect(output).not.toContain("DIRECT OFFSCREEN");
+  });
+
+  it("does not merge across an offscreen direct-text sibling", () => {
+    const markers = {
+      visible: "data-test-visible",
+      hidden: "data-test-hidden",
+      state: "data-test-state",
+      text: "data-test-text",
+    };
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "H1",
+          attributes: [markers.visible, "1", markers.text, "0,2"],
+          children: [
+            makeText("First"),
+            makeText("OFFSCREEN"),
+            makeText("Second"),
+          ],
+        }),
+      ],
+    });
+
+    const walked = walkDOM(root, {
+      markerAttributes: markers,
+      viewportMarked: true,
+    });
+    const nodes = filterViewportOnly(walked.nodes).nodes;
+
+    expect(nodes[0].children.map((child) => child.text)).toEqual([
+      "First",
+      "Second",
+    ]);
+  });
+
+  it("keeps a removed semantic node as an adjacent-text merge barrier", () => {
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "H1",
+          children: [
+            makeText("First"),
+            makeNode({ nodeName: "LI", children: [] }),
+            makeText("Second"),
+          ],
+        }),
+      ],
+    });
+
+    const { nodes } = walkDOM(root);
+
+    expect(nodes[0].children.map((child) => child.text)).toEqual([
+      "First",
+      "Second",
+    ]);
+  });
+
+  it("tracks shadow-root direct text independently from its host", () => {
+    const markers = {
+      visible: "data-test-visible",
+      hidden: "data-test-hidden",
+      state: "data-test-state",
+      text: "data-test-text",
+    };
+    const root = makeNode({
+      nodeName: "HTML",
+      children: [
+        makeNode({
+          nodeName: "DIV",
+          attributes: [markers.visible, "1", markers.text, "|0"],
+          shadowRoots: [
+            makeNode({
+              nodeName: "#document-fragment",
+              nodeType: 11,
+              children: [
+                makeText("SHADOW ONSCREEN"),
+                makeNode({ nodeName: "SPAN", children: [] }),
+                makeText("SHADOW OFFSCREEN"),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    const walked = walkDOM(root, {
+      markerAttributes: markers,
+      viewportMarked: true,
+    });
+    const output = JSON.stringify(filterViewportOnly(walked.nodes).nodes);
+
+    expect(output).toContain("SHADOW ONSCREEN");
+    expect(output).not.toContain("SHADOW OFFSCREEN");
+  });
+
+  it("reads decoder-attached attribute records without flat pairs", () => {
+    const button = makeNode({
+      nodeName: "BUTTON",
+      backendNodeId: 100,
+      children: [makeText("Go")],
+    }) as AttributedCDPNode;
+    button.attributes = undefined;
+    button.parsedAttributes = { title: "Action" };
+    const root = makeNode({ nodeName: "BODY", children: [button] });
+
+    const { nodes } = walkDOM(root);
+    const walkedButton = nodes.find((node) => node.tag === "button");
+
+    expect(walkedButton?.attributes).toEqual({ id: "B1", title: "Action" });
+  });
+
+  it("renames marker keys from attribute records without mutating them", () => {
+    const record = {
+      "m-visible": "1",
+      "m-state": "disabled",
+      "data-os-visible": "spoof",
+      title: "Action",
+    };
+    const button = makeNode({
+      nodeName: "BUTTON",
+      backendNodeId: 100,
+      children: [makeText("Go")],
+    }) as AttributedCDPNode;
+    button.parsedAttributes = { ...record };
+    const root = makeNode({ nodeName: "BODY", children: [button] });
+
+    const { nodes } = walkDOM(root, {
+      markerAttributes: {
+        visible: "m-visible",
+        hidden: "m-hidden",
+        state: "m-state",
+        text: "m-text",
+      },
+      viewportMarked: true,
+    });
+    const walkedButton = nodes.find((node) => node.tag === "button");
+
+    expect(walkedButton?.visible).toBe(true);
+    expect(walkedButton?.state).toEqual(["disabled"]);
+    expect(walkedButton?.attributes).toEqual({ id: "B1", title: "Action" });
+    expect(button.parsedAttributes).toEqual(record);
+  });
+});

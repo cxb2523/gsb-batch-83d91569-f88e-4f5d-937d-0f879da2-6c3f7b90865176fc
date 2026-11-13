@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://tidesurf.org; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+        />
+        <title>TideSurf | Agents Surfing</title>
+        <meta
+            name="description"
+            content="TideSurf gives agents a stateful Chromium CLI, compact page text, and snapshot-scoped action IDs."
+        />
+        <meta property="og:title" content="TideSurf | Agents Surfing" />
+        <meta property="og:description" content="Stateful Chromium sessions, compact DOM text, and current action IDs for browser agents." />
+        <meta property="og:image" content="https://tidesurf.org/og.png" />
+        <meta property="og:url" content="https://tidesurf.org" />
+        <meta property="og:type" content="website" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="TideSurf | Agents Surfing" />
+        <meta name="twitter:description" content="Stateful Chromium sessions, compact DOM text, and current action IDs for browser agents." />
+        <meta name="twitter:image" content="https://tidesurf.org/og.png" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Zalando+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+            rel="stylesheet"
+        />
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <script src="/theme-init.js"></script>
+    </head>
+    <body>
+        <canvas class="waves-canvas" aria-hidden="true"></canvas>
+        <a href="#main" class="skip-link">Skip to content</a>
+
+        <nav class="topnav" aria-label="Primary">
+            <a class="topnav-brand" href="#main" aria-label="TideSurf home">
+                <svg class="brand-mark" width="22" height="22" viewBox="0 0 64 64" aria-hidden="true">
+                    <path fill="currentColor" fill-rule="evenodd" d="M4 4H60V60H4ZM4 29C13 29 15 18 24 18C36 18 37 42 49 42C55 42 57 33 60 29V35C57 39 55 48 49 48C37 48 36 24 24 24C15 24 13 35 4 35Z"/>
+                </svg>
+                <span class="brand-word"><span>Tide</span><span class="brand-surf">Surf</span></span>
+            </a>
+            <div class="topnav-links">
+                <a class="patch-control compact-control" href="https://tidesurf.org/docs" style="--patch-color: var(--c-teal)">Docs</a>
+                <a class="patch-control compact-control" href="https://www.npmjs.com/package/@tidesurf/core" style="--patch-color: var(--c-gold)">npm</a>
+                <a class="patch-control compact-control gh-btn" href="https://github.com/TideSurf/core" style="--patch-color: var(--c-green)">
+                    GitHub
+                </a>
+            </div>
+        </nav>
+
+        <main id="main" class="page">
+            <section class="hero" aria-labelledby="hero-title">
+                <h1 id="hero-title">Agents Surfing</h1>
+                <p class="hero-lede">Run browser tools from the shell. TideSurf keeps Chromium state between commands and turns the live DOM into compact text with current action handles.</p>
+                <div class="hero-actions" aria-label="Primary actions">
+                    <div class="install" id="install-picker">
+                        <span class="prompt" aria-hidden="true">$</span>
+                        <code id="install-command-text">brew install TideSurf/tap/tidesurf</code>
+                        <button type="button" class="copy-btn patch-control" id="install-copy-btn" data-copy="brew install TideSurf/tap/tidesurf" aria-label="Copy install command">
+                            <svg class="icon-copy" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3.5 10.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h6.5a1 1 0 0 1 1 1v.5"/></svg>
+                            <svg class="icon-check" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>
+                            <span class="copy-status visually-hidden" aria-live="polite"></span>
+                        </button>
+                        <button type="button" class="install-caret" id="install-menu-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Choose install method">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5l4 4 4-4"/></svg>
+                        </button>
+                        <div class="install-menu" id="install-menu" role="listbox" aria-label="Install method">
+                            <button type="button" class="install-option" role="option" aria-selected="true" data-command="brew install TideSurf/tap/tidesurf"><span class="install-kind">brew</span><span class="install-cmd">brew install TideSurf/tap/tidesurf</span></button>
+                            <button type="button" class="install-option" role="option" aria-selected="false" data-command="npm install --global @tidesurf/core"><span class="install-kind">npm</span><span class="install-cmd">npm install --global @tidesurf/core</span></button>
+                            <button type="button" class="install-option" role="option" aria-selected="false" data-command="bun add --global @tidesurf/core"><span class="install-kind">bun</span><span class="install-cmd">bun add --global @tidesurf/core</span></button>
+                        </div>
+                    </div>
+                    <a class="patch-control" href="#proof" style="--patch-color: var(--c-rust)">Take a look</a>
+                </div>
+            </section>
+
+            <section class="proof" id="proof" aria-labelledby="proof-title">
+                <header class="section-intro">
+                    <h2 id="proof-title">Keep the useful page. Drop the wrapper noise.</h2>
+                    <p>Actual TideSurf output: wrapper noise disappears. Navigation, form controls, visible copy, and action handles stay.</p>
+                </header>
+
+                <div class="specimen" aria-label="Raw HTML compressed into TideSurf text">
+                    <div class="specimen-pane raw-pane">
+                        <div class="specimen-label">
+                            <span>raw HTML</span>
+                            <span>before</span>
+                        </div>
+                        <pre><code><span class="noise">&lt;div class="header"&gt;</span>
+  &lt;nav role="navigation"&gt;
+    <span class="noise">&lt;ul class="nav-list"&gt;</span>
+      &lt;a href="/"&gt;Home&lt;/a&gt;
+      &lt;a href="/about"&gt;About&lt;/a&gt;
+    <span class="noise">&lt;/ul&gt;</span>
+  &lt;/nav&gt;
+<span class="noise">&lt;/div&gt;</span>
+&lt;form action="/search"&gt;
+  <span class="noise">&lt;div class="input-wrapper"&gt;</span>
+    &lt;input placeholder="Search..." /&gt;
+    &lt;button&gt;Search&lt;/button&gt;
+  <span class="noise">&lt;/div&gt;</span>
+&lt;/form&gt;</code></pre>
+                    </div>
+
+                    <div class="specimen-shift" aria-label="Separate e-commerce fixture benchmark: 5,348 source HTML tokens to 1,218 TideSurf tokens">
+                        <span class="tokens-before">5,348</span>
+                        <span class="shift-word">separate fixture benchmark</span>
+                        <strong>1,218</strong>
+                        <small>e-commerce source HTML → TideSurf text</small>
+                    </div>
+
+                    <div class="specimen-pane output-pane">
+                        <div class="specimen-label">
+                            <span>TideSurf text</span>
+                            <span>after</span>
+                        </div>
+                        <pre><code># Example Search
+&gt; example.com/search | 0/1200 800vh
+
+NAV
+  <span class="handle">[L1]</span>(/) Home
+  <span class="handle">[L2]</span>(/about) About
+FORM F1
+  <span class="handle">I1</span> ~Search... ="TideSurf"
+  <span class="handle">[B1]</span> Search</code></pre>
+                    </div>
+                </div>
+            </section>
+
+            <section class="live-loop" aria-labelledby="loop-title">
+                <header class="section-intro compact-intro">
+                    <h2 id="loop-title">Read it. Choose a handle. Use the live page.</h2>
+                    <p>The text reflects live browser state, not an export. Each handle routes through CDP to its Chromium session.</p>
+                </header>
+
+                <div class="loop-layout">
+                    <ol class="loop-steps">
+                        <li>
+                            <span class="step-name" style="--step-color: var(--c-teal)">read</span>
+                            <p>Compact page state avoids raw HTML for routine actions.</p>
+                        </li>
+                        <li>
+                            <span class="step-name" style="--step-color: var(--c-rust)">choose</span>
+                            <p>The model picks a handle: <code>B1</code>, <code>L2</code>, or <code>I1</code>.</p>
+                        </li>
+                        <li>
+                            <span class="step-name" style="--step-color: var(--c-green)">act</span>
+                            <p>TideSurf validates the action and passes it to the live element through CDP.</p>
+                        </li>
+                    </ol>
+
+                    <div class="action-specimen" aria-label="Example TideSurf action">
+                        <div class="specimen-label">
+                            <span>agent action</span>
+                            <span>local CDP</span>
+                        </div>
+                        <code>await page.click("B1")</code>
+                        <p><span class="status-dot" aria-hidden="true"></span>Chromium clicks the real Search button.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="capabilities" aria-labelledby="capabilities-title">
+                <header class="section-intro compact-intro">
+                    <h2 id="capabilities-title">Small tool surface. Stateful browser runtime.</h2>
+                </header>
+
+                <dl class="capability-list">
+                    <div>
+                        <dt><span style="--row-color: var(--c-teal)">observe</span></dt>
+                        <dd>Viewport state, extraction, search, tab control, and token budget.</dd>
+                    </div>
+                    <div>
+                        <dt><span style="--row-color: var(--c-rust)">act</span></dt>
+                        <dd>Current IDs drive click, type, select, upload, and download. Scroll and page JavaScript stay explicit.</dd>
+                    </div>
+                    <div>
+                        <dt><span style="--row-color: var(--c-green)">guard</span></dt>
+                        <dd>Read-only mode, path limits, URL validation, retry policy, and typed errors.</dd>
+                    </div>
+                    <div>
+                        <dt><span style="--row-color: var(--c-gold)">connect</span></dt>
+                        <dd>Run 20 CLI tools in named sessions, launch Chromium, attach to an endpoint, or use MCP.</dd>
+                    </div>
+                </dl>
+            </section>
+
+            <section class="agent-install" id="install" aria-labelledby="install-title">
+                <header class="section-intro compact-intro">
+                    <h2 id="install-title">Install it as your agent tool.</h2>
+                    <p>One package speaks both open packaging standards: TideSurf is an Agent Plugin with a bundled Agent Skill, and a host that loads yours.</p>
+                </header>
+
+                <dl class="capability-list">
+                    <div>
+                        <dt><span style="--row-color: var(--c-teal)">plugin</span></dt>
+                        <dd>The package root is an Agent Plugins directory: <code>plugin.json</code>, <code>mcp.json</code>, and <code>skills/</code>. Point VS Code, Cursor, Copilot, Codex, or Kiro at it.</dd>
+                    </div>
+                    <div>
+                        <dt><span style="--row-color: var(--c-rust)">skill</span></dt>
+                        <dd><code>npx skills add TideSurf/core</code> installs the bundled Agent Skill, or copy <code>skills/tidesurf-browser</code> into <code>.agents/skills/</code>.</dd>
+                    </div>
+                    <div>
+                        <dt><span style="--row-color: var(--c-green)">mcp</span></dt>
+                        <dd>Any MCP client runs <code>tidesurf mcp</code> over stdio. The adapter publishes installed skills in its server instructions.</dd>
+                    </div>
+                    <div>
+                        <dt><span style="--row-color: var(--c-gold)">host</span></dt>
+                        <dd>TideSurf loads your plugins from <code>.tidesurf/plugins</code> and skills from <code>.agents/skills</code>. Agents reach them through <code>list_skills</code> and <code>read_skill</code>, and plugin MCP servers are proxied into the adapter.</dd>
+                    </div>
+                </dl>
+            </section>
+
+            <section class="closing" aria-labelledby="closing-title">
+                <h2 id="closing-title">Give the model a page it can use.</h2>
+                <div class="closing-actions">
+                    <a class="patch-control" href="https://tidesurf.org/docs" style="--patch-color: var(--c-teal)">Read the docs</a>
+                    <a class="patch-control" href="https://www.npmjs.com/package/@tidesurf/core" style="--patch-color: var(--c-gold)">Open npm</a>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <div class="footer-id">
+                <strong>TideSurf</strong>
+                <span>DOM-to-text runtime for browser agents.</span>
+            </div>
+            <div class="footer-utilities">
+                <nav class="footer-links" aria-label="Footer">
+                    <a class="patch-control compact-control" href="https://tidesurf.org/docs" style="--patch-color: var(--c-teal)">Docs</a>
+                    <a class="patch-control compact-control" href="https://www.npmjs.com/package/@tidesurf/core" style="--patch-color: var(--c-gold)">npm</a>
+                    <a class="patch-control compact-control" href="https://github.com/TideSurf/core" style="--patch-color: var(--c-green)">GitHub</a>
+                </nav>
+            </div>
+        </footer>
+
+        <div class="theme-selector theme-float" role="group" aria-label="Theme">
+            <button type="button" class="theme-btn patch-control compact-control" data-theme="light">light</button>
+            <button type="button" class="theme-btn patch-control compact-control" data-theme="dark">dark</button>
+        </div>
+
+        <script type="module" src="/src/main.ts"></script>
+    </body>
+</html>

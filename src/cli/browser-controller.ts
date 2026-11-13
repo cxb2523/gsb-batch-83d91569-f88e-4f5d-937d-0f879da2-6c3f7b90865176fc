@@ -1,0 +1,497 @@
+import {
+  TideSurf,
+  connectToDiscoveredBrowser,
+  getTideSurfConnectionInfo,
+} from "../tidesurf.js";
+import { CDPConnectionError } from "../errors.js";
+import { discoverActiveBrowser } from "../cdp/launcher.js";
+import { isSurfingPageConnected } from "../cdp/page.js";
+import {
+  dispatchTool,
+  executeValidatedToolSpec,
+  type ToolExecutionContext,
+  type ToolDispatchOptions,
+  type ToolSpec,
+} from "../tools/registry.js";
+import type { ReadPageOptions, ToolResult } from "../types.js";
+import type { SessionConfig } from "./session.js";
+
+interface BrowserStatus {
+  running: boolean;
+  source?: "launched" | "attached";
+  headless: boolean;
+  readOnly: boolean;
+  host?: string;
+  port?: number;
+}
+
+function isLocalHost(host: string): boolean {
+  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function endpointFromUrl(value: string): { host: string; port: number } {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new CDPConnectionError(`Invalid browser URL: ${value}`);
+  }
+  if (url.protocol !== "http:") {
+    throw new CDPConnectionError("Browser URL must use http://");
+  }
+  const port = url.port ? Number(url.port) : 80;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new CDPConnectionError(`Invalid browser URL port: ${url.port}`);
+  }
+  return { host: url.hostname.replace(/^\[|\]$/g, ""), port };
+}
+
+/** Must finish before stale daemon recovery escalates to SIGKILL at 5s. */
+const DEFAULT_CLOSE_TIMEOUT_MS = 4_000;
+
+function closeTimeout(label: string): CDPConnectionError {
+  return new CDPConnectionError(
+    `${label} did not finish before the browser close deadline`
+  );
+}
+
+async function settleByDeadline<T>(
+  promise: Promise<T>,
+  deadline: number,
+  label: string
+): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw closeTimeout(label);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(closeTimeout(label)), remaining);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export class BrowserController {
+  private readonly config: SessionConfig;
+  private browser: TideSurf | null = null;
+  private source: "launched" | "attached" | undefined;
+  private opening: Promise<TideSurf> | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
+  private readonly browserFreeOperations = new Set<Promise<unknown>>();
+  private readonly browsersToClose = new Set<TideSurf>();
+  private readonly browserCloseAttempts = new Map<TideSurf, Promise<void>>();
+  private closing: Promise<void> | null = null;
+  private closed = false;
+  private readonly dispatchOptions: ToolDispatchOptions;
+  private readonly executeValidated = (
+    tool: ToolSpec,
+    input: Record<string, unknown>
+  ): Promise<ToolResult> => this.executeTool(tool, input);
+
+  constructor(config: SessionConfig) {
+    this.config = {
+      ...config,
+      fileAccessRoots: config.fileAccessRoots ? [...config.fileAccessRoots] : undefined,
+    };
+    this.dispatchOptions = {
+      readOnly: this.config.readOnly,
+      urlOptions: {
+        allowLocalhost: this.config.allowLocalhost,
+        allowPrivateHosts: this.config.allowPrivateHosts,
+      },
+    };
+  }
+
+  status(): BrowserStatus {
+    const browser = this.liveBrowser();
+    const endpoint = browser ? getTideSurfConnectionInfo(browser) : undefined;
+    return {
+      running: browser !== null,
+      source: this.source,
+      headless: this.config.headless,
+      readOnly: this.config.readOnly,
+      host: endpoint?.host,
+      port: endpoint?.port,
+    };
+  }
+
+  /** Returns the cached browser only while it is still connected; disposes dead handles. */
+  private liveBrowser(): TideSurf | null {
+    const browser = this.browser;
+    if (!browser) return null;
+    let connected: boolean;
+    try {
+      connected = isSurfingPageConnected(browser.getPage());
+    } catch {
+      connected = false;
+    }
+    if (connected) return browser;
+    this.browser = null;
+    this.source = undefined;
+    // Preserve failed disposal for a later acquire()/close() retry. Starting
+    // it now tears down CDP promptly instead of waiting behind queued work.
+    this.retainBrowserForClose(browser);
+    void this.startBrowserClose(browser).catch(() => undefined);
+    return null;
+  }
+
+  async start(): Promise<BrowserStatus> {
+    return this.runSerialized(async () => {
+      await this.getBrowser();
+      return this.status();
+    });
+  }
+
+  async launchBrowser(options: { headless?: boolean } = {}): Promise<{
+    alreadyRunning: boolean;
+    headless: boolean;
+    source: "launched" | "attached";
+  }> {
+    return this.runSerialized(async () => {
+      const alreadyRunning = this.liveBrowser() !== null;
+      const previousHeadless = this.config.headless;
+      if (!alreadyRunning && options.headless !== undefined) {
+        this.config.headless = options.headless;
+      }
+      try {
+        await this.getBrowser();
+      } catch (error) {
+        this.config.headless = previousHeadless;
+        throw error;
+      }
+      return {
+        alreadyRunning,
+        headless: this.config.headless,
+        source: this.source!,
+      };
+    });
+  }
+
+  async getBrowser(): Promise<TideSurf> {
+    if (this.closed) {
+      throw new CDPConnectionError("Browser controller is closed");
+    }
+    const browser = this.liveBrowser();
+    if (browser) return browser;
+    if (!this.opening) {
+      const opening = (async () => {
+        // A dead browser's failed close is retried before reusing its profile.
+        // Keep the empty fast path synchronous so an accepted acquisition
+        // starts before a same-turn close request can cancel it.
+        if (this.browsersToClose.size > 0) {
+          await this.closeRetainedBrowsers(
+            Date.now() + Math.min(
+              this.config.timeout ?? DEFAULT_CLOSE_TIMEOUT_MS,
+              DEFAULT_CLOSE_TIMEOUT_MS
+            )
+          );
+        }
+        if (this.closed) {
+          throw new CDPConnectionError("Browser controller is closed");
+        }
+        const acquired = await this.acquire();
+        if (this.closed) {
+          // close() never waits unbounded for acquisition. If it resolves
+          // after the deadline, this continuation still owns and cleans it.
+          this.source = undefined;
+          this.retainBrowserForClose(acquired);
+          void this.startBrowserClose(acquired).catch(() => undefined);
+          return acquired;
+        }
+        this.browser = acquired;
+        return acquired;
+      })();
+      this.opening = opening;
+      void opening.then(
+        () => {
+          if (this.opening === opening) this.opening = null;
+        },
+        () => {
+          if (this.opening === opening) this.opening = null;
+        }
+      );
+    }
+    return this.opening;
+  }
+
+  private commonOptions(timeout: number | undefined) {
+    return {
+      readOnly: this.config.readOnly,
+      timeout,
+      fileAccessRoots: this.config.fileAccessRoots,
+      allowLocalhost: this.config.allowLocalhost,
+      allowPrivateHosts: this.config.allowPrivateHosts,
+    };
+  }
+
+  private async attach(
+    host: string,
+    port: number,
+    targetId: string | undefined,
+    timeout: number | undefined
+  ): Promise<TideSurf> {
+    const options = { ...this.commonOptions(timeout), host, port };
+    const browser = targetId
+      ? await connectToDiscoveredBrowser(options, { host, port, targetId })
+      : await TideSurf.connect(options);
+    this.source = "attached";
+    return browser;
+  }
+
+  private async launch(port?: number, timeout = this.config.timeout): Promise<TideSurf> {
+    const browser = await TideSurf.launch({
+      ...this.commonOptions(timeout),
+      headless: this.config.headless,
+      chromePath: this.config.chromePath,
+      channel: this.config.channel,
+      userDataDir: this.config.userDataDir,
+      port,
+    });
+    this.source = "launched";
+    return browser;
+  }
+
+  private async acquire(): Promise<TideSurf> {
+    if (this.config.browserMode === "launch") {
+      return this.launch(this.config.port);
+    }
+    const deadline = Date.now() + (this.config.timeout ?? 15_000);
+    const remaining = (cap?: number) => {
+      const value = deadline - Date.now();
+      if (value <= 0) throw new CDPConnectionError("Browser acquisition timed out");
+      return cap === undefined ? value : Math.min(value, cap);
+    };
+
+    const explicitEndpoint = this.config.browserUrl
+      ? endpointFromUrl(this.config.browserUrl)
+      : this.config.port !== undefined || this.config.host !== undefined
+        ? { host: this.config.host ?? "127.0.0.1", port: this.config.port ?? 9222 }
+        : undefined;
+
+    if (explicitEndpoint) {
+      try {
+        return await this.attach(
+          explicitEndpoint.host,
+          explicitEndpoint.port,
+          undefined,
+          this.config.browserMode === "auto" ? remaining(3_000) : this.config.timeout
+        );
+      } catch (error) {
+        if (!(error instanceof CDPConnectionError)) throw error;
+        // A pinned endpoint never falls back to another running browser.
+        if (
+          this.config.browserMode === "connect" ||
+          !isLocalHost(explicitEndpoint.host)
+        ) {
+          throw error;
+        }
+        return this.launch(this.config.port, remaining());
+      }
+    }
+
+    let connectionError: unknown;
+    try {
+      const active = await discoverActiveBrowser({
+        channel: this.config.channel,
+        userDataDir: this.config.userDataDir,
+        timeout: remaining(5_000),
+      });
+      return await this.attach(
+        active.host,
+        active.port,
+        active.targetId,
+        remaining(3_000)
+      );
+    } catch (error) {
+      if (!(error instanceof CDPConnectionError)) throw error;
+      connectionError = error;
+    }
+
+    try {
+      return await this.attach("127.0.0.1", 9222, undefined, remaining(1_500));
+    } catch (error) {
+      if (!(error instanceof CDPConnectionError)) throw error;
+      connectionError = error;
+    }
+
+    if (this.config.browserMode === "connect") {
+      throw connectionError;
+    }
+
+    return this.launch(this.config.port, remaining());
+  }
+
+  async execute(name: string, input: Record<string, unknown>): Promise<ToolResult> {
+    return dispatchTool(
+      { name, input },
+      this.dispatchOptions,
+      this.executeValidated
+    );
+  }
+
+  async inspect(url: string, options: ReadPageOptions): Promise<ToolResult> {
+    const context: ToolExecutionContext = {
+      pageRead: { options, contentOnly: true },
+    };
+    return dispatchTool(
+      { name: "navigate", input: { url } },
+      this.dispatchOptions,
+      (tool, input) => this.executeTool(tool, input, context)
+    );
+  }
+
+  private executeTool(
+    tool: ToolSpec,
+    input: Record<string, unknown>,
+    context?: ToolExecutionContext
+  ): Promise<ToolResult> {
+    // Browser-free tools (skills/plugins discovery) bypass both acquisition
+    // and the serialized queue: they only read the filesystem and must not
+    // wedge behind a stuck browser operation.
+    if (tool.requiresBrowser === false) {
+      return this.runBrowserFree(() =>
+        executeValidatedToolSpec(null, tool, input, context)
+      );
+    }
+    return this.runSerialized(async () =>
+      executeValidatedToolSpec(await this.getBrowser(), tool, input, context)
+    );
+  }
+
+  private runBrowserFree<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closed) {
+      return Promise.reject(new CDPConnectionError("Browser controller is closed"));
+    }
+    let result: Promise<T>;
+    try {
+      result = operation();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    this.browserFreeOperations.add(result);
+    void result.then(
+      () => this.browserFreeOperations.delete(result),
+      () => this.browserFreeOperations.delete(result)
+    );
+    return result;
+  }
+
+  private runSerialized<T>(operation: () => Promise<T>): Promise<T> {
+    const run = () => {
+      if (this.closed) {
+        throw new CDPConnectionError("Browser controller is closed");
+      }
+      return operation();
+    };
+    const result = this.operationTail.then(run);
+    this.operationTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  private retainBrowserForClose(browser: TideSurf): void {
+    this.browsersToClose.add(browser);
+  }
+
+  private startBrowserClose(
+    browser: TideSurf,
+    deadline = Date.now() + DEFAULT_CLOSE_TIMEOUT_MS
+  ): Promise<void> {
+    const existing = this.browserCloseAttempts.get(browser);
+    if (existing) return existing;
+    this.retainBrowserForClose(browser);
+    const attempt = (async () => {
+      const close = browser.close as (deadline?: number) => Promise<void>;
+      await close.call(browser, deadline);
+      this.browsersToClose.delete(browser);
+    })();
+    this.browserCloseAttempts.set(browser, attempt);
+    void attempt.then(
+      () => {
+        if (this.browserCloseAttempts.get(browser) === attempt) {
+          this.browserCloseAttempts.delete(browser);
+        }
+      },
+      () => {
+        if (this.browserCloseAttempts.get(browser) === attempt) {
+          this.browserCloseAttempts.delete(browser);
+        }
+      }
+    );
+    return attempt;
+  }
+
+  private async closeRetainedBrowsers(deadline: number): Promise<void> {
+    const attempts = [...this.browsersToClose].map((browser) =>
+      this.startBrowserClose(browser, deadline)
+    );
+    if (attempts.length === 0) return;
+    const results = await settleByDeadline(
+      Promise.allSettled(attempts),
+      deadline,
+      "Browser disposal"
+    );
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    );
+    if (failures.length === 1 && failures[0].reason instanceof Error) {
+      throw failures[0].reason;
+    }
+    if (failures.length > 0) {
+      throw new CDPConnectionError("Failed to close browser controller resources", {
+        cause: new AggregateError(
+          failures.map((failure) => failure.reason),
+          "Browser controller close failures"
+        ),
+      });
+    }
+  }
+
+  async close(
+    deadline = Date.now() + DEFAULT_CLOSE_TIMEOUT_MS
+  ): Promise<void> {
+    if (this.closing) return this.closing;
+    this.closed = true;
+    const closing = (async () => {
+      const browser = this.browser;
+      this.browser = null;
+      this.source = undefined;
+      if (browser) this.retainBrowserForClose(browser);
+
+      // Start browser cancellation before draining operations. Closing CDP is
+      // what unblocks most wedged browser work, and every wait below shares
+      // this one absolute deadline.
+      const resources = this.closeRetainedBrowsers(deadline);
+      const opening = this.opening;
+      const openingSettled = opening
+        ? opening.then(() => undefined, () => undefined)
+        : Promise.resolve();
+      const drain = Promise.allSettled([
+        this.operationTail,
+        ...this.browserFreeOperations,
+      ]);
+      await settleByDeadline(
+        Promise.all([resources, openingSettled, drain]),
+        deadline,
+        "Browser controller close"
+      );
+      // An acquisition can resolve while the first wait is settling and add a
+      // late browser. Close that retained handle with the remaining budget.
+      await this.closeRetainedBrowsers(deadline);
+    })();
+    this.closing = closing;
+    try {
+      await closing;
+    } finally {
+      if (this.closing === closing) this.closing = null;
+    }
+  }
+}

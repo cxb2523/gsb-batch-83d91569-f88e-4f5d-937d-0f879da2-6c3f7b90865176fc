@@ -1,0 +1,141 @@
+import type { ClassifyResult } from "../types.js";
+
+const DISCARD_TAGS = new Set([
+  "SCRIPT",
+  "STYLE",
+  "LINK",
+  "META",
+  "NOSCRIPT",
+  "TEMPLATE",
+  "SVG",
+  "HEAD",
+  "BR",
+]);
+
+const KEEP_TAG_MAP: Record<string, string> = {
+  A: "link",
+  BUTTON: "button",
+  INPUT: "input",
+  SELECT: "select",
+  TEXTAREA: "input",
+  FORM: "form",
+  NAV: "nav",
+  TABLE: "table",
+  TR: "row",
+  "TD": "cell",
+  TH: "cell",
+  IMG: "img",
+  H1: "h1",
+  H2: "h2",
+  H3: "h3",
+  H4: "h4",
+  H5: "h5",
+  H6: "h6",
+  UL: "list",
+  OL: "list",
+  LI: "item",
+  LABEL: "label",
+  DIALOG: "dialog",
+  IFRAME: "iframe",
+  MAIN: "main",
+  OPTION: "option",
+  OPTGROUP: "optgroup",
+};
+
+const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA"]);
+
+const ROLE_TAG_MAP: Record<string, string> = {
+  button: "button",
+  navigation: "nav",
+  link: "link",
+  textbox: "input",
+  listbox: "select",
+  dialog: "dialog",
+  heading: "heading",
+  list: "list",
+  listitem: "item",
+  table: "table",
+  row: "row",
+  cell: "cell",
+};
+
+function upperTagName(nodeName: string): string {
+  for (let index = 0; index < nodeName.length; index++) {
+    const code = nodeName.charCodeAt(index);
+    if (code >= 0x61 && code <= 0x7a) return nodeName.toUpperCase();
+  }
+  return nodeName;
+}
+
+export function parseAttributes(attrs?: string[]): Record<string, string> {
+  const result = Object.create(null) as Record<string, string>;
+  if (!attrs) return result;
+  for (let i = 0; i < attrs.length; i += 2) {
+    result[attrs[i]] = attrs[i + 1];
+  }
+  return result;
+}
+
+export function classify(
+  nodeName: string,
+  attributes?: Record<string, string>,
+  children?: { nodeName: string; attributes?: string[] }[],
+  options?: { includeHidden?: boolean; computedVisibility?: boolean }
+): ClassifyResult {
+  const upper = upperTagName(nodeName);
+
+  if (!options?.includeHidden) {
+    if (
+      attributes?.["aria-hidden"]?.toLowerCase() === "true" ||
+      attributes?.["hidden"] !== undefined ||
+      attributes?.["data-os-hidden"] === "subtree" ||
+      attributes?.["data-os-hidden"] === "1"
+    ) {
+      return { action: "DISCARD" };
+    }
+
+    const style = attributes?.["style"];
+    if (style && !options?.computedVisibility) {
+      if (/(?:^|;)\s*display\s*:\s*none\b/i.test(style)) {
+        return { action: "DISCARD" };
+      }
+      if (/(?:^|;)\s*visibility\s*:\s*(?:hidden|collapse)\b/i.test(style)) {
+        return { action: "DISCARD" };
+      }
+    }
+  }
+
+  if (DISCARD_TAGS.has(upper)) {
+    return { action: "DISCARD" };
+  }
+
+  if (attributes?.["role"]) {
+    const mapped = ROLE_TAG_MAP[attributes["role"]];
+    if (mapped) {
+      return { action: "KEEP", mappedTag: mapped };
+    }
+  }
+
+  if (upper === "SECTION" || upper === "ARTICLE" || upper === "ASIDE") {
+    if (attributes?.["aria-label"] || attributes?.["role"]) {
+      return { action: "KEEP", mappedTag: upper.toLowerCase() };
+    }
+    return { action: "COLLAPSE" };
+  }
+
+  if (upper === "HEADER" || upper === "FOOTER") {
+    const hasInteractiveChild = children?.some((c) =>
+      INTERACTIVE_TAGS.has(upperTagName(c.nodeName))
+    );
+    if (hasInteractiveChild) {
+      return { action: "KEEP", mappedTag: upper.toLowerCase() };
+    }
+    return { action: "COLLAPSE" };
+  }
+
+  if (KEEP_TAG_MAP[upper]) {
+    return { action: "KEEP", mappedTag: KEEP_TAG_MAP[upper] };
+  }
+
+  return { action: "COLLAPSE" };
+}

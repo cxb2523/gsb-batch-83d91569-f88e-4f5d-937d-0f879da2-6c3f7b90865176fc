@@ -1,0 +1,249 @@
+import {
+  TOOL_REGISTRY,
+  createToolExecutor,
+  executeValidatedToolSpec,
+  getToolDefinitions,
+  getToolSpec,
+} from "../../src/tools/registry.js";
+import { ActionCommittedError } from "../../src/errors.js";
+import type { TideSurf } from "../../src/tidesurf.js";
+
+describe("getToolDefinitions", () => {
+  it("returns 20 tools by default", () => {
+    const tools = getToolDefinitions();
+    expect(tools).toHaveLength(20);
+  });
+
+  it("every tool has name, description, and input_schema", () => {
+    const tools = getToolDefinitions();
+    for (const tool of tools) {
+      expect(tool.name).toBeTruthy();
+      expect(tool.description).toBeTruthy();
+      expect(tool.input_schema.type).toBe("object");
+      expect(tool.input_schema.properties).toBeDefined();
+    }
+  });
+
+  it("returns 8 tools in read-only mode", () => {
+    const tools = getToolDefinitions({ readOnly: true });
+    expect(tools).toHaveLength(8);
+  });
+
+  it("read-only mode excludes all write tools", () => {
+    const writeToolNames = [
+      "navigate",
+      "click",
+      "type",
+      "select",
+      "scroll",
+      "new_tab",
+      "close_tab",
+      "upload",
+      "clipboard_read",
+      "clipboard_write",
+      "download",
+    ];
+    const tools = getToolDefinitions({ readOnly: true });
+    const names = tools.map((t) => t.name);
+    for (const writeTool of writeToolNames) {
+      expect(names).not.toContain(writeTool);
+    }
+  });
+
+  it("read-only mode includes read tools", () => {
+    const expectedReadTools = [
+      "get_state",
+      "extract",
+      "list_tabs",
+      "switch_tab",
+      "search",
+      "screenshot",
+      "list_skills",
+      "read_skill",
+    ];
+    const tools = getToolDefinitions({ readOnly: true });
+    const names = tools.map((t) => t.name);
+    for (const readTool of expectedReadTools) {
+      expect(names).toContain(readTool);
+    }
+  });
+
+  it("full mode includes all write tools", () => {
+    const writeToolNames = [
+      "navigate",
+      "click",
+      "type",
+      "select",
+      "scroll",
+      "evaluate",
+      "new_tab",
+      "close_tab",
+      "upload",
+      "clipboard_write",
+      "download",
+    ];
+    const tools = getToolDefinitions();
+    const names = tools.map((t) => t.name);
+    for (const writeTool of writeToolNames) {
+      expect(names).toContain(writeTool);
+    }
+  });
+
+  it("tool names are unique", () => {
+    const tools = getToolDefinitions();
+    const names = tools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("derives definitions and CLI discovery from the same registry", () => {
+    expect(getToolDefinitions().map((tool) => tool.name)).toEqual(
+      TOOL_REGISTRY.map((tool) => tool.name)
+    );
+
+    for (const tool of TOOL_REGISTRY) {
+      expect(getToolSpec(tool.name)).toBe(tool);
+    }
+  });
+
+  it("exposes CLI metadata and output kinds for every tool", () => {
+    for (const tool of TOOL_REGISTRY) {
+      expect(["text", "json", "image"]).toContain(tool.outputKind);
+      expect(tool.cli.positionals).toBeDefined();
+      expect(tool.cli.options).toBeDefined();
+    }
+
+    expect(getToolSpec("get_state")?.name).toBe("get_state");
+    expect(getToolSpec("clipboard_read")?.name).toBe("clipboard_read");
+  });
+
+  it("does not expose mutable canonical schemas", () => {
+    const first = getToolDefinitions();
+    first[0].input_schema.properties["injected"] = { type: "string" };
+    expect(getToolDefinitions()[0].input_schema.properties["injected"]).toBeUndefined();
+    expect(TOOL_REGISTRY[0].inputSchema.properties["injected"]).toBeUndefined();
+  });
+
+  it("reports committed mutations as success so agents do not retry them", async () => {
+    const instance = {
+      isReadOnly: () => false,
+      getPage: () => ({
+        click: async () => {
+          throw new ActionCommittedError("Click", new Error("stability timeout"));
+        },
+      }),
+      getUrlValidationOptions: () => ({}),
+    } as unknown as TideSurf;
+
+    const result = await createToolExecutor(instance)({
+      name: "click",
+      input: { id: "B1" },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data).toContain("Click completed");
+    expect(result.data).toContain("Inspect current state");
+  });
+
+  it("uses the navigate handler for one-shot page reads without a second capture", async () => {
+    const calls: string[] = [];
+    const instance = {
+      navigate: async () => { calls.push("navigate"); },
+      readPage: async (options: unknown) => {
+        calls.push(`read:${JSON.stringify(options)}`);
+        return { content: "page state" };
+      },
+    } as unknown as TideSurf;
+    const navigate = getToolSpec("navigate")!;
+
+    const result = await executeValidatedToolSpec(
+      instance,
+      navigate,
+      { url: "https://example.com" },
+      {
+        pageRead: {
+          options: { mode: "interactive", maxTokens: 500 },
+          contentOnly: true,
+        },
+      }
+    );
+
+    expect(result).toEqual({ success: true, data: "page state" });
+    expect(calls).toEqual([
+      "navigate",
+      'read:{"mode":"interactive","maxTokens":500}',
+    ]);
+  });
+
+  it("reports a failed one-shot page read instead of returning a success warning", async () => {
+    const instance = {
+      navigate: async () => undefined,
+      readPage: async () => {
+        throw new Error("snapshot failed");
+      },
+    } as unknown as TideSurf;
+
+    const result = await executeValidatedToolSpec(
+      instance,
+      getToolSpec("navigate")!,
+      { url: "https://example.com" },
+      { pageRead: { contentOnly: true } }
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "snapshot failed",
+      errorType: "Error",
+    });
+  });
+
+  it("recovers one-shot state after navigation reaches an uncertain boundary", async () => {
+    const instance = {
+      navigate: async () => {
+        throw new ActionCommittedError(
+          "Navigation",
+          new Error("load timeout"),
+          "uncertain"
+        );
+      },
+      readPage: async () => ({ content: "recovered state" }),
+    } as unknown as TideSurf;
+
+    const result = await executeValidatedToolSpec(
+      instance,
+      getToolSpec("navigate")!,
+      { url: "https://example.com" },
+      { pageRead: { contentOnly: true } }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data).toContain("Navigation may have completed");
+    expect(result.data).toContain("Current page state:\n\nrecovered state");
+  });
+
+  it("fails one-shot inspection when committed navigation state is unreadable", async () => {
+    const instance = {
+      navigate: async () => {
+        throw new ActionCommittedError(
+          "Navigation",
+          new Error("load timeout"),
+          "uncertain"
+        );
+      },
+      readPage: async () => {
+        throw new Error("snapshot failed");
+      },
+    } as unknown as TideSurf;
+
+    const result = await executeValidatedToolSpec(
+      instance,
+      getToolSpec("navigate")!,
+      { url: "https://example.com" },
+      { pageRead: { contentOnly: true } }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorType).toBe("Error");
+    expect(result.error).toContain("may have completed");
+    expect(result.error).toContain("snapshot failed");
+  });
+});

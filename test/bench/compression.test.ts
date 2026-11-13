@@ -1,0 +1,349 @@
+/**
+ * Compression benchmarks — measures TideSurf's token efficiency
+ * against raw source HTML and rendered DOM on realistic pages.
+ *
+ * Run: bun run test:bench
+ */
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import { TideSurf } from "../../src/index.js";
+import { estimateTokens } from "../../src/parser/token-budget.js";
+import { canResolveBrowser } from "../support/browser.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const fixturesDir = join(__dirname, "..", "fixtures");
+
+let surfing: TideSurf;
+let fixtureHtml: Record<string, string> = {};
+let fixtureUrls: Record<string, string> = {};
+let fixtureServer: Server | null = null;
+
+interface BenchResult {
+  page: string;
+  sourceHtmlTokens: number;
+  renderedDomTokens: number;
+  tideSurfTokens: number;
+  vsSourceRatio: string;
+  vsRenderedRatio: string;
+  vsSourceReduction: string;
+  vsRenderedReduction: string;
+  interactiveElements: number;
+}
+
+interface CompressionExpectations {
+  schemaVersion: number;
+  fixtures: Array<{
+    name: "ecommerce" | "news";
+    label: string;
+    sourceHtmlTokens: number;
+    renderedDomTokens: number;
+    tideSurfTokens: number;
+  }>;
+  tokenBudget: {
+    fixture: "ecommerce" | "news";
+    maxTokens: number;
+    fullTokens: number;
+    budgetedTokens: number;
+  };
+}
+
+const results: BenchResult[] = [];
+const expectations = JSON.parse(
+  await readFile(join(fixturesDir, "compression-expectations.json"), "utf8")
+) as CompressionExpectations;
+if (expectations.schemaVersion !== 1) {
+  throw new Error(`Unsupported compression snapshot schema: ${expectations.schemaVersion}`);
+}
+const expectedFixtures = new Map(
+  expectations.fixtures.map((fixture) => [fixture.name, fixture])
+);
+
+function countInteractiveIds(content: string): number {
+  const matches = content.match(/\b[LBISTFD]\d+\b/g);
+  return matches ? matches.length : 0;
+}
+
+const browserAvailable = canResolveBrowser();
+const describeBench = browserAvailable ? describe : describe.skip;
+
+if (!browserAvailable) {
+  console.warn("Skipping compression benchmarks: Chrome could not be launched in this environment.");
+}
+
+describeBench("Compression benchmarks", () => {
+  const pages = [
+    { name: "basic", file: "basic.html", desc: "Simple page (form + nav)" },
+    { name: "interactive", file: "interactive.html", desc: "Interactive elements" },
+    { name: "ecommerce", file: "bench-ecommerce.html", desc: "E-commerce (9 products)" },
+    { name: "news", file: "bench-news.html", desc: "News site (articles + sidebar)" },
+  ] as const;
+
+  beforeAll(async () => {
+    const pageFiles = pages.map((page) => page.file);
+    const entries = await Promise.all(
+      pageFiles.map(async (name) => [name, await readFile(join(fixturesDir, name), "utf-8")] as const)
+    );
+    fixtureHtml = Object.fromEntries(entries);
+    const fixtureSet = new Set<string>(pageFiles);
+
+    fixtureServer = createServer(async (req, res) => {
+      try {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        const name = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+        if (!fixtureSet.has(name)) {
+          res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+          res.end("Not found");
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(fixtureHtml[name]);
+      } catch (err) {
+        res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+        res.end(err instanceof Error ? err.message : String(err));
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      fixtureServer!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = fixtureServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Fixture server did not bind to a TCP port");
+    }
+    fixtureUrls = Object.fromEntries(
+      pageFiles.map((name) => [name, `http://127.0.0.1:${address.port}/${name}`] as const)
+    );
+
+    surfing = await TideSurf.launch({
+      headless: true,
+      allowLocalhost: true,
+      defaultViewport: { width: 756, height: 469 },
+    });
+  }, 30000);
+
+  afterAll(async () => {
+    await surfing?.close();
+    await new Promise<void>((resolve, reject) => {
+      if (!fixtureServer) {
+        resolve();
+        return;
+      }
+      fixtureServer.close((err) => (err ? reject(err) : resolve()));
+    });
+
+    console.log("\n");
+    console.log("═".repeat(100));
+    console.log("  TIDESURF COMPRESSION BENCHMARKS");
+    console.log("═".repeat(100));
+    console.log("");
+    console.log(
+      "  Page".padEnd(18) +
+      "Source HTML".padEnd(14) +
+      "Rendered DOM".padEnd(14) +
+      "TideSurf".padEnd(14) +
+      "vs Source".padEnd(14) +
+      "vs Rendered".padEnd(14) +
+      "IDs"
+    );
+    console.log("  " + "─".repeat(96));
+
+    for (const r of results) {
+      console.log(
+        `  ${r.page.padEnd(16)}` +
+        `${r.sourceHtmlTokens.toLocaleString().padStart(6)} tok`.padEnd(14) +
+        `${r.renderedDomTokens.toLocaleString().padStart(6)} tok`.padEnd(14) +
+        `${r.tideSurfTokens.toLocaleString().padStart(6)} tok`.padEnd(14) +
+        `${r.vsSourceReduction.padStart(6)} (${r.vsSourceRatio}x)`.padEnd(14) +
+        `${r.vsRenderedReduction.padStart(6)} (${r.vsRenderedRatio}x)`.padEnd(14) +
+        `${r.interactiveElements}`
+      );
+    }
+
+    console.log("");
+
+    const realistic = results.filter((r) => r.page === "ecommerce" || r.page === "news");
+    if (realistic.length > 0) {
+      const avgVsSource =
+        realistic.reduce((sum, r) => sum + parseFloat(r.vsSourceRatio), 0) / realistic.length;
+      const avgVsRendered =
+        realistic.reduce((sum, r) => sum + parseFloat(r.vsRenderedRatio), 0) / realistic.length;
+      const avgSourceReduction =
+        realistic.reduce(
+          (sum, r) => sum + (1 - r.tideSurfTokens / r.sourceHtmlTokens),
+          0
+        ) / realistic.length;
+      const avgRenderedReduction =
+        realistic.reduce(
+          (sum, r) => sum + (1 - r.tideSurfTokens / r.renderedDomTokens),
+          0
+        ) / realistic.length;
+
+      console.log(
+        `  ${"AVG (realistic)".padEnd(16)}` +
+        `${"".padEnd(14)}` +
+        `${"".padEnd(14)}` +
+        `${"".padEnd(14)}` +
+        `${(avgSourceReduction * 100).toFixed(0)}% (${avgVsSource.toFixed(1)}x)`.padStart(6).padEnd(14) +
+        `${(avgRenderedReduction * 100).toFixed(0)}% (${avgVsRendered.toFixed(1)}x)`.padStart(6).padEnd(14)
+      );
+    }
+    console.log("═".repeat(100));
+    console.log("");
+  });
+
+  for (const page of pages) {
+    it(`${page.name}: compresses ${page.desc}`, async () => {
+      const sourceHtml = fixtureHtml[page.file];
+
+      await surfing.navigate(fixtureUrls[page.file]);
+
+      const sourceHtmlTokens = estimateTokens(sourceHtml);
+
+      const renderedDom = (await surfing
+        .getPage()
+        .evaluate("document.documentElement.outerHTML")) as string;
+      const renderedDomTokens = estimateTokens(renderedDom);
+
+      const state = await surfing.readPage({ viewport: false });
+      const tideSurfTokens = estimateTokens(state.content);
+      const interactiveElements = countInteractiveIds(state.content);
+
+      results.push({
+        page: page.name,
+        sourceHtmlTokens,
+        renderedDomTokens,
+        tideSurfTokens,
+        vsSourceRatio: (sourceHtmlTokens / tideSurfTokens).toFixed(1),
+        vsRenderedRatio: (renderedDomTokens / tideSurfTokens).toFixed(1),
+        vsSourceReduction: `${((1 - tideSurfTokens / sourceHtmlTokens) * 100).toFixed(0)}%`,
+        vsRenderedReduction: `${((1 - tideSurfTokens / renderedDomTokens) * 100).toFixed(0)}%`,
+        interactiveElements,
+      });
+
+      expect(sourceHtmlTokens / tideSurfTokens).toBeGreaterThan(1);
+      expect(interactiveElements).toBeGreaterThan(0);
+      if (page.name === "ecommerce" || page.name === "news") {
+        const expected = expectedFixtures.get(page.name);
+        if (!expected) throw new Error(`Missing benchmark expectation: ${page.name}`);
+        expect({ sourceHtmlTokens, renderedDomTokens, tideSurfTokens }).toEqual({
+          sourceHtmlTokens: expected.sourceHtmlTokens,
+          renderedDomTokens: expected.renderedDomTokens,
+          tideSurfTokens: expected.tideSurfTokens,
+        });
+      }
+
+      expect(state.content).not.toContain("data-tracking");
+      expect(state.content).not.toContain("data-product-id");
+      expect(state.content).not.toContain("font-family");
+      expect(state.content).not.toContain("<script");
+      expect(state.content).not.toContain("<style");
+      expect(state.content).not.toContain("google");
+    }, 15000);
+  }
+
+  it("token budget matches the deterministic snapshot", async () => {
+    const expected = expectations.tokenBudget;
+    const fixture = pages.find((page) => page.name === expected.fixture);
+    if (!fixture) throw new Error(`Missing benchmark fixture: ${expected.fixture}`);
+    await surfing.navigate(fixtureUrls[fixture.file]);
+
+    const full = await surfing.readPage({ viewport: false });
+    const budgeted = await surfing.readPage({
+      viewport: false,
+      maxTokens: expected.maxTokens,
+    });
+
+    const fullTokens = estimateTokens(full.content);
+    const budgetedTokens = estimateTokens(budgeted.content);
+
+    console.log(
+      `\n  Token budget: ${fullTokens} tok → ${budgetedTokens} tok (budget: ${expected.maxTokens})`
+    );
+
+    expect({ fullTokens, budgetedTokens }).toEqual({
+      fullTokens: expected.fullTokens,
+      budgetedTokens: expected.budgetedTokens,
+    });
+    expect(budgeted.content).toContain("# ");
+    expect(countInteractiveIds(budgeted.content)).toBeGreaterThan(0);
+    expect(budgeted.content).toContain("truncated");
+  }, 15000);
+
+  it("speed: realistic readPage stays below 100ms average", async () => {
+    await surfing.navigate(fixtureUrls["bench-ecommerce.html"]);
+
+    await surfing.readPage();
+
+    const runs = 10;
+    const times: number[] = [];
+
+    for (let i = 0; i < runs; i++) {
+      const start = performance.now();
+      await surfing.readPage();
+      times.push(performance.now() - start);
+    }
+
+    const avg = times.reduce((a, b) => a + b, 0) / times.length;
+    const p50 = [...times].sort((a, b) => a - b)[Math.floor(runs / 2)];
+    const p99 = [...times].sort((a, b) => a - b)[Math.floor(runs * 0.99)];
+
+    console.log(
+      `\n  readPage (${runs} runs): avg=${avg.toFixed(1)}ms, p50=${p50.toFixed(1)}ms, p99=${p99.toFixed(1)}ms`
+    );
+
+    expect(avg).toBeLessThan(100);
+  }, 15000);
+
+  it("speed: 10,000-element readPage stays bounded and near-linear", async () => {
+    await surfing.navigate(fixtureUrls["basic.html"]);
+    const measure = async (elementCount: number, runs: number) => {
+      await surfing.getPage().evaluate(`((elementCount) => {
+        document.body.textContent = '';
+        const fragment = document.createDocumentFragment();
+        for (let index = 0; index < elementCount; index++) {
+          const row = document.createElement('div');
+          if (index % 25 === 0) {
+            const button = document.createElement('button');
+            button.textContent = 'Action ' + index;
+            row.append(button);
+          } else {
+            row.textContent = 'Content ' + index;
+          }
+          fragment.append(row);
+        }
+        document.body.append(fragment);
+      })(${elementCount})`);
+
+      await surfing.readPage();
+      const times: number[] = [];
+      for (let index = 0; index < runs; index++) {
+        const start = performance.now();
+        await surfing.readPage();
+        times.push(performance.now() - start);
+      }
+      return times;
+    };
+
+    // Interleave small/large measurement rounds so transient machine load
+    // hits both sides of the ratio, and compare minima (the least-noise
+    // estimate of true cost) instead of a single p50: a raw wall-clock p50
+    // ratio with a ~16ms denominator flakes on loaded machines.
+    let smallMin = Infinity;
+    let largeMin = Infinity;
+    for (let round = 0; round < 3; round++) {
+      const smallTimes = await measure(2_500, 3);
+      const largeTimes = await measure(10_000, 3);
+      smallMin = Math.min(smallMin, ...smallTimes);
+      largeMin = Math.min(largeMin, ...largeTimes);
+    }
+    const scale = largeMin / smallMin;
+
+    console.log(
+      `\n  readPage (2,500 to 10,000 elements): min=${smallMin.toFixed(1)}ms to ${largeMin.toFixed(1)}ms, scale=${scale.toFixed(2)}x`
+    );
+    expect(scale).toBeLessThan(5.5);
+    expect(largeMin).toBeLessThan(250);
+  }, 30000);
+});

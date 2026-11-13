@@ -1,0 +1,27 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+*.log
+.env
+.env.*
+coverage/
+.claude
+.tmp-npm-cache/
+.impeccable.md
+
+# Chrome user data from TideSurf sessions (repo-root temp profiles)
+/tidesurf-*
+
+# OS junk
+Thumbs.db
+.Spotlight-V100
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+opencode.jsonc
+opencode.json

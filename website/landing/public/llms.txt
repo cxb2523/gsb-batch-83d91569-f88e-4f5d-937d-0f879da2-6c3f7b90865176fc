@@ -1,0 +1,197 @@
+# TideSurf
+
+> Stateful Chromium tools for agents. TideSurf compresses the live DOM into compact text and assigns action IDs to current elements.
+
+Package: @tidesurf/core
+CLI: tidesurf
+Runtime: Node.js 18+ or Bun 1+
+Docs: https://tidesurf.org/docs
+Source: https://github.com/TideSurf/core
+
+## Install
+
+```sh
+brew install TideSurf/tap/tidesurf
+# or
+npm install --global @tidesurf/core
+```
+
+## Use as your agent tool
+
+TideSurf installs into an agent in three ways, from lightest to deepest:
+
+1. MCP server: add `tidesurf mcp` to any MCP client config (see the MCP section).
+2. Agent Skills: the npm package ships `skills/tidesurf-browser`, an Agent Skills document that teaches the agent the TideSurf workflow. Install it with `npx skills add TideSurf/core`, or copy `skills/tidesurf-browser` into your project's `.agents/skills/` directory.
+3. Agent Plugin: the package root is a valid Agent Plugins v1.0.0 directory (`plugin.json`, `mcp.json`, `skills/`). Point any compatible client (VS Code, Cursor, Copilot, Codex, Kiro) at a checkout or the unpacked npm package to register both the MCP server and the skill.
+
+TideSurf is also a host: it loads Agent Plugins from `.tidesurf/plugins/` (project) and `~/.tidesurf/plugins/` (user), and Agent Skills from `.agents/skills/`, `.tidesurf/skills/`, and the same paths under `~`. Plugin skills and MCP servers become available to the agent through the `list_skills`/`read_skill` tools, the `skills`/`plugins` CLI commands, and the MCP adapter (plugin MCP servers are proxied into `tidesurf mcp` under `<plugin>__<tool>` names). Set `TIDESURF_PLUGINS_DIR`/`TIDESURF_SKILLS_DIR` to replace the default roots, and `TIDESURF_EXTENSIONS=all|user|off` to control scope: the default `user` loads only your own extensions, while project-scoped (repository-shipped) extensions require the explicit `all` opt-in.
+
+## Agent CLI
+
+The first tool command starts a private local daemon and a managed headless browser. Separate CLI invocations reuse the same browser, active tab, open tabs, and element ID maps. The default session name is `default`.
+
+```sh
+tidesurf navigate https://example.com
+tidesurf get_state
+tidesurf click B1
+tidesurf stop
+```
+
+Use `--session <name>` on every command for an independent workflow:
+
+```sh
+tidesurf --session docs navigate https://example.com/docs
+tidesurf --session docs get_state --max-tokens 800
+```
+
+Session commands:
+
+- `start`: start the session daemon and browser
+- `status`: report session and browser state without starting either
+- `stop`: stop the named session; repeated calls succeed, and a recorded daemon whose socket vanished is terminated
+- `tools`: list the shared tool registry
+- `help [command]`: show generated help
+- `call <tool> --input <json|->`: call an exact tool identifier with JSON; `-` reads stdin
+- `inspect <url>`: one-shot compatibility command
+- `mcp`: run the MCP stdio adapter
+- `skills [name]`: list discovered Agent Skills, or print one skill's document
+- `plugins`: list discovered Agent Plugins with diagnostics
+
+Direct tool commands, in registry order:
+
+1. `get_state`
+2. `navigate`
+3. `click`
+4. `type`
+5. `select`
+6. `scroll`
+7. `extract`
+8. `evaluate`
+9. `list_tabs`
+10. `new_tab`
+11. `switch_tab`
+12. `close_tab`
+13. `search`
+14. `screenshot`
+15. `upload`
+16. `clipboard_read`
+17. `clipboard_write`
+18. `download`
+19. `list_skills`
+20. `read_skill`
+
+Use `tidesurf help <command>` for exact positionals and flags. Page-state flags:
+
+- `get_state --max-tokens <n> --mode <full|minimal|interactive>`
+- `get_state --full-page` disables normal viewport filtering
+- `get_state --include-hidden` includes hidden nodes and disables viewport filtering
+- `screenshot --element-id <id> | --full-page`
+- `screenshot --output <file>` writes a selected file
+- `screenshot --output -` writes raw PNG bytes to stdout
+
+Without `--output`, screenshot writes a unique temporary PNG and prints its absolute path.
+
+Element and full-page captures, plus SDK `defaultViewport` values, are limited to 16,384 px per side and 12,000,000 total pixels.
+
+Default output is readable text or pretty JSON. `--json` returns the ToolResult shape:
+
+```json
+{ "success": true, "data": "..." }
+```
+
+Exit codes: 0 Success; 2 CLI usage or input parsing error; 3 Session or browser startup/connection error; 4 Tool execution failed; 5 Daemon authentication, transport, or protocol error.
+
+## Browser startup
+
+Managed isolated Chromium is the default. Launch is headless unless `--headful` is set. TideSurf selects an ephemeral debugging port unless `--port` is explicit.
+
+Browser resolution order:
+
+1. `--chrome-path`
+2. `CHROME_PATH`
+3. executable on `PATH`
+4. platform install locations, including macOS user applications and Windows LOCALAPPDATA
+
+Channel order: stable, Beta, Dev, Canary, Chromium. Select one with `--channel stable|beta|dev|canary|chromium`. Edge and Brave need `--chrome-path`. TideSurf never downloads a browser.
+
+Without an explicit endpoint, `--auto-connect` tries a current Chrome profile DevToolsActivePort entry, then a conventional local CDP endpoint, before local launch; `--connect-only` runs the same checks and never launches. An explicit `--browser-url` or `--host`/`--port` endpoint never falls back to a different running browser: `--connect-only` fails when it does not answer, and `--auto-connect` launches fresh for a local endpoint or fails for a remote one.
+
+Startup and policy flags:
+
+`--headful`, `--auto-connect`, `--connect-only`, `--browser-url`, `--host`, `--port`, `--chrome-path`, `--channel`, `--user-data-dir`, `--read-only`, `--allow-localhost`, `--allow-private-hosts`, repeatable `--file-access-root`, `--timeout`.
+
+For `download`, `--timeout` after the command sets the file wait, which defaults to 30,000 ms independent of the session timeout. Put the global `--timeout` before `download` to set the session operation timeout.
+
+Timer-backed SDK and tool timeouts are positive whole milliseconds up to 2,147,483,647. CLI aggregate request budgets must stay at or below 1,073,741,823 ms.
+
+Session policy is immutable. Later calls may omit startup flags or repeat matching standalone values. Browser-mode flag combinations must resolve to the stored mode, and a repeated `--file-access-root` set must match the complete stored list. Conflicting explicit values require `stop` or another session name. Sessions have no idle shutdown.
+
+## Page format
+
+```text
+# Example Search
+> example.com/search | 0/1200 800vh
+
+NAV
+  [L1](/) Home
+FORM F1
+  I1 ~Search... ="TideSurf"
+  [B1] Search
+```
+
+Prefixes: L link, B button, I input, S select, F form, T table, D dialog.
+
+IDs refer to the in-memory state map. Read new state after navigation or a dynamic page update. Never guess a replacement ID after a stale-ID error.
+
+Default state uses viewport filtering. `includeHidden: true` is a full-DOM debugging override, not only a CSS-hidden override.
+
+## SDK
+
+```ts
+import { TideSurf } from "@tidesurf/core";
+
+const browser = await TideSurf.launch();
+await browser.navigate("https://example.com");
+const state = await browser.readPage({ maxTokens: 1000 });
+await browser.getPage().click("B1");
+await browser.close();
+```
+
+`TideSurf.launch(options)` strictly launches and owns Chrome. An unspecified launch port is ephemeral. `TideSurf.connect(options)` strictly attaches and defaults to `localhost:9222`. Closing an attached instance only disconnects.
+
+`TideSurfOptions.channel` accepts `stable`, `beta`, `dev`, `canary`, or `chromium`.
+
+The package-level `getToolDefinitions()` and a normal instance return all 20 schemas used by the CLI and MCP. A read-only instance or `getToolDefinitions({ readOnly: true })` returns the eight observation schemas. `getToolExecutor()` accepts `{ name, input }` and returns ToolResult.
+
+## Read-only mode
+
+Allowed tools: `get_state`, `extract`, `list_tabs`, `switch_tab`, `search`, `screenshot`, `list_skills`, `read_skill`.
+
+Blocked operations: navigation, interaction, evaluation, clipboard, upload/download, tab creation, tab closure. Enforcement applies in the registry, executor, MCP adapter, TideSurf methods, and SurfingPage returned by `getPage()`.
+
+## Evaluate
+
+`evaluate` runs arbitrary JavaScript in the page. TideSurf validates input shape and size; it does not provide a JavaScript sandbox. CDP values such as `NaN`, infinity, negative zero, and bigint return as JSON-safe strings. Read-only mode removes and rejects the tool.
+
+## Files and URLs
+
+SDK uploads and downloads stay inside `fileAccessRoots`. Omit the option for the working directory and OS temporary directory; pass `fileAccessRoots: []` to disable SDK filesystem operations. The CLI adds roots with repeatable `--file-access-root` flags.
+
+One download may run through a `SurfingPage` connection at a time. TideSurf checks the destination again after directory creation and before enabling browser downloads.
+
+Localhost, loopback, private, and link-local navigation is blocked by default. Use `allowLocalhost` or `allowPrivateHosts` only for trusted targets.
+
+## MCP
+
+```json
+{
+  "mcpServers": {
+    "tidesurf": {
+      "command": "tidesurf",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The MCP adapter registers the shared 20 tools and the `launch_browser` lifecycle tool. Tool calls may omit the `arguments` object. Screenshot results become image blocks. Failed tool calls set `isError`. `@modelcontextprotocol/sdk` and `zod` are optional package dependencies. When Agent Plugins with MCP servers are installed, the adapter connects to them and proxies their tools as `<plugin>__<tool>`; plugin failures are isolated per server and logged to stderr.

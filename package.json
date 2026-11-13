@@ -1,0 +1,82 @@
+{
+  "name": "@tidesurf/core",
+  "version": "0.7.2",
+  "description": "Stateful Chromium tools with compact DOM text for browser agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "tidesurf": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "llms.txt",
+    "plugin.json",
+    "mcp.json",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "typecheck:examples": "tsc -p tsconfig.examples.json",
+    "test": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "test:bench": "bun test test/bench",
+    "test:all": "bun test",
+    "check:docs": "bun scripts/check-doc-sync.ts",
+    "check:release": "bun scripts/check-release.ts",
+    "smoke:pack": "node scripts/smoke-packed.mjs",
+    "build:web:landing": "bun run --cwd website/landing build",
+    "build:web:docs": "bun run --cwd website/docs build",
+    "verify:release": "bun run check:docs && bun run build && bun run typecheck:examples && bun run test && bun run test:integration && bun run test:bench && bun run build:web:landing && bun run build:web:docs && bun run smoke:pack"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TideSurf/core.git"
+  },
+  "homepage": "https://tidesurf.org",
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "TideSurf Contributors",
+  "keywords": [
+    "browser",
+    "automation",
+    "llm",
+    "agent",
+    "cdp",
+    "chrome",
+    "dom",
+    "compression",
+    "web",
+    "scraping"
+  ],
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.2"
+  },
+  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "zod": "^4.3.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@types/bun": "^1.3.10",
+    "@types/node": "^22.0.0",
+    "elysia": "^1.4.27",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0"
+  },
+  "license": "Apache-2.0"
+}

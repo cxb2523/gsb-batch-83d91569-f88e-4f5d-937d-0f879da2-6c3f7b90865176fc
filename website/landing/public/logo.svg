@@ -1,0 +1,12 @@
+<svg width="480" height="128" viewBox="0 0 480 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title">
+  <title id="title">TideSurf</title>
+  <style>
+    .ink { fill: #161716; }
+    @media (prefers-color-scheme: dark) { .ink { fill: #E8E9E6; } }
+  </style>
+  <g transform="translate(6 24) scale(1.25)">
+    <path fill="#4F7B86" fill-rule="evenodd" d="M4 4H60V60H4ZM4 29C13 29 15 18 24 18C36 18 37 42 49 42C55 42 57 33 60 29V35C57 39 55 48 49 48C37 48 36 24 24 24C15 24 13 35 4 35Z"/>
+  </g>
+  <text class="ink" x="100" y="94" font-family="'Zalando Sans','Gothic A1',system-ui,sans-serif" font-size="88" font-weight="600" letter-spacing="-2.5">Tide</text>
+  <text x="268" y="94" fill="#4F7B86" font-family="'Zalando Sans','Gothic A1',system-ui,sans-serif" font-size="88" font-weight="600" letter-spacing="-3">Surf</text>
+</svg>

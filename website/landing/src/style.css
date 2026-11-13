@@ -1,0 +1,862 @@
+@import "../../shared/foundation.css";
+
+:root {
+  --page: min(100% - 4rem, 880px);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 2rem;
+}
+
+body {
+  min-width: 320px;
+  overflow-x: clip;
+  position: relative;
+  font-family: var(--font);
+  background: var(--canvas);
+  color: var(--ink);
+  font-size: 1.02rem;
+  line-height: 1.58;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+a,
+button {
+  color: inherit;
+  background: transparent;
+  text-decoration: none;
+  font: inherit;
+}
+
+button,
+a[href] {
+  cursor: pointer;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+a:not(.patch-control):focus-visible,
+button:not(.patch-control):focus-visible {
+  color: var(--paper);
+  background: var(--ink);
+  outline: 0;
+  text-decoration: none;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+}
+
+.waves-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100vh;
+  height: 100lvh;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.58;
+}
+
+.topnav,
+.page,
+.site-footer,
+.theme-float,
+.skip-link {
+  position: relative;
+  z-index: 1;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 1rem;
+  padding: 0.6rem 0.85rem;
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.skip-link:focus-visible {
+  left: 1rem;
+  z-index: 50;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.compact-control {
+  min-height: 2.25rem;
+  padding: 0.2rem 0.62rem;
+  font-size: 0.86rem;
+}
+
+/* Optical lift: the lowercase npm wordmark sits one pixel low next to cap-height labels. */
+.topnav-links a[href*="npmjs"],
+.footer-links a[href*="npmjs"] {
+  padding-block: calc(0.2rem - 1px) calc(0.2rem + 1px);
+}
+
+.topnav {
+  width: var(--page);
+  margin-inline: auto;
+  padding: 1rem 0 0.4rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.topnav-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+}
+
+.brand-mark {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.brand-word {
+  display: inline-flex;
+  align-items: baseline;
+}
+
+.brand-surf {
+  color: var(--accent-ink);
+  letter-spacing: -0.035em;
+}
+
+.topnav-links,
+.hero-actions,
+.closing-actions,
+.footer-links,
+.footer-utilities,
+.theme-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.page {
+  width: var(--page);
+  margin-inline: auto;
+  padding-bottom: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(5rem, 10vh, 7rem);
+}
+
+.hero {
+  min-height: calc(100dvh - 3.65rem);
+  padding: clamp(4.5rem, 12vh, 8rem) 0 clamp(3.5rem, 8vh, 5.5rem);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.hero h1 {
+  max-width: 15ch;
+  font-size: clamp(3rem, 6.2vw, 4.9rem);
+  line-height: 1.01;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.hero-lede {
+  max-width: 39rem;
+  color: var(--ink-2);
+  font-size: clamp(1.08rem, 1.45vw, 1.27rem);
+  line-height: 1.58;
+  text-wrap: pretty;
+}
+
+.hero-actions {
+  margin-top: 0.55rem;
+}
+
+/* Level the row: match the install box height (2.75rem) at every breakpoint. */
+.hero-actions > .patch-control {
+  min-height: 2.75rem;
+}
+
+.install {
+  width: min(33rem, 100%);
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding-left: 0.9rem;
+  color: var(--ink);
+  position: relative;
+  isolation: isolate;
+}
+
+/* Box backdrop: the dropdown menu reuses this surface so they read as one. */
+.install::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--paper-2) 92%, transparent);
+}
+
+/* Install method dropdown: opens on hover/focus, selects the copied command. */
+.install-caret {
+  flex: 0 0 auto;
+  width: 1.75rem;
+  min-height: 2.75rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  transition: color 150ms ease;
+}
+
+.install-caret:hover,
+.install-caret:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+
+.install-caret svg {
+  transition: transform 160ms ease;
+}
+
+.install:hover .install-caret svg,
+.install:focus-within .install-caret svg,
+.install.is-open .install-caret svg {
+  transform: rotate(180deg);
+}
+
+.install-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  padding: 0.3rem 0.35rem 0.35rem;
+  background: color-mix(in srgb, var(--paper-2) 92%, transparent);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px) scale(0.98);
+  transform-origin: top center;
+  transition:
+    opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 280ms;
+}
+
+.install:hover .install-menu,
+.install:focus-within .install-menu,
+.install.is-open .install-menu {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s;
+}
+
+.install-option {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  color: var(--ink-2);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.install-option:hover,
+.install-option:focus-visible {
+  background: color-mix(in srgb, var(--accent-soft) 24%, var(--paper));
+  color: var(--ink);
+  outline: none;
+}
+
+.install-kind {
+  flex: 0 0 2.6rem;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.install-option[aria-selected="true"] .install-kind {
+  color: var(--accent-ink);
+}
+
+.install-cmd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.install code {
+  display: inline-block;
+  transition: transform 190ms ease-out, opacity 190ms ease-out;
+}
+
+.install code.roll-out {
+  transform: translateY(-0.6em);
+  opacity: 0;
+  transition: transform 190ms ease-in, opacity 190ms ease-in;
+}
+
+.install code.roll-in {
+  transform: translateY(0.6em);
+  opacity: 0;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce), (prefers-reduced-data: reduce) {
+  .install-menu,
+  .install-caret svg,
+  .install code,
+  .install code.roll-out {
+    transition: none;
+  }
+}
+
+.install .prompt {
+  flex: 0 0 auto;
+  color: var(--accent-ink);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.install code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 0.94rem;
+}
+
+.copy-btn {
+  --patch-color: var(--c-teal);
+  flex: 0 0 auto;
+  width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0;
+}
+
+.copy-btn svg {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.copy-btn .icon-check {
+  display: none;
+}
+
+.copy-btn.is-copied .icon-copy {
+  display: none;
+}
+
+.copy-btn.is-copied .icon-check {
+  display: block;
+}
+
+.section-intro {
+  max-width: 45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.section-intro h2,
+.closing h2 {
+  max-width: 16ch;
+  font-size: clamp(2.2rem, 4.8vw, 3.75rem);
+  line-height: 1.03;
+  font-weight: 500;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+.section-intro p {
+  max-width: 42rem;
+  color: var(--ink-2);
+  font-size: clamp(1.04rem, 1.25vw, 1.16rem);
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.compact-intro h2 {
+  max-width: 18ch;
+  font-size: clamp(2rem, 4vw, 3.2rem);
+}
+
+.proof,
+.live-loop,
+.capabilities,
+.agent-install {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(2rem, 5vw, 3.2rem);
+}
+
+.specimen {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 8.5rem minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0.6rem;
+}
+
+.specimen-pane,
+.action-specimen {
+  min-width: 0;
+  background: var(--paper-2);
+}
+
+.raw-pane {
+  background: color-mix(in srgb, var(--paper-2) 76%, var(--paper));
+}
+
+.output-pane {
+  background: color-mix(in srgb, var(--c-teal) 13%, var(--paper-2));
+}
+
+.specimen-label {
+  min-height: 2.2rem;
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--grey-1);
+  background: var(--paper-3);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.specimen-pane pre {
+  min-height: 21rem;
+  padding: 1rem;
+  overflow-x: auto;
+  color: var(--ink-2);
+  font-size: 0.77rem;
+  line-height: 1.62;
+  tab-size: 2;
+}
+
+.specimen-pane code {
+  white-space: pre;
+}
+
+.noise {
+  color: var(--grey-2);
+}
+
+.handle {
+  color: var(--accent-ink);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--c-teal) 20%, var(--paper));
+}
+
+.specimen-shift {
+  padding: 1.4rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--grey-1);
+}
+
+.tokens-before {
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.shift-word {
+  margin: 0.25rem 0;
+  font-size: 0.72rem;
+}
+
+.specimen-shift strong {
+  color: var(--ink);
+  font-size: 2rem;
+  line-height: 1;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.specimen-shift small {
+  max-width: 9rem;
+  margin-top: 0.75rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.loop-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(17rem, 0.95fr);
+  align-items: center;
+  gap: clamp(2rem, 6vw, 4.5rem);
+}
+
+.loop-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+}
+
+.loop-steps li {
+  display: grid;
+  grid-template-columns: 5.2rem minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.step-name,
+.capability-list dt span {
+  display: inline-flex;
+  width: fit-content;
+  padding: 0.12rem 0.42rem 0.18rem;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--step-color, var(--row-color, var(--accent-soft))) 28%, var(--paper));
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.loop-steps p {
+  color: var(--ink-2);
+  line-height: 1.58;
+}
+
+.loop-steps code {
+  padding: 0.08rem 0.25rem;
+  color: var(--accent-ink);
+  background: var(--paper-2);
+  font-size: 0.88em;
+}
+
+.action-specimen code {
+  display: block;
+  padding: clamp(1.8rem, 4vw, 3rem) 1.2rem 1rem;
+  overflow-x: auto;
+  color: var(--ink);
+  font-size: clamp(0.95rem, 1.6vw, 1.18rem);
+  white-space: nowrap;
+}
+
+.action-specimen p {
+  padding: 0 1.2rem 1.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--grey-1);
+  font-size: 0.86rem;
+}
+
+.status-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  flex: 0 0 auto;
+  background: var(--c-green);
+}
+
+.capability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.capability-list > div {
+  padding: clamp(1rem, 2.5vw, 1.4rem);
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 1.2rem;
+  background: color-mix(in srgb, var(--paper-2) 78%, var(--paper));
+}
+
+.capability-list dd {
+  max-width: 42rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.capability-list code {
+  padding: 0.08rem 0.25rem;
+  color: var(--accent-ink);
+  background: var(--paper-2);
+  font-size: 0.88em;
+}
+
+.closing {
+  padding: clamp(2rem, 5vw, 3.5rem);
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+  background: var(--canvas-2);
+}
+
+.closing h2 {
+  max-width: 13ch;
+}
+
+.site-footer {
+  width: var(--page);
+  margin-inline: auto;
+  padding: 0 0 clamp(3rem, 8vw, 5rem);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--grey-1);
+  font-size: 0.86rem;
+}
+
+.footer-id {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.footer-id strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.footer-utilities {
+  justify-content: flex-end;
+}
+
+.theme-btn {
+  --patch-color: var(--grey-1);
+}
+
+.theme-float {
+  position: fixed;
+  left: max(clamp(1rem, 4vw, 2.5rem), env(safe-area-inset-left));
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  z-index: 50;
+}
+
+@media (max-width: 920px) {
+  :root {
+    --page: min(100% - 3rem, 880px);
+  }
+
+  .specimen {
+    grid-template-columns: minmax(0, 1fr) 7rem minmax(0, 1fr);
+  }
+
+  .specimen-pane pre {
+    font-size: 0.7rem;
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --page: min(100% - 2.5rem, 100%);
+  }
+
+  .page {
+    gap: 5rem;
+  }
+
+  .hero {
+    min-height: calc(100svh - 3.65rem);
+    padding: clamp(3.75rem, 10svh, 5rem) 0 4rem;
+  }
+
+  .specimen {
+    grid-template-columns: 1fr;
+  }
+
+  .specimen-pane pre {
+    min-height: 0;
+    font-size: 0.78rem;
+  }
+
+  .specimen-shift {
+    min-height: 8rem;
+    padding: 1rem;
+  }
+
+  .loop-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .compact-control,
+  .topnav-brand {
+    min-height: 2.75rem;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --page: min(100% - 2rem, 100%);
+  }
+
+  body {
+    font-size: 1rem;
+  }
+
+  .topnav {
+    align-items: center;
+  }
+
+  /* Utility chips live in the footer on phones; the topnav keeps only the brand. */
+  .topnav-links {
+    display: none;
+  }
+
+  .topnav-brand {
+    font-size: 1.2rem;
+  }
+
+  .hero {
+    padding-top: clamp(3.25rem, 9svh, 4.5rem);
+  }
+
+  .hero h1 {
+    font-size: clamp(2.75rem, 13vw, 3.5rem);
+  }
+
+  .hero-actions {
+    align-items: stretch;
+  }
+
+  .hero-actions > .patch-control {
+    width: 100%;
+  }
+
+  .install {
+    width: 100%;
+  }
+
+  .install code {
+    overflow-x: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .section-intro h2,
+  .closing h2,
+  .compact-intro h2 {
+    font-size: clamp(2rem, 10vw, 2.65rem);
+  }
+
+  .loop-steps li,
+  .capability-list > div {
+    grid-template-columns: 1fr;
+    gap: 0.7rem;
+  }
+
+  .closing-actions > .patch-control {
+    flex: 1 1 auto;
+  }
+
+  .site-footer {
+    align-items: flex-start;
+    padding-bottom: 1rem;
+  }
+
+  .footer-utilities {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  /* Docked below the footer so the fixed control cannot cover the footer links. */
+  .theme-float {
+    position: static;
+    width: var(--page);
+    margin-inline: auto;
+    padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.4rem;
+  }
+
+  .theme-float .theme-btn {
+    position: relative;
+    isolation: isolate;
+    min-width: 3.25rem;
+    background: transparent;
+  }
+
+  .theme-float .theme-btn::before {
+    position: absolute;
+    inset: 0.34rem 0;
+    z-index: -1;
+    content: "";
+    background: color-mix(in srgb, var(--grey-1) 14%, var(--paper));
+  }
+
+  .theme-float .theme-btn:hover,
+  .theme-float .theme-btn:focus-visible,
+  .theme-float .theme-btn.active {
+    background: transparent;
+  }
+
+  .theme-float .theme-btn:hover::before {
+    background: color-mix(in srgb, var(--grey-1) 30%, var(--paper));
+  }
+
+  .theme-float .theme-btn:focus-visible::before {
+    background: var(--ink);
+  }
+
+  .theme-float .theme-btn.active::before {
+    background: color-mix(in srgb, var(--grey-1) 42%, var(--paper));
+  }
+}
+
+@media (max-width: 390px) {
+  .topnav-links .patch-control {
+    padding-inline: 0.52rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce), (prefers-reduced-data: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

@@ -1,0 +1,178 @@
+import {
+  compressUrl,
+  escapeUrlMarkers,
+} from "../../src/parser/url-compressor.js";
+
+describe("compressUrl", () => {
+  it("strips tracking params", () => {
+    const result = compressUrl(
+      "https://example.com/page?utm_source=google&utm_medium=cpc&id=123"
+    );
+    expect(result).toBe("example.com/page?id=123");
+  });
+
+  it("strips all utm_ variants", () => {
+    const result = compressUrl(
+      "https://example.com/?utm_campaign=test&utm_content=ad1&utm_term=kw"
+    );
+    expect(result).toBe("example.com/");
+  });
+
+  it("strips fbclid, gclid, _ga, _gl", () => {
+    const result = compressUrl(
+      "https://example.com/page?fbclid=abc&gclid=def&_ga=123&_gl=456"
+    );
+    expect(result).toBe("example.com/page");
+  });
+
+  it("relativizes same-origin URLs", () => {
+    const result = compressUrl(
+      "https://example.com/about/team",
+      "https://example.com/home"
+    );
+    expect(result).toBe("/about/team");
+  });
+
+  it("does not relativize cross-origin URLs", () => {
+    const result = compressUrl(
+      "https://other.com/page",
+      "https://example.com/home"
+    );
+    expect(result).toBe("other.com/page");
+  });
+
+  it("drops protocol", () => {
+    const result = compressUrl("https://example.com/path");
+    expect(result).toBe("example.com/path");
+    expect(result).not.toContain("https://");
+  });
+
+  it("truncates long paths (>4 segments)", () => {
+    const result = compressUrl(
+      "https://example.com/a/b/c/d/e/f/index.html"
+    );
+    expect(result).toBe("example.com/a/b/.../index.html");
+  });
+
+  it("does not truncate short paths", () => {
+    const result = compressUrl("https://example.com/a/b/c");
+    expect(result).toBe("example.com/a/b/c");
+  });
+
+  it("passes through javascript: URLs", () => {
+    expect(compressUrl("javascript:void(0)")).toBe("javascript:void(0)");
+    expect(compressUrl("JaVaScRiPt:alert(1)")).toBe("JaVaScRiPt:alert(1)");
+  });
+
+  it("passes through hash-only URLs", () => {
+    expect(compressUrl("#section")).toBe("#section");
+  });
+
+  it("passes through blob: URLs", () => {
+    expect(compressUrl("blob:https://example.com/abc")).toBe(
+      "blob:https://example.com/abc"
+    );
+    expect(compressUrl("BLOB:https://example.com/abc")).toBe(
+      "BLOB:https://example.com/abc"
+    );
+  });
+
+  it("passes through data: URLs", () => {
+    expect(compressUrl("data:text/html,<h1>Hi</h1>")).toBe(
+      "data:text/html,<h1>Hi</h1>"
+    );
+    expect(compressUrl("DATA:text/plain,hello")).toBe(
+      "DATA:text/plain,hello"
+    );
+  });
+
+  it("passes through malformed URLs", () => {
+    expect(compressUrl("not a url")).toBe("not a url");
+  });
+
+  it("preserves query params that are not tracking", () => {
+    const result = compressUrl("https://example.com/search?q=test&page=2");
+    expect(result).toBe("example.com/search?q=test&page=2");
+  });
+
+  it("preserves hash fragments", () => {
+    const result = compressUrl("https://example.com/page#section");
+    expect(result).toBe("example.com/page#section");
+  });
+
+  it("handles same-origin with query and hash", () => {
+    const result = compressUrl(
+      "https://example.com/page?q=1#top",
+      "https://example.com/"
+    );
+    expect(result).toBe("/page?q=1#top");
+  });
+
+  it("keeps percent-encoded spaces as %20 when stripping trackers", () => {
+    // URLSearchParams.delete would re-serialize the remainder as q=hello+world.
+    const result = compressUrl(
+      "https://example.com/search?q=hello%20world&utm_source=google"
+    );
+    expect(result).toBe("example.com/search?q=hello%20world");
+  });
+
+  it("keeps encoded slashes as %2F when stripping trackers", () => {
+    const result = compressUrl(
+      "https://example.com/p?next=%2Fdocs%2Fapi&fbclid=abc"
+    );
+    expect(result).toBe("example.com/p?next=%2Fdocs%2Fapi");
+  });
+
+  it("keeps bare flags without inventing values when stripping trackers", () => {
+    const result = compressUrl(
+      "https://example.com/p?preview&x=1&utm_campaign=test"
+    );
+    expect(result).toBe("example.com/p?preview&x=1");
+  });
+
+  it("leaves tracker-free queries byte-identical", () => {
+    expect(compressUrl("https://example.com/p?preview&x=1")).toBe(
+      "example.com/p?preview&x=1"
+    );
+    expect(compressUrl("https://example.com/p?q=a%20b&next=%2Fx")).toBe(
+      "example.com/p?q=a%20b&next=%2Fx"
+    );
+    expect(compressUrl("https://example.com/p?q=a+b")).toBe(
+      "example.com/p?q=a+b"
+    );
+  });
+
+  it("preserves raw params when relativizing same-origin URLs", () => {
+    const result = compressUrl(
+      "https://example.com/s?q=a%20b&utm_term=k#frag",
+      "https://example.com/"
+    );
+    expect(result).toBe("/s?q=a%20b#frag");
+  });
+});
+
+describe("escapeUrlMarkers", () => {
+  it("escapes source backslashes before URL marker characters", () => {
+    const escaped = escapeUrlMarkers(String.raw`\[B1](target)`);
+
+    expect(escaped).toBe(String.raw`\\\[B1\]\(target\)`);
+    expect(escaped.match(/^\\+/)?.[0]).toHaveLength(3);
+  });
+
+  it("percent-encodes line breaks, controls, and Unicode line separators", () => {
+    const c0 = Array.from({ length: 0x20 }, (_, code) =>
+      String.fromCharCode(code)
+    ).join("");
+    const escaped = escapeUrlMarkers(
+      `${c0}\x7f\u0085\u2028\u2029\r\n`
+    );
+
+    for (let code = 0; code <= 0x1f; code++) {
+      expect(escaped).toContain(
+        `%${code.toString(16).toUpperCase().padStart(2, "0")}`
+      );
+    }
+    expect(escaped).toContain("%7F%C2%85%E2%80%A8%E2%80%A9%0D%0A");
+    expect(escaped).not.toMatch(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/u);
+  });
+});
