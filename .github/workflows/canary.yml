@@ -1,0 +1,194 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "47 9 * * 1"   # weekly, Mondays; avoid :00 so it doesn't pile up with everyone else's
+  workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
+
+permissions:
+  contents: read
+
+jobs:
+  # The canary that must prove the site still serves real rows. A GitHub
+  # runner's datacentre IP gets Cloudflare's 403 "Just a moment..." page
+  # from tipranks.com (every scheduled run from 2026-10-01 to 2026-10-15
+  # ended blocked with 0 rows), so this job needs a different exit, chosen
+  # by .github/canary_endpoint.py in this order:
+  #   1. secret TWOCAPTCHA_KEY + repository variable
+  #      TIPRANKS_BROWSER_ACCOUNT_ID: that browser account's connectionUri,
+  #      fetched fresh from GET /browser/accounts right before the run. A
+  #      stored connection string does not last: the one in the secret was
+  #      accepted on 2026-10-19 and 10-20 and refused with 401 deny_no_user
+  #      on 2026-10-21;
+  #   2. the TIPRANKS_CDP_ENDPOINT secret (a stored connection string);
+  #   3. the TIPRANKS_PROXY secret (a residential proxy URL).
+  # The endpoint goes into .env (mode 0600, never uploaded), never onto a
+  # command line or into the log. With none of them usable, the job FAILS
+  # with an error naming them: a canary that never reached the site is not
+  # a passing canary. Blocked (3), no rows obtained (5), partial (6),
+  # empty (4) or zero ratings are all red.
+  canary-live:
+    runs-on: ubuntu-latest
+    env:
+      TIPRANKS_PROXY: ${{ secrets.TIPRANKS_PROXY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Choose the exit (fresh Scraping Browser endpoint, stored one, or proxy)
+        id: endpoint
+        # The key and the stored endpoint are scoped to this step only. The
+        # key rides in the API's query string; tools/browser_endpoint.py
+        # redacts it from every error and prints the API's errorCode.
+        env:
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+          ACCOUNT_ID: ${{ vars.TIPRANKS_BROWSER_ACCOUNT_ID }}
+          STORED_CDP_ENDPOINT: ${{ secrets.TIPRANKS_CDP_ENDPOINT }}
+        run: |
+          umask 077
+          python3 .github/canary_endpoint.py
+
+      - run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Scrape a handful of real tickers (through the secret's exit)
+        run: |
+          set +e
+          # TIPRANKS_PROXY reaches the scraper through this job's env and
+          # TIPRANKS_CDP_ENDPOINT through .env (env_config.py reads both);
+          # never on the command line. A CDP endpoint takes precedence.
+          python3 playwright_scraper.py \
+            --ticker AAPL --ticker MSFT --ticker GOOGL \
+            --proxy-budget-mb 10 \
+            --format json --out canary_out.json --allow-empty
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+
+      - name: Proxy traffic of the live run
+        # Through TIPRANKS_PROXY the run meters what it sends and stops at
+        # --proxy-budget-mb 10. The figure goes in the step summary, and a
+        # run that hit the cap fails here. Over a CDP endpoint there is no
+        # local proxy and it says "not metered".
+        if: ${{ !cancelled() }}
+        run: python3 .github/proxy_traffic.py "canary-live" canary_out.json
+
+      - name: Require real, parsed rows
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+
+          code = int(os.environ["exit_code"])
+          print(f"playwright_scraper.py exited {code}")
+          if not os.path.exists("canary_out.json.meta.json"):
+              print(f"::error::exit {code} and no sidecar was written")
+              sys.exit(1)
+          meta = json.load(open("canary_out.json.meta.json"))
+          print(json.dumps(meta, indent=2))
+          if code != 0 or meta.get("status") != "complete":
+              print(f"::error::live scrape did not complete: exit={code}, status={meta.get('status')}, failed={meta.get('failed_tickers')}")
+              sys.exit(1)
+
+          rows = json.load(open("canary_out.json"))
+          tickers = sorted(r["ticker"] for r in rows)
+          if tickers != ["AAPL", "GOOGL", "MSFT"]:
+              print(f"::error::expected one row per requested ticker, got {tickers}")
+              sys.exit(1)
+          # Parser checks, not market checks: every one of these large caps
+          # has a company name, analyst coverage, a consensus and a price
+          # target on its page. A null here means the parser lost a field.
+          core = ("company_name", "analyst_count", "consensus_rating_id", "price_target_average")
+          bad = [(r["ticker"], f) for r in rows for f in core if r.get(f) in (None, "", 0)]
+          if bad:
+              print(f"::error::core fields missing (parser drift?): {bad}")
+              sys.exit(1)
+          print(f"canary: {len(rows)} real ratings with every core field present")
+          EOF
+
+      - name: Upload the run's output on every attempt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-live-${{ github.run_id }}
+          path: |
+            canary_out.json
+            canary_out.json.meta.json
+          retention-days: 14
+
+  # Datacentre refusal expected: this job runs the default, no-key,
+  # no-proxy path from the bare GitHub runner. tipranks.com has refused it
+  # with exit 3 since 2026-10-01, which is reported as a notice so the day
+  # it starts serving datacentre IPs again is visible. It does NOT test
+  # real data on its own: canary-live above does. A crash, bad usage, a
+  # parser failure or any other non-blocked failure is still red, and if
+  # it does get through, the rows must be real.
+  canary-datacentre:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: Verify the captured robots rules are still current
+        run: |
+          curl --fail --silent --show-error https://www.tipranks.com/robots.txt -o /tmp/tipranks-robots.txt
+          python3 -c "
+          from pathlib import Path
+          from tipranks_parser import ROBOTS_TXT_CAPTURE, parse_robots_rules
+          captured = parse_robots_rules(ROBOTS_TXT_CAPTURE)
+          live = parse_robots_rules(Path('/tmp/tipranks-robots.txt').read_text())
+          if captured != live:
+              raise SystemExit('robots.txt Allow/Disallow rules changed; refresh and review the capture')
+          print('robots.txt rules match the reviewed capture')
+          "
+
+      - name: Scrape from the runner's own IP
+        run: |
+          set +e
+          python3 playwright_scraper.py \
+            --ticker AAPL --ticker MSFT --ticker GOOGL \
+            --proxy-budget-mb 10 \
+            --format json --out canary_dc.json --allow-empty
+          echo "exit_code=$?" >> "$GITHUB_ENV"
+
+      - name: Proxy traffic of the datacentre run
+        # No proxy on this job, so this reports "not metered"; kept so a
+        # proxy added here later is reported and capped like the live run.
+        if: ${{ !cancelled() }}
+        run: python3 .github/proxy_traffic.py "canary-datacentre" canary_dc.json
+
+      - name: Classify the result
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+
+          code = int(os.environ["exit_code"])
+          print(f"playwright_scraper.py exited {code}")
+          meta = {}
+          if os.path.exists("canary_dc.json.meta.json"):
+              meta = json.load(open("canary_dc.json.meta.json"))
+              print(json.dumps(meta, indent=2))
+          if code == 3:
+              print("::notice::datacentre IP refused (exit 3), as expected; canary-live is the data check")
+              sys.exit(0)
+          if code == 0 and meta.get("rating_count", 0) >= 1:
+              print(f"::notice::the runner's own IP got {meta['rating_count']} ratings: the datacentre refusal has lifted")
+              sys.exit(0)
+          print(f"::error::exit={code}, status={meta.get('status')}, failed={meta.get('failed_tickers')}")
+          sys.exit(1)
+          EOF
+
+      - name: Upload the run's output on every attempt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-datacentre-${{ github.run_id }}
+          path: |
+            canary_dc.json
+            canary_dc.json.meta.json
+          retention-days: 14

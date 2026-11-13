@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "take": 39,
+    "app": "backend",
+    "v": 2,
+    "time": "2026-09-27T09:37:57.653Z"
+  },
+  "models": {
+    "stocks": [
+      {
+        "_id": "LUV",
+        "company": {
+          "name": "Southwest Airlines"
+        },
+        "analystRatings": {
+          "all": {
+            "priceTarget": {
+              "value": 51.07142857142857,
+              "upside": 0.1966126656848313
+            }
+          }
+        }
+      }
+    ]
+  }
+}
