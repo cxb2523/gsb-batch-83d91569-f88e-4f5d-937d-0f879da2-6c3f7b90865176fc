@@ -4960,6 +4960,208 @@ def test_engines_fetch_one_page_with_stubbed_drivers():
     return ok
 
 
+def test_page_manifest():
+    group("per-page manifest: statuses, attempts, ordering, reconciliation")
+    ok = True
+    engine = _load_engine_with_stub_driver("playwright_scraper")
+
+    # Self-made HTML samples, no network: one tile that parses, a page with
+    # no tiles and no declared listings (a correct empty answer), and a page
+    # that DECLARES listings in its structured data but yields no rows.
+    tile = ('<div data-listing-id="1" data-shop-id="9">'
+            '<a href="/de/listing/1/x?ls=a&amp;ref=x">Anzeige</a>'
+            '<h3 class="v2-listing-card__title">T</h3>'
+            '<div class="n-listing-card__price">'
+            '<span class="currency-symbol">€</span>'
+            '<span class="currency-value">10,00</span></div></div>')
+    success_html = page(tile)
+    empty_html = page("<div>a hub page with no grid</div>")
+    declared_but_unreadable = (
+        '<html><head><script type="application/ld+json">'
+        '{"@type": "ItemList", "numberOfItems": 201606}</script>'
+        '<link href="https://i.etsystatic.com/x.css"></head><body>'
+        '<div class="renamed-tile">see /listing/ pages</div></body></html>')
+
+    # 1. A served page with a tile: success, one attempt, one row.
+    r = _drive_fetch_one_page(engine, "playwright_scraper",
+                              _StubPage(success_html, 200))
+    o = r["outcome"]
+    ok &= check("a parsed page is a success with its row count (%s)" % r["error"],
+                o is not None and o.manifest_status == "success"
+                and len(o.products) == 1 and o.attempts == 1)
+
+    # 2. A DataDome refusal: blocked, the t value recorded, and every retry
+    #    counted as attempts of the ONE manifest entry.
+    r = _drive_fetch_one_page(engine, "playwright_scraper",
+                              _StubPage(DD_BANNED_FIXTURE, 403))
+    o = r["outcome"]
+    ok &= check("a t=bv refusal is blocked, carries datadome_t=bv and counts "
+                "its re-fetches as attempts",
+                o is not None and o.manifest_status == "blocked"
+                and o.datadome_t == "bv"
+                and o.attempts == page_flow.BLOCK_RETRIES_WITHOUT_POOL + 1)
+
+    # 3. A served page with no grid and no declared listings: empty — a
+    #    correct answer, not a failure.
+    r = _drive_fetch_one_page(engine, "playwright_scraper",
+                              _StubPage(empty_html, 200))
+    o = r["outcome"]
+    ok &= check("a page with no grid is empty, not a failure (%s)" % r["error"],
+                o is not None and o.manifest_status == "empty" and o.ok)
+
+    # 4. Zero rows from a page that DECLARES listings is the parser's
+    #    failure — "parser_found_nothing", never "empty".
+    r = _drive_fetch_one_page(engine, "playwright_scraper",
+                              _StubPage(declared_but_unreadable, 200))
+    o = r["outcome"]
+    ok &= check("0 rows from a page declaring listings is parser_found_nothing, "
+                "not empty (%s)" % r["error"],
+                o is not None and o.manifest_status == "parser_found_nothing")
+
+    # 5-7. Whole runs with the driver stubbed out, writing to a temp prefix:
+    # the manifest must land next to the output and reconcile with it.
+    class _Page:
+        url = "https://www.etsy.com/search?q=mug"
+
+        def query_selector_all(self, *a, **k):
+            return []
+
+    class _Session:
+        def __init__(self, pool=None, **kw):
+            self.pool = pool
+            self.page = _Page()
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+    original = (engine.sync_playwright, engine._BrowserSession,
+                engine._fetch_one_page)
+
+    def run_scrape(pages, concurrency, behave, extra_argv=()):
+        """One scrape() run. `behave(page_num)` -> (delay, [skus], blocked)."""
+        from unittest import mock
+
+        def fake_fetch(session, args, pool, page_num, url):
+            delay, skus, blocked = behave(page_num)
+            if delay:
+                time.sleep(delay)
+            o = engine.PageOutcome(page_num=page_num, url=url, final_url=url)
+            o.attempts = 1
+            if blocked:
+                o.blocked_by = "datadome-bv"
+                o.datadome_t = "bv"
+                o.attempts = 3
+            else:
+                o.products = [Product(sku=s, url=url) for s in skus]
+            return o
+
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "o")
+            argv = (["x", "--url", _Page.url, "--pages", str(pages),
+                     "--concurrency", str(concurrency), "--delay", "0",
+                     "--format", "json", "--out", out] + list(extra_argv))
+            env = {k: v for k, v in os.environ.items()
+                   if k != "TWOCAPTCHA_KEY" and not k.startswith("ETSY_")}
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.dict(os.environ, env, clear=True):
+                args = engine.parse_args()
+            engine.sync_playwright = lambda: _FakePlaywright()
+            engine._BrowserSession = lambda pw, a, pool, **kw: _Session(pool)
+            engine._fetch_one_page = fake_fetch
+            import logging as _logging
+            _logging.disable(_logging.CRITICAL)
+            try:
+                code = engine.scrape(args)
+            finally:
+                _logging.disable(_logging.NOTSET)
+                (engine.sync_playwright, engine._BrowserSession,
+                 engine._fetch_one_page) = original
+            manifest = None
+            mpath = out + ".pages.json"
+            if os.path.exists(mpath):
+                with open(mpath, encoding="utf-8") as f:
+                    manifest = json.load(f)
+            rows = None
+            if os.path.exists(out + ".json"):
+                with open(out + ".json", encoding="utf-8") as f:
+                    rows = json.load(f)
+            meta = None
+            if os.path.exists(out + ".meta.json"):
+                with open(out + ".meta.json", encoding="utf-8") as f:
+                    meta = json.load(f)
+        return code, manifest, rows, meta
+
+    # 5. CONCURRENT, completion order scrambled: page 2 is slow, so the
+    #    workers finish 4, 3, 2. The manifest must still be in page order,
+    #    and page 3 re-lists page 2's sku so the merge drops one row —
+    #    rows_parsed - duplicates_dropped must equal the rows written.
+    def behave_scrambled(n):
+        return {1: (0, ["a", "b"], False), 2: (0.4, ["c"], False),
+                3: (0.1, ["c"], False), 4: (0, ["d"], False)}[n]
+
+    code, manifest, rows, meta = run_scrape(4, 3, behave_scrambled)
+    ok &= check("concurrent run: exit 0 and the manifest was written",
+                code == 0 and manifest is not None)
+    if manifest is not None and rows is not None:
+        pages = manifest["pages"]
+        ok &= check("manifest pages are in page order, not completion order",
+                    [p["page"] for p in pages] == [1, 2, 3, 4])
+        ok &= check("every page is a success with its own row count",
+                    [p["status"] for p in pages] == ["success"] * 4
+                    and [p["rows"] for p in pages] == [2, 1, 1, 1])
+        ok &= check("the duplicate is charged to the page that re-listed it",
+                    pages[2]["duplicates_dropped"] == 1)
+        t = manifest["totals"]
+        ok &= check("rows_parsed - duplicates == rows_written == output rows",
+                    t["rows_parsed"] == 5 and t["duplicates_dropped"] == 1
+                    and t["rows_written"] == len(rows) == 4 and t["reconciles"])
+        ok &= check("no page is listed as unattempted",
+                    manifest["unattempted_pages"] == [])
+
+    # 6. SEQUENTIAL, an empty page ends the listing: pages after it were
+    #    never dispatched and are listed apart, not counted as failures.
+    def behave_empty(n):
+        return (0, ["a", "b"] if n == 1 else (["c"] if n == 2 else []), False)
+
+    code, manifest, rows, meta = run_scrape(5, 1, behave_empty)
+    ok &= check("empty page run: exit 0 and stop_reason kept as no_new_products",
+                code == 0 and meta is not None
+                and meta["stop_reason"] == "no_new_products")
+    if manifest is not None:
+        ok &= check("the empty page is recorded as empty with 0 rows",
+                    [p["status"] for p in manifest["pages"]]
+                    == ["success", "success", "empty"])
+        ok &= check("pages never dispatched are listed separately",
+                    manifest["unattempted_pages"] == [4, 5])
+        ok &= check("unattempted pages are not in the page list at all",
+                    [p["page"] for p in manifest["pages"]] == [1, 2, 3])
+
+    # 7. SEQUENTIAL, page 2 refused: the run stops, the refusal keeps its
+    #    DataDome t value and its attempt count, later pages are unattempted,
+    #    and the exit code / stop_reason semantics are unchanged (partial, 6).
+    def behave_blocked(n):
+        return (0, ["a"], n == 2)
+
+    code, manifest, rows, meta = run_scrape(5, 1, behave_blocked)
+    ok &= check("blocked page run: exit 6 (partial) with the blocked stop_reason",
+                code == EXIT_PARTIAL and meta is not None
+                and meta["stop_reason"] == "blocked_datadome-bv")
+    if manifest is not None:
+        p2 = manifest["pages"][1]
+        ok &= check("the refused page is blocked, with t=bv and 3 attempts",
+                    p2["status"] == "blocked" and p2["datadome_t"] == "bv"
+                    and p2["attempts"] == 3 and p2["rows"] == 0)
+        ok &= check("pages after the refusal are unattempted, not failed",
+                    manifest["unattempted_pages"] == [3, 4, 5])
+        t = manifest["totals"]
+        ok &= check("a partial run still reconciles", t["reconciles"]
+                    and t["rows_written"] == 1)
+    return ok
+
+
 def main() -> int:
     ok = True
     # Checks that could not run because an optional engine library is absent.
@@ -5007,6 +5209,7 @@ def main() -> int:
     ok &= test_shared_calls_bind_against_the_real_signature()
     ok &= test_outputs_are_written_atomically_and_csv_is_formula_safe()
     ok &= test_engines_fetch_one_page_with_stubbed_drivers()
+    ok &= test_page_manifest()
     ok &= test_gitignore_covers_dumps_and_keeps_shipped_files()
     ok &= test_sample_output()
     ok &= test_x_debug_header_is_redacted()

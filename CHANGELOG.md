@@ -13,6 +13,21 @@ with it, so nobody discovers it from a bill or from a diff.
 
 ## [Unreleased]
 
+### Added
+
+- The Playwright engine writes a per-page manifest, `<out>.pages.json`,
+  next to the output, on both the sequential and the concurrent path. Each
+  entry records the page number, the requested and final URLs, the rows
+  parsed, a status (`success`, `blocked` with DataDome's `t` value,
+  `load_failed`, `empty`, `parser_found_nothing`) and the attempt count —
+  a retried page appears once, with its final conclusion. Pages never
+  dispatched (the listing ran out, or the run stopped first) are listed
+  under `unattempted_pages` rather than counted as failures, and a `totals`
+  block reconciles the manifest against the output:
+  `rows_parsed - duplicates_dropped == rows_written`. Entries are in page
+  order even under `--concurrency`, and `stop_reason` and the exit codes
+  are unchanged.
+
 ### Changed
 
 - CI only: the scheduled canary now starts at 06:47 UTC (Mondays) instead of 06:23, so canaries that share one Scraping Browser profile no longer start at the same time and lock each other out.

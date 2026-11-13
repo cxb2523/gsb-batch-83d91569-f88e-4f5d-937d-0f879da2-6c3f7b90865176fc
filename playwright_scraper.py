@@ -94,7 +94,7 @@ from product_parser import (parse_products, parse_product_page,
                             total_results, LOCALE_CURRENCY, locale_of,
                             unsupported_reason)
 from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
-                           write_private_text)
+                           write_private_text, write_page_manifest)
 import page_flow
 from page_flow import MIN_CARD_MATCHES
 from proxy_pool import (from_args as proxy_pool_from_args, to_playwright, mask,
@@ -156,11 +156,50 @@ class PageOutcome:
     # page states it holds listings and none parsed). Neither is blocked and
     # neither is an empty catalogue, so each gets its own stop_reason.
     failure: Optional[str] = None
+    # How many times this page was actually fetched (one per goto attempt,
+    # across both retry loops). A page is retried on this site rather than
+    # abandoned — a Scraping Browser profile was measured refusing twice and
+    # serving the third request — so 1 is the minimum, not the norm, and the
+    # per-page manifest records the count rather than one line per attempt:
+    # retries of the same page keep only their FINAL conclusion.
+    attempts: int = 0
+    # DataDome's own `t` value ("bv", "fe", ...) when the page was refused.
+    # It decides whether money could have helped — a t=bv cookie is not
+    # accepted, per 2Captcha's own docs — so the manifest keeps it rather
+    # than flattening every refusal into "blocked".
+    datadome_t: Optional[str] = None
+    # Rows of this page dropped as duplicates at merge time. Filled by the
+    # merge loop, not by the fetch: which page "claims" a duplicate is only
+    # decided once outcomes are merged in page order. Recorded per page so
+    # the manifest reconciles: sum(rows) - sum(duplicates_dropped) must equal
+    # the number of rows written.
+    duplicates_dropped: int = 0
 
     @property
     def ok(self) -> bool:
         return (not self.load_failed and self.blocked_by is None
                 and self.failure is None)
+
+    @property
+    def manifest_status(self) -> str:
+        """The one-word conclusion the per-page manifest records.
+
+        The order matters: a page that failed to load never got classified,
+        and a refused page never got parsed, so those are checked before the
+        data-shaped answers. "empty" is a CORRECT answer — a hub category, or
+        one page past the end of the listing — and is deliberately distinct
+        from "parser_found_nothing", which is this scraper failing to read a
+        page that states it holds listings.
+        """
+        if self.load_failed:
+            return "load_failed"
+        if self.blocked_by is not None:
+            return "blocked"
+        if self.failure is not None:
+            return self.failure  # "not_found" or "parser_found_nothing"
+        if not self.products:
+            return "empty"
+        return "success"
 
     @property
     def stop_reason(self) -> Optional[str]:
@@ -811,6 +850,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
         load_failed, exit_failed, status = False, None, None
         for attempt in range(1, args.retries + 1):
             try:
+                outcome.attempts += 1
                 response = session.page.goto(url, wait_until="domcontentloaded",
                                              timeout=60000)
                 # The status the site answered with, for the classifier: a
@@ -984,6 +1024,7 @@ def _fetch_one_page(session, args, pool, page_num: int, url: str) -> PageOutcome
             (f" Tried {block_retries + 1} exit(s)." if has_pool
              else f" Re-fetched {block_retries + 1} time(s)."))
         outcome.blocked_by = "datadome-%s" % (verdict or "403")
+        outcome.datadome_t = verdict
         outcome.final_url = session.page.url
         return outcome
 
@@ -1254,6 +1295,53 @@ def _fetch_pages_concurrently(args, pool, specs, concurrency: int):
     return results, sorted(unattempted), exhausted.is_set()
 
 
+def _page_manifest(outcomes, pages_requested: int, rows_written: int) -> dict:
+    """The per-page result list, written next to the output as `<out>.pages.json`.
+
+    Exists because the merged row count alone cannot say WHERE rows went
+    missing: a page refused by DataDome, a page that never loaded and a page
+    that was genuinely empty all contribute zero rows, and they mean opposite
+    things about whether re-running would help. One entry per page attempted,
+    in PAGE order — not completion order, which under --concurrency is
+    whatever the threads happened to finish in. A page retried appears once,
+    with its final conclusion and the number of attempts it took.
+
+    Pages never dispatched (the listing ran out and dispatch stopped, or the
+    run broke off before reaching them) are listed under `unattempted_pages`
+    rather than counted as failures: they were not tried, and claiming
+    otherwise would overstate the damage.
+
+    `totals` is the reconciliation against the merged output:
+    rows_parsed - duplicates_dropped == rows_written. If that ever fails,
+    the manifest — not the merge — is what to suspect first.
+    """
+    pages = [{
+        "page": o.page_num,
+        "url": o.url,
+        "final_url": o.final_url,
+        "status": o.manifest_status,
+        "rows": len(o.products),
+        "attempts": o.attempts,
+        "datadome_t": o.datadome_t,
+        "duplicates_dropped": o.duplicates_dropped,
+    } for o in sorted(outcomes, key=lambda o: o.page_num)]
+    attempted = {o.page_num for o in outcomes}
+    unattempted = [n for n in range(1, pages_requested + 1)
+                   if n not in attempted]
+    rows_parsed = sum(p["rows"] for p in pages)
+    dropped = sum(p["duplicates_dropped"] for p in pages)
+    return {
+        "pages": pages,
+        "unattempted_pages": unattempted,
+        "totals": {
+            "rows_parsed": rows_parsed,
+            "duplicates_dropped": dropped,
+            "rows_written": rows_written,
+            "reconciles": rows_parsed - dropped == rows_written,
+        },
+    }
+
+
 def scrape(args) -> int:
     # One entry per page attempted, merged after the loop rather than folded
     # into shared state during it — see PageOutcome for why that ordering
@@ -1420,13 +1508,14 @@ def scrape(args) -> int:
     merged_seen = set()
     for oc in sorted(outcomes, key=lambda o: o.page_num):
         fresh = dedupe_by_key(oc.products, merged_seen, key=dedupe_key)
-        if len(fresh) < len(oc.products):
+        oc.duplicates_dropped = len(oc.products) - len(fresh)
+        if oc.duplicates_dropped:
             # Not necessarily "on an earlier page" — a duplicate can be on
             # this page. Etsy's own pagination was measured NOT to
             # repeat (0 skus shared across three consecutive pages), so a
             # non-zero count here is worth noticing rather than routine.
             logger.info("Page %d: dropped %d duplicate row(s).",
-                        oc.page_num, len(oc.products) - len(fresh))
+                        oc.page_num, oc.duplicates_dropped)
         all_rows.extend(fresh)
 
     # Completeness, checked over the MERGED result rather than per page — a
@@ -1489,6 +1578,15 @@ def scrape(args) -> int:
                             if extra.get("shop_location") else "",
                             extra.get("shop_rating"),
                             extra.get("shop_review_count"))
+
+    # The per-page manifest lands next to the output under the SAME condition
+    # the metadata sidecar does (see finish_run): only when the row file was
+    # written. A failed run leaves no manifest behind for the same reason it
+    # leaves no sidecar — it would sit next to the previous run's still-intact
+    # good output and describe a run that file is not.
+    if all_rows or args.allow_empty:
+        write_page_manifest(args.out, _page_manifest(outcomes, args.pages,
+                                                     len(all_rows)))
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
                       blocked=blocked, stop_reason=stop_reason,

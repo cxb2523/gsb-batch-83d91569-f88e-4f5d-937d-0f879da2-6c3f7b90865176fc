@@ -474,6 +474,25 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     return path
 
 
+def write_page_manifest(out_prefix: str, manifest: dict) -> str:
+    """Write the per-page result list next to the output, return its path.
+
+    A separate `<out>.pages.json` rather than part of the metadata sidecar:
+    the sidecar describes the RUN as one object, this is the page-by-page
+    breakdown a reader wants open beside it when the row count looks short —
+    which pages were served, which were refused (and DataDome's own `t`
+    value), which were genuinely empty, and which were never dispatched.
+    Callers decide WHEN to write it; the engines follow the sidecar's rule
+    and write it only when the row file was written.
+    """
+    path = f"{out_prefix}.pages.json"
+    with _atomic(path) as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    print(f"[+] Wrote per-page manifest -> {path} "
+          f"({len(manifest.get('pages', []))} page(s))")
+    return path
+
+
 def run_meta(status: str, stop_reason: str, pages_requested: int,
              pages_completed: int, start_url: str, final_url: str,
              products: int, pages_failed: Optional[List[int]] = None,

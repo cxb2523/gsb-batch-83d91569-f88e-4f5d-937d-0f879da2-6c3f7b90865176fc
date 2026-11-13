@@ -281,6 +281,15 @@ across this scraper family — the first sixteen columns are identical in every
 repo in it — with Etsy's own columns appended. See
 [`sample_output.json`](sample_output.json), which is cut from a real run.
 
+The Playwright engine also writes `<out>.pages.json`: one entry per page
+attempted — page number, requested and final URL, rows parsed, a status
+(`success`, `blocked` with DataDome's own `t` value, `load_failed`, `empty`,
+`parser_found_nothing`) and how many attempts the page took — plus the pages
+never dispatched (`unattempted_pages`) and a `totals` block that reconciles
+against the output: `rows_parsed - duplicates_dropped == rows_written`. When
+the merged row count looks short, this file says whether the missing rows
+were refused, never loaded, or simply never existed.
+
 Files are written to a temporary file beside the target and renamed over it, so
 a crash or a full disk leaves the previous run's output whole instead of a
 truncated file. In the CSV only, a text cell that starts with `=`, `+`, `-`, `@`,
