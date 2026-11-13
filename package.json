@@ -1,0 +1,48 @@
+{
+  "name": "lobster-browser-tool",
+  "version": "1.1.0",
+  "description": "零配置浏览器控制工具，简单且强大",
+  "main": "browser-control.js",
+  "bin": {
+    "lobster-browser-tool": "./browser-control.js"
+  },
+  "keywords": [
+    "browser",
+    "automation",
+    "playwright",
+    "chromium",
+    "cli",
+    "stealth",
+    "browser-automation",
+    "headless-browser",
+    "ai-agent",
+    "gemini",
+    "screenshot",
+    "web-automation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ythx-101/lobster-browser-tool.git"
+  },
+  "homepage": "https://github.com/ythx-101/lobster-browser-tool#readme",
+  "bugs": {
+    "url": "https://github.com/ythx-101/lobster-browser-tool/issues"
+  },
+  "author": "OpenClaw",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node browser-control.js start",
+    "stop": "node browser-control.js stop",
+    "screenshot": "node browser-control.js screenshot",
+    "postinstall": "npx playwright install chromium",
+    "setup": "npx playwright install chromium",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "playwright": "^1.40.0"
+  }
+}

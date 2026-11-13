@@ -1,0 +1,18 @@
+# Lobster Browser Tool
+
+> Zero-config Node.js CLI that lets AI agents and scripts control a real Chromium browser (via Playwright) from the shell: navigate, wait, click, type, screenshot, extract page structure, and optionally ask Gemini to analyze the screenshot. 零配置命令行浏览器控制工具，面向 AI Agent。
+
+- Install from GitHub (not published to npm): `git clone https://github.com/ythx-101/lobster-browser-tool.git && cd lobster-browser-tool && npm install && npm link`. Requires Node.js >= 18.
+- `lobster-browser-tool start` launches the browser and stays resident (run it in the background); other commands attach to it; `stop` closes it.
+- Commands: start, stop, navigate <url>, screenshot [path], snapshot, status, analyze "<prompt>", eval <script>, wait <selector> [timeoutMs], click <selector>, type <selector> <text>, setup.
+- Every command prints a JSON object with a `success` field, which is easy for agents to parse.
+- Runs headless Chromium by default; the profile (cookies, logins) is kept in `~/.lobster-browser/profile`.
+- Environment variables: CHROMIUM_PATH, HEADLESS, GEMINI_API_KEY, GEMINI_MODEL, LOBSTER_DATA_DIR, LOBSTER_PORT.
+- Stealth is only a basic patch (hides `navigator.webdriver` and common automation hints); it does not guarantee bypassing bot detection.
+- Not suited to large-scale crawling or complex multi-tab workflows. `mcp.json` is a command manifest, not an MCP server.
+
+## Docs
+
+- [README](README.md): installation, commands, configuration, FAQ
+- [LICENSE](LICENSE): MIT
+- [mcp.json](mcp.json): command manifest with parameters and examples

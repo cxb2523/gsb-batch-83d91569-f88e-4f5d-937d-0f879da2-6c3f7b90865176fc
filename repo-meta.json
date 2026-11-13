@@ -1,0 +1,8 @@
+{
+  "description": "🦞 Zero-config CLI to control a real Chromium browser from the shell — built for AI agents & scripts. Navigate, click, type, screenshot, extract page structure, Gemini vision analysis. Playwright-based. 零配置命令行浏览器控制工具，让 AI Agent 用简单命令操作浏览器。",
+  "topics": [
+    "browser-automation", "playwright", "chromium", "cli", "headless-browser", "headless-chrome",
+    "web-automation", "ai-agent", "ai-tools", "llm-tools", "agent-tools", "browser-control",
+    "screenshot", "web-scraping", "stealth", "gemini", "nodejs", "javascript"
+  ]
+}
