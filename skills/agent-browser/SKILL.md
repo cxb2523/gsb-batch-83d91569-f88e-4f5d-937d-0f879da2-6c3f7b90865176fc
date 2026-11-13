@@ -194,6 +194,15 @@ page state. Rules, late-appearing challenges, profiles and code: `challenges.md`
   page to be `open` again (`open` without a `closed` means no supported challenge was found). A challenge that never renders is usually
   resource blocking: allow images, styles and fonts for that target and retry once.
 - With profiles, `page_handler=true` goes on the setup run and every consumer run identically.
+- **The templates turn those states into a verdict and a record.** `page_verdict.*` classifies each attempt from
+  generic signals only (response headers, final URL, HTTP status, body excerpt, terminal state) as one of
+  `ok`, `challenged`, `blocked`, `not-public`, `oxylabs-network` — never from vendor-specific markup.
+  `collect_target` / `collectTarget` in `playwright_scrape.*` then runs the plain-attempt → page-handler
+  escalation, the 10 s/20 s fresh-identity backoff on `blocked` (at most 2 retries), network retries on
+  `oxylabs-network`, and an immediate stop on `not-public`, and returns one record per target with the verdict,
+  challenge flag, attempt count, last page status/error, `__session_id` and per-attempt timestamps. Offline
+  samples (`verdict_sample.*`, `collect_flow_sample.*`) exercise all five verdicts without touching the network;
+  detail and run instructions: `targets.md` section 1.
 
 ## 7. Operational hygiene
 

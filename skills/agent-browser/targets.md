@@ -51,6 +51,48 @@ decided against this visitor: retrying the same session never helps; close it an
 ladder (section 4) from a fresh identity. Confirm what the page actually shows (section 4, rung 7) before
 spending more sessions.
 
+### Shipped verdict layer and collection record
+
+The templates carry this decision as code instead of leaving it to the caller. Two pieces, side by side in
+`scripts/`:
+
+- `page_verdict.py` / `page_verdict.js` — the pure classifier `classify_page` / `classifyPage`. Inputs are
+  exactly the five generic observations of one attempt: the response headers, the final URL after redirects,
+  the HTTP status code, a leading slice of the rendered body, and the page handler's waited-out terminal state
+  (`null` when `page_handler=false`). It returns one of `ok`, `challenged`, `blocked`, `not-public`,
+  `oxylabs-network`, in this precedence (first match wins):
+
+  1. a response carries `X-Error-Description` → `oxylabs-network`
+  2. the final URL is on a `/login`, `/signin` or `/sign-in` path → `not-public`
+  3. the terminal state is `failed`, or the page is still a `403` / `503` / "access denied" /
+     "verify you are human" wall (even when the handler reported `open`) → `blocked`
+  4. a `closed` then `open` transition (the stored state's `challenged` flag) → `challenged`
+  5. anything else → `ok`
+
+  It only reads generic HTTP signals and the handler's own state machine — never vendor-specific markup,
+  fingerprint headers or product names in a page.
+
+- `playwright_scrape.py` / `playwright_scrape.js` — the orchestration around it. `collect_target` /
+  `collectTarget` runs one target through the whole policy and returns a single checkable record. Flow:
+
+  1. a plain attempt with `page_handler=false` (no state messages; status code and body only);
+  2. anything except `ok` is retried on a **new connection** with `page_handler=true`;
+  3. `ok` / `challenged` end the run, with `page_handler=true` kept for every later connection to that target;
+  4. `blocked` closes the session and reconnects as a fresh identity after **10 s, then 20 s** backoff, at
+     most **2 more tries**, then stops;
+  5. `oxylabs-network` is retried as a transient network error; `not-public` stops immediately, no retry.
+
+  The record contains the target URL, the final verdict, whether any challenge was ever in the way, the attempt
+  count, the last page status and error, the session id (fetched with the CDP command `__session_id`), the stop
+  reason, and a per-attempt list with `started_at`/`ended_at` timestamps, parameters, status code, final URL and
+  session id. Passwords are redacted from every log line and error string; the connection URL is never printed.
+
+  Both behaviours have offline samples that touch no network and need no browser: `verdict_sample.py` /
+  `verdict_sample.js` forge headers, URL, status, body and terminal state to cover all five verdicts and the
+  precedence edge cases, and `collect_flow_sample.py` / `collect_flow_sample.js` drive a scripted in-memory
+  browser double through the retry/backoff/stop policy. Run them from `scripts/` with
+  `python verdict_sample.py` / `node verdict_sample.js` (exit code 0 means every case held).
+
 ## 2. Use an identity only when the target needs one
 
 Start every target with `p_cc` only. Each session is already a new browser configuration on a new residential
