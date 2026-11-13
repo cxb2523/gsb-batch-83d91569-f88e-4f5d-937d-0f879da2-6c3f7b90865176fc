@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Codex quotas</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <script src="./themes.js"></script>
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./mini.css">
+</head>
+<body>
+  <main class="mini-card">
+    <section class="quota" data-quota="five-hour">
+      <div class="quota-heading"><span class="quota-label" data-i18n="fiveHour">5 hours</span><strong data-remaining>—</strong></div>
+      <span class="quota-reset" data-reset>Waiting for data…</span>
+      <span data-i18n="remaining">remaining</span>
+      <span class="quota-countdown" data-countdown>—</span>
+      <span class="quota-observed" data-observed>—</span>
+    </section>
+    <section class="quota" data-quota="weekly">
+      <div class="quota-heading"><span class="quota-label" data-i18n="weekly">Weekly</span><strong data-remaining>—</strong></div>
+      <span class="quota-reset" data-reset>Waiting for data…</span>
+      <span data-i18n="remaining">remaining</span>
+      <span class="quota-countdown" data-countdown>—</span>
+      <span class="quota-observed" data-observed>—</span>
+    </section>
+  </main>
+  <p id="miniStatus" role="status" aria-live="polite">Loading…</p>
+  <button id="miniSignIn" type="button" hidden>Sign in to dashboard</button>
+  <details id="miniAccess" hidden>
+    <summary id="miniAccessTitle">Configure access</summary>
+    <p id="miniAccessHelp"></p>
+    <label for="miniHubUrl" id="miniHubLabel">Hub address</label>
+    <input id="miniHubUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://…">
+    <label for="miniAssociationCode" id="miniCodeLabel">One-time association code</label>
+    <input id="miniAssociationCode" type="password" autocomplete="off" spellcheck="false">
+    <button id="miniSaveAccess" type="button">Associate window</button>
+    <p id="miniAccessError" role="status"></p>
+  </details>
+  <script type="module" src="./mini.js"></script>
+</body>
+</html>

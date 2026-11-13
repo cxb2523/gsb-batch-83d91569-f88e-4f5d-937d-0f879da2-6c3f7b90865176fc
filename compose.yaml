@@ -1,0 +1,52 @@
+services:
+  dashboard:
+    build: .
+    container_name: codex-usage-dashboard
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    ports:
+      - "127.0.0.1:4317:4317"
+    environment:
+      REFRESH_INTERVAL_MS: ${REFRESH_INTERVAL_MS:-60000}
+      MESH_HUB_URL: ${MESH_HUB_URL:-}
+      # Preserve the host PC name in containers; MESH_NODE_ALIAS remains an explicit override.
+      MESH_NODE_ALIAS: ${MESH_NODE_ALIAS:-${COMPUTERNAME:-${HOSTNAME:-}}}
+      MESH_ENROLLMENT_CODE: ${MESH_ENROLLMENT_CODE:-}
+      MESH_AGENT_STATE_PATH: /app-cache/mesh-agent.json
+      MESH_BATCH_SIZE: ${MESH_BATCH_SIZE:-100}
+      MESH_PROJECT_MODE: ${MESH_PROJECT_MODE:-hash}
+      MESH_INCLUDE_TITLES: ${MESH_INCLUDE_TITLES:-false}
+    volumes:
+      - type: bind
+        source: ${CODEX_DATA_PATH:?Définissez CODEX_DATA_PATH vers votre dossier .codex}/sessions
+        target: /codex-data/sessions
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CODEX_DATA_PATH:?Définissez CODEX_DATA_PATH vers votre dossier .codex}/archived_sessions
+        target: /codex-data/archived_sessions
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CODEX_DATA_PATH:?Définissez CODEX_DATA_PATH vers votre dossier .codex}/session_index.jsonl
+        target: /codex-data/session_index.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: usage-cache
+        target: /app-cache
+    tmpfs:
+      - /tmp
+
+volumes:
+  usage-cache:
+    name: codex-usage-dashboard-storage

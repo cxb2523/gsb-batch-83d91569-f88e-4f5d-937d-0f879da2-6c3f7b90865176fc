@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "replace-with-your-mesh-ingress",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-08-19",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "MESH_UPSTREAM_ORIGIN": "https://your-private-site.example"
+  },
+  "secrets": {
+    "required": ["SITES_UPSTREAM_AUTH_TOKEN"]
+  },
+  "ratelimits": [
+    {
+      "name": "ENROLL_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    },
+    {
+      "name": "NODE_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": {
+        "limit": 240,
+        "period": 60
+      }
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

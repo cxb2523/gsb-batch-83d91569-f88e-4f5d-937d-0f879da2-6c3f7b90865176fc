@@ -1,0 +1,21 @@
+* { box-sizing: border-box; }
+html, body { width: 100%; min-width: 240px; min-height: 100%; margin: 0; }
+body { display: block; color: var(--text); background: var(--bg); font: 14px/1.4 "Segoe UI", system-ui, sans-serif; padding: 12px; }
+.mini-card { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+[data-quota-count="1"] .mini-card { grid-template-columns: minmax(0, 1fr); }
+.quota[hidden] { display: none; }
+.quota { min-width: 0; display: grid; gap: 3px; }
+.quota-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.quota-label { color: var(--muted); font-size: 14px; font-weight: 700; }
+.quota strong { color: var(--accent); font-size: 24px; }
+.quota-reset, .quota-observed { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.quota-countdown { color: var(--text); }
+#miniStatus { margin: 8px 2px 0; color: var(--muted); font-size: 12px; }
+#miniStatus[data-error="true"], [data-stale="true"] .quota-observed { color: var(--danger); }
+#miniAccess { margin-top: 10px; }
+#miniAccess label { display: block; margin-top: 6px; font-size: 12px; }
+#miniAccess input { width: 100%; box-sizing: border-box; }
+#miniAccessHelp { font-size: 12px; color: var(--muted); }
+#miniAccessError { color: var(--danger); font-size: 12px; }
+#miniSignIn, #miniSaveAccess { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--surface); cursor: pointer; }
+@media (max-width: 400px) { .mini-card { grid-template-columns: 1fr; } }

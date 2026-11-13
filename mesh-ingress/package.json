@@ -1,0 +1,22 @@
+{
+  "name": "codex-usage-mesh-ingress",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "test": "node --test tests/worker.test.mjs",
+    "build": "wrangler deploy --dry-run --config wrangler.example.jsonc --outdir dist",
+    "check": "npm test && npm run build",
+    "deploy": "wrangler deploy --config wrangler.jsonc"
+  },
+  "devDependencies": {
+    "wrangler": "4.123.0"
+  },
+  "overrides": {
+    "sharp": "0.35.5",
+    "undici": "7.30.1"
+  }
+}

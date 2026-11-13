@@ -1,0 +1,50 @@
+// Retry only explicit migration or temporary-storage errors on reads.
+export async function fetchUsage(
+  url,
+  options = {},
+  { fetchImpl = fetch, maxRetries = 60, delayMs = 500, timeoutMs = 30000, onMigration = () => {} } = {},
+) {
+  let migrating = false;
+  try {
+  for (let attempt = 0; ; attempt++) {
+    options.signal?.throwIfAborted();
+    const controller = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal,controller.signal]) : controller.signal;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      if (timeoutMs > 0) timer = setTimeout(() => {
+        const error = new DOMException('Server response timed out.', 'TimeoutError');
+        controller.abort(error); reject(error);
+      }, timeoutMs);
+    });
+    let response;
+    try { response = await Promise.race([fetchImpl(url, {...options, signal}), timeout]); }
+    finally { clearTimeout(timer); }
+    if (response.status !== 503 || attempt >= maxRetries) return response;
+    let details;
+    try {
+      details = await response.clone().json();
+    } catch {
+      return response;
+    }
+    const temporary = details.code === 'storage_unavailable' && (!options.method || options.method === 'GET');
+    if (details.code !== "storage_migrating" && !temporary) return response;
+    if (temporary && attempt >= 2) return response;
+    if (!temporary && !migrating) { migrating = true; onMigration(true); }
+    await new Promise((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        reject(options.signal.reason);
+      };
+      const timer = setTimeout(() => {
+        options.signal?.removeEventListener("abort", abort);
+        resolve();
+      }, delayMs);
+      if (options.signal?.aborted) abort();
+      else options.signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+  } finally {
+    if (migrating) onMigration(false);
+  }
+}

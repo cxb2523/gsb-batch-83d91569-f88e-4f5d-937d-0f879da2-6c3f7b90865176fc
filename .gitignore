@@ -1,0 +1,45 @@
+node_modules/
+.env
+.env.*
+!.env.example
+**/.dev.vars*
+!**/.dev.vars.example
+*.log
+*.etl
+.DS_Store
+Thumbs.db
+coverage/
+dist/
+sites-hub/public/dashboard/
+.cache/
+.wrangler/
+.codex/
+.codex-remote-attachments/
+auth.json
+
+# Per-deployment Sites and Cloudflare linkage. Commit only the example files.
+sites-hub/.openai/hosting.json
+mesh-ingress/wrangler.jsonc
+
+# Never publish local Codex data or generated usage snapshots.
+sessions/
+archived_sessions/
+session_index.jsonl
+usage-snapshot*.json
+*.jsonl
+*.sqlite
+*.sqlite-*
+*.db
+*.tsbuildinfo
+
+# Private keys and common credential exports.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials*.json
+service-account*.json
+
+# Local validation, release evidence and private Site source checkout.
+.local/

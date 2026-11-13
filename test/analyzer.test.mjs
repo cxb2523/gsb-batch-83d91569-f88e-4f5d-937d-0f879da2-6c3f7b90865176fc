@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { addUsage, analyzeCodexUsage, inspectCodexSource, normalizeFiveHourQuota, normalizeGitHubRepositoryUrl, normalizeUsage, normalizeWeeklyQuota, parseSessionFile, resolveCodexSource, usageFingerprint } from "../src/analyzer.mjs";
+import { mergeWeeklyQuotaObservations } from "../src/quota-history.mjs";
+
+test("normalizes and adds token usage", () => {
+  const usage = normalizeUsage({ input_tokens: 100, cached_input_tokens: 80, output_tokens: 20, reasoning_output_tokens: 5, total_tokens: 120 });
+  assert.deepEqual(addUsage(usage, usage), { inputTokens: 200, cachedInputTokens: 160, outputTokens: 40, reasoningOutputTokens: 10, totalTokens: 240 });
+});
+
+test("normalizes the weekly Codex quota without inventing reset availability", () => {
+  const raw = {
+    primary: { used_percent: 12, window_minutes: 300, resets_at: 1783626099 },
+    secondary: { used_percent: 36, window_minutes: 10080, resets_at: 1783769144 },
+    individual_limit: { used_percent: 90, window_minutes: 43200, resets_at: 1786361144 },
+    plan_type: "pro",
+  };
+  const quota = normalizeWeeklyQuota(raw, "2026-07-09T22:00:00.000Z");
+  assert.equal(quota.usedPercent, 36);
+  assert.equal(quota.remainingPercent, 64);
+  assert.equal(quota.windowMinutes, 10080);
+  assert.equal(quota.resetsAt, "2026-07-11T11:25:44.000Z");
+  assert.equal(quota.resetsAvailable, null);
+  assert.equal(quota.planType, "pro");
+  const fiveHourQuota = normalizeFiveHourQuota(raw, "2026-07-09T22:00:00.000Z");
+  assert.equal(fiveHourQuota.usedPercent, 12);
+  assert.equal(fiveHourQuota.remainingPercent, 88);
+  assert.equal(fiveHourQuota.windowMinutes, 300);
+  assert.equal(fiveHourQuota.resetsAt, "2026-07-09T19:41:39.000Z");
+});
+
+test("keeps Codex and legacy quotas but excludes independent named buckets", () => {
+  const raw = {
+    primary: { used_percent: 12, window_minutes: 300, resets_at: 1789510009 },
+    secondary: { used_percent: 82, window_minutes: 10080, resets_at: 1789811836 },
+  };
+  for (const normalize of [normalizeWeeklyQuota, normalizeFiveHourQuota]) {
+    assert.ok(normalize(raw));
+    assert.ok(normalize({ ...raw, limit_id: "codex" }));
+    assert.ok(normalize({ ...raw, limitId: "codex" }));
+    for (const limitId of ["codex_bengalfox", "another_bucket"]) {
+      assert.equal(normalize({ ...raw, limit_id: limitId }), null);
+      assert.equal(normalize({ ...raw, limitId }), null);
+    }
+  }
+});
+
+test("rebuilds cached quota history without Spark points while retaining token usage", async () => {
+  const codexHome = await mkdtemp(path.join(tmpdir(), "codex-quota-buckets-"));
+  await mkdir(path.join(codexHome, "sessions"));
+  const rows = [{ type: "session_meta", payload: { id: "buckets" } }];
+  for (const [minute, limitId, percent, reset] of [
+    [0, "codex", 82, 1789811836],
+    [7, "codex_bengalfox", 10, 1789811965],
+    [15, "codex", 83, 1789811836],
+    [16, "codex_bengalfox", 10, 1789811965],
+  ]) {
+    rows.push({ timestamp: `2026-09-15T17:${String(minute).padStart(2, "0")}:00.000Z`, type: "event_msg", payload: {
+      type: "token_count",
+      info: { last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } },
+      rate_limits: { limit_id: limitId, secondary: { used_percent: percent, window_minutes: 10080, resets_at: reset } },
+    } });
+  }
+  await writeFile(path.join(codexHome, "sessions", "session.jsonl"), rows.map(JSON.stringify).join("\n"));
+  const first = await analyzeCodexUsage({ codexHome });
+  const polluted = { ...first, analyzerVersion: 10, sessions: first.sessions.map(session => ({
+    ...session, weeklyQuota: { usedPercent: 10 }, weeklyQuotaHistory: [{ usedPercent: 10 }],
+  })) };
+  const rebuilt = await analyzeCodexUsage({ codexHome, previousData: polluted });
+  assert.notEqual(rebuilt.sessions[0], polluted.sessions[0]);
+  assert.equal(rebuilt.weeklyQuota.usedPercent, 83);
+  assert.equal(rebuilt.weeklyQuotaHistory.length, 1);
+  assert.deepEqual(rebuilt.weeklyQuotaHistory[0].observations.map(point => point.usedPercent), [82, 83]);
+  assert.equal(rebuilt.sessions[0].modelCalls, 4);
+  assert.equal(rebuilt.sessions[0].usage.totalTokens, 440);
+  assert.match(await usageFingerprint({ codexHome }), /^14:/);
+});
+
+test("merges nearby reset observations, retains plan transitions, and ignores unused drifting windows", () => {
+  const history = mergeWeeklyQuotaObservations([
+    { usedPercent: 0, windowMinutes: 10080, resetsAt: "2026-07-01T20:25:00.000Z", observedAt: "2026-06-24T20:25:00.000Z", planType: "plus" },
+    { usedPercent: 20, windowMinutes: 10080, resetsAt: "2026-07-01T20:27:00.000Z", observedAt: "2026-06-24T22:00:00.000Z", planType: "plus" },
+    { usedPercent: 81, windowMinutes: 10080, resetsAt: "2026-07-01T20:27:01.000Z", observedAt: "2026-06-28T23:41:00.000Z", planType: "prolite" },
+    { usedPercent: 0, windowMinutes: 10080, resetsAt: "2026-07-05T10:00:00.000Z", observedAt: "2026-06-28T10:00:00.000Z", planType: "prolite" },
+    { usedPercent: 7, windowMinutes: 10080, resetsAt: "2026-07-08T09:00:00.000Z", observedAt: "2026-07-01T12:00:00.000Z", planType: "pro" },
+  ]);
+  assert.equal(history.length, 2);
+  assert.equal(history[1].resetsAt, "2026-07-01T20:27:01.000Z");
+  assert.equal(history[1].startsAt, "2026-06-24T20:27:01.000Z");
+  assert.equal(history[1].endsAt, "2026-07-01T09:00:00.000Z");
+  assert.equal(history[1].resetsAt, "2026-07-01T20:27:01.000Z");
+  assert.equal(history[1].peakUsedPercent, 81);
+  assert.deepEqual(history[1].planTypes, ["plus", "prolite"]);
+  assert.equal(history[1].planType, "prolite");
+  assert.equal(history[0].planType, "pro");
+});
+
+test("parses turns, model calls and duration without message contents", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-usage-"));
+  const file = path.join(directory, "session.jsonl");
+  const rows = [
+    { timestamp: "2026-07-10T08:00:00.000Z", type: "session_meta", payload: { id: "session-1", timestamp: "2026-07-10T08:00:00.000Z", cwd: "C:\\repo", model_provider: "openai", git: { repository_url: "git@github.com:OpenAI/Example.git", branch: "main", commit_hash: "secret" } } },
+    { timestamp: "2026-07-10T08:00:00.500Z", type: "event_msg", payload: { type: "thread_settings_applied", thread_settings: { service_tier: "priority" } } },
+    { timestamp: "2026-07-10T08:00:01.000Z", type: "turn_context", payload: { turn_id: "turn-1", model: "gpt-test", effort: "medium" } },
+    { timestamp: "2026-07-10T08:00:01.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1", started_at: "2026-07-10T08:00:01.000Z" } },
+    { timestamp: "2026-07-10T08:00:02.000Z", type: "event_msg", payload: { type: "user_message", message: "secret" } },
+    { timestamp: "2026-07-10T08:00:03.000Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 100, cached_input_tokens: 50, output_tokens: 10, total_tokens: 110 } }, rate_limits: { primary: { used_percent: 15, window_minutes: 300, resets_at: 1783672200 }, secondary: { used_percent: 21, window_minutes: 10080, resets_at: 1783769144 }, resets_remaining: 2, plan_type: "pro" } } },
+    { timestamp: "2026-07-10T08:00:05.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } },
+  ];
+  await writeFile(file, rows.map(JSON.stringify).join("\n"));
+  const result = await parseSessionFile(file, new Map([["session-1", "Test conversation"]]));
+  assert.equal(result.title, "Test conversation");
+  assert.equal(result.models[0], "gpt-test");
+  assert.equal(result.exchanges, 1);
+  assert.equal(result.modelCalls, 1);
+  assert.equal(result.turns[0].effort, "medium");
+  assert.equal(result.turns[0].serviceTier, "priority");
+  assert.equal(result.calls[0].effort, "medium");
+  assert.equal(result.calls[0].serviceTier, "priority");
+  assert.equal(result.durationMs, 4000);
+  assert.equal(result.usage.cachedInputTokens, 50);
+  assert.equal(result.fiveHourQuota.remainingPercent, 85);
+  assert.equal(result.fiveHourQuota.windowMinutes, 300);
+  assert.equal(result.weeklyQuota.remainingPercent, 79);
+  assert.equal(result.weeklyQuota.resetsAvailable, 2);
+  assert.equal(result.weeklyQuotaHistory.length, 1);
+  assert.equal(result.weeklyQuotaHistory[0].planType, "pro");
+  assert.equal(result.projectName, "repo");
+  assert.equal(result.projectGitHubUrl, "https://github.com/openai/example");
+  assert.equal(JSON.stringify(result).includes("commit_hash"), false);
+  assert.equal(JSON.stringify(result).includes("secret"), false);
+});
+
+test("does not carry an earlier turn's effort into a turn that omits it", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-usage-effort-"));
+  const file = path.join(directory, "session.jsonl");
+  const rows = [
+    { timestamp: "2026-09-28T08:00:00.000Z", type: "session_meta", payload: { id: "session-effort" } },
+    { timestamp: "2026-09-28T08:00:01.000Z", type: "turn_context", payload: { turn_id: "turn-1", model: "gpt-6-sol", effort: "high" } },
+    { timestamp: "2026-09-28T08:00:02.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+    { timestamp: "2026-09-28T08:00:03.000Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } } } },
+    { timestamp: "2026-09-28T08:01:01.000Z", type: "turn_context", payload: { turn_id: "turn-2", model: "gpt-5.6-sol" } },
+    { timestamp: "2026-09-28T08:01:02.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-2" } },
+    { timestamp: "2026-09-28T08:01:03.000Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } } } },
+  ];
+  await writeFile(file, rows.map(JSON.stringify).join("\n"));
+  const result = await parseSessionFile(file);
+  assert.deepEqual(result.turns.map((turn) => turn.effort), ["high", null]);
+  assert.deepEqual(result.calls.map((call) => call.effort), ["high", null]);
+});
+
+test("recovers effort from applied thread settings when turn context omits it", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-usage-settings-effort-"));
+  const file = path.join(directory, "session.jsonl");
+  const rows = [
+    { timestamp: "2026-09-28T08:00:00.000Z", type: "session_meta", payload: { id: "session-settings-effort" } },
+    { timestamp: "2026-09-28T08:00:01.000Z", type: "turn_context", payload: { turn_id: "turn-1", model: "gpt-5.6-sol" } },
+    { timestamp: "2026-09-28T08:00:02.000Z", type: "event_msg", payload: { type: "thread_settings_applied", thread_settings: { reasoning_effort: "xhigh" } } },
+    { timestamp: "2026-09-28T08:00:03.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+    { timestamp: "2026-09-28T08:00:04.000Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } } } },
+  ];
+  await writeFile(file, rows.map(JSON.stringify).join("\n"));
+  const result = await parseSessionFile(file);
+  assert.equal(result.turns[0].effort, "xhigh");
+  assert.equal(result.calls[0].effort, "xhigh");
+});
+
+test("canonicalizes only credential-free GitHub repository URLs", () => {
+  assert.equal(normalizeGitHubRepositoryUrl("https://TOKEN@GitHub.com/OpenAI/Example.git?ignored=1"), "https://github.com/openai/example");
+  assert.equal(normalizeGitHubRepositoryUrl("ssh://git@github.com/OpenAI/Example.git"), "https://github.com/openai/example");
+  assert.equal(normalizeGitHubRepositoryUrl("git@github.com:OpenAI/Example.git"), "https://github.com/openai/example");
+  assert.equal(normalizeGitHubRepositoryUrl("https://gitlab.com/OpenAI/Example.git"), null);
+});
+
+test("prefers the event timestamp when started_at is Unix seconds", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "codex-usage-unix-"));
+  const file = path.join(directory, "session.jsonl");
+  const rows = [
+    { timestamp: "2026-07-10T08:00:00.000Z", type: "session_meta", payload: { id: "session-unix" } },
+    { timestamp: "2026-07-10T08:00:01.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1", started_at: 1783670401 } },
+    { timestamp: "2026-07-10T08:00:06.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } },
+  ];
+  await writeFile(file, rows.map(JSON.stringify).join("\n"));
+  const result = await parseSessionFile(file);
+  assert.equal(result.turns[0].startedAt, "2026-07-10T08:00:01.000Z");
+  assert.equal(result.turns[0].durationMs, 5000);
+});
+
+test("reuses persisted per-file analysis when a session has not changed", async () => {
+  const codexHome = await mkdtemp(path.join(tmpdir(), "codex-usage-incremental-"));
+  const sessionsDirectory = path.join(codexHome, "sessions");
+  await mkdir(sessionsDirectory, { recursive: true });
+  const file = path.join(sessionsDirectory, "session.jsonl");
+  await writeFile(file, [
+    { timestamp: "2026-08-11T08:00:00.000Z", type: "session_meta", payload: { id: "incremental" } },
+    { timestamp: "2026-08-11T08:00:01.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+  ].map(JSON.stringify).join("\n"));
+
+  const first = await analyzeCodexUsage({ codexHome });
+  const second = await analyzeCodexUsage({ codexHome, previousData: first });
+  assert.equal(first.analyzerVersion, 14);
+  assert.equal(second.sessions[0], first.sessions[0]);
+  assert.equal(second.sessions[0].fileSize > 0, true);
+  assert.equal(Number.isFinite(second.sessions[0].fileModifiedAtMs), true);
+
+  const legacySnapshot = { ...first };
+  delete legacySnapshot.analyzerVersion;
+  const migrated = await analyzeCodexUsage({ codexHome, previousData: legacySnapshot });
+  assert.notEqual(migrated.sessions[0], first.sessions[0]);
+});
+
+test("supports least-privilege scoped sources without a Codex home mount", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "codex-usage-scoped-"));
+  const sessionsPath = path.join(root, "mounted-sessions");
+  const archivedSessionsPath = path.join(root, "mounted-archives");
+  const sessionIndexPath = path.join(root, "mounted-index.jsonl");
+  await mkdir(sessionsPath);
+  await mkdir(archivedSessionsPath);
+  await writeFile(sessionIndexPath, `${JSON.stringify({ id: "scoped", thread_name: "Scoped source" })}\n`);
+  await writeFile(path.join(sessionsPath, "session.jsonl"), [
+    { timestamp: "2026-08-12T08:00:00.000Z", type: "session_meta", payload: { id: "scoped" } },
+    { timestamp: "2026-08-12T08:00:01.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+  ].map(JSON.stringify).join("\n"));
+
+  const options = { sessionsPath, archivedSessionsPath, sessionIndexPath };
+  assert.equal(resolveCodexSource(options).mode, "scoped");
+  assert.deepEqual(await inspectCodexSource(options), {
+    mode: "scoped",
+    sessionsAvailable: true,
+    archivedSessionsAvailable: true,
+    sessionIndexAvailable: true,
+  });
+  const result = await analyzeCodexUsage(options);
+  assert.equal(result.sessions[0].title, "Scoped source");
+  assert.equal(result.source.mode, "scoped");
+  assert.match(await usageFingerprint(options), /^14:1:/);
+});
+
+test("fingerprints include the analyzer version so persisted snapshots migrate after upgrades", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "codex-usage-versioned-fingerprint-"));
+  const sessionsPath = path.join(root, "sessions");
+  const archivedSessionsPath = path.join(root, "archives");
+  await mkdir(sessionsPath);
+  await mkdir(archivedSessionsPath);
+  await writeFile(path.join(sessionsPath, "session.jsonl"), `${JSON.stringify({ type: "session_meta", payload: { id: "versioned" } })}\n`);
+  const fingerprint = await usageFingerprint({ sessionsPath, archivedSessionsPath, sessionIndexPath: path.join(root, "missing-index.jsonl") });
+  assert.match(fingerprint, /^14:/);
+});
+
+test("rejects a source with no readable session directory", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "codex-usage-missing-"));
+  await assert.rejects(
+    analyzeCodexUsage({
+      sessionsPath: path.join(root, "missing-sessions"),
+      archivedSessionsPath: path.join(root, "missing-archives"),
+      sessionIndexPath: path.join(root, "missing-index.jsonl"),
+    }),
+    { code: "CODEX_SOURCE_UNAVAILABLE" },
+  );
+});

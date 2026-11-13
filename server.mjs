@@ -1,0 +1,344 @@
+import { miniPreferences } from "./src/desktop-options.mjs";
+import { createPageData, pageMetadata } from "./public/page-data.js";
+import { timingSafeEqual, createHash } from "node:crypto";
+import { createQuotaDetail, quotaMetadata } from "./public/quota-data.js";
+import { matchesQuotaEtag, normalizeQuotaPeriods } from "./public/quota-periods.js";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createDashboardCapabilities } from "./src/dashboard-contract.mjs";
+import { MeshHubStore } from "./src/mesh-hub-store.mjs";
+import { serializePublicUsage, toPublicUsage } from "./src/public-usage.mjs";
+import { createUsageCollector } from "./src/usage-collector.mjs";
+import { cliText } from "./src/cli-locale.mjs";
+import { readSessionSlices, readQuotaCalls, readQuotaCalibration, readQuotaSamples, readFilters } from './src/storage/relational-reader.mjs';
+import { LOCAL_OWNER } from './src/storage/local-repository.mjs';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = process.env.DASHBOARD_ASSETS_PATH || path.join(root, "dist", "dashboard");
+const host = process.env.HOST || "127.0.0.1";
+const port = Number(process.env.PORT || 4317);
+const dashboardMode = process.env.DASHBOARD_MODE || "local";
+const meshHubPath = process.env.MESH_HUB_PATH || path.join(root, ".cache", "mesh-hub.json");
+const meshAdminToken = process.env.MESH_ADMIN_TOKEN || null;
+const maxRequestBytes = Math.max(64 * 1_024, Number(process.env.MESH_MAX_REQUEST_BYTES || 8 * 1_024 * 1_024));
+const dashboardUrl = `http://${host}:${port}`;
+const mime = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+};
+
+if (!["local", "hub"].includes(dashboardMode)) throw new Error("DASHBOARD_MODE doit valoir local ou hub.");
+
+const meshHub = dashboardMode === "hub" ? new MeshHubStore({ storePath: meshHubPath, databasePath: process.env.MESH_DATABASE_PATH || undefined }) : null;
+if (meshHub) await meshHub.load();
+const usageCollector = dashboardMode === "local" ? await createUsageCollector({ root }) : null;
+
+function securityHeaders(contentType) {
+  return {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+  };
+}
+
+function send(response, status, body, contentType = "application/json; charset=utf-8") {
+  response.writeHead(status, securityHeaders(contentType));
+  response.end(body);
+}
+
+function sendJson(response, status, value) {
+  send(response, status, JSON.stringify(value));
+}
+
+async function readJsonBody(request) {
+  const declared = Number(request.headers["content-length"] || 0);
+  if (declared > maxRequestBytes) {
+    const error = new Error("Charge utile trop volumineuse.");
+    error.status = 413;
+    throw error;
+  }
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    bytes += chunk.length;
+    if (bytes > maxRequestBytes) {
+      const error = new Error("Charge utile trop volumineuse.");
+      error.status = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {
+    const error = new Error("JSON invalide.");
+    error.status = 400;
+    throw error;
+  }
+}
+
+function adminAuthorized(request) {
+  if (!meshAdminToken) return false;
+  const authorization = String(request.headers.authorization || "");
+  const expected = `Bearer ${meshAdminToken}`;
+  const left = Buffer.from(authorization);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+async function serializedUsage(force = false, source = "local") {
+  if (dashboardMode === "hub") return serializePublicUsage(meshHub.aggregate());
+  if (source === "centralized") return JSON.stringify(await usageCollector.centralizedUsage(force));
+  return usageCollector.localUsageJson(force);
+}
+
+function healthStatus() {
+  if (dashboardMode === "hub") {
+    const nodes = meshHub.nodes();
+    return { ok: true, ready: true, mode: "hub", nodes: nodes.length, activeNodes: nodes.filter((node) => !node.revokedAt).length };
+  }
+  return usageCollector.status();
+}
+
+function errorHeading(message) {
+  const colorEnabled = !Object.hasOwn(process.env, "NO_COLOR")
+    && (process.stderr.isTTY || Boolean(process.env.FORCE_COLOR));
+  return colorEnabled ? `\u001b[1;31m${message}\u001b[0m` : message;
+}
+
+async function routeApi(request, response, url) {
+  if (url.pathname === "/api/desktop/mini" && request.method === "POST") {
+    const remoteAddress = request.socket.remoteAddress || "";
+    const localRequest = remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
+    if (!localRequest || !process.connected || process.env.CODEX_DESKTOP_HELPER !== "1") {
+      sendJson(response, 404, { error: "Desktop helper unavailable.", code: "desktop_helper_unavailable" });
+      return true;
+    }
+    if (request.headers["x-codex-desktop"] !== "1" || (request.headers.origin && request.headers.origin !== `http://${request.headers.host}`)) {
+      sendJson(response, 403, { error: "Same-origin desktop request required." });
+      return true;
+    }
+    const preferences = miniPreferences(Object.fromEntries(url.searchParams));
+    process.send({ type: "open-mini-quota", preferences });
+    sendJson(response, 202, { ok: true });
+    return true;
+  }
+  if (url.pathname === "/api/capabilities" && request.method === "GET") {
+    const capabilities = dashboardMode === "hub"
+      ? createDashboardCapabilities({ runtime: "hub", sources: ["centralized"], defaultSource: "centralized", canRefresh: false })
+      : usageCollector.capabilities();
+    sendJson(response, 200, { ...capabilities, desktopHelper: process.env.CODEX_DESKTOP_HELPER === "1" && Boolean(process.connected) });
+    return true;
+  }
+  if (url.pathname === "/api/page" && request.method === "GET") {
+    const source = url.searchParams.get("source") || (dashboardMode === "hub" ? "centralized" : "local");
+    if (!["local", "centralized"].includes(source)) { sendJson(response, 400, { error: "Source invalide." }); return true; }
+    const raw = url.searchParams.get("query") || "";
+    if (raw.length > 64000) { sendJson(response, 400, { error: "Requête trop longue." }); return true; }
+    const force = url.searchParams.get("refresh") === "1";
+    const database = meshHub?.database || (source === 'local' ? usageCollector.store.database : null);
+    if (!meshHub && source === 'local') await usageCollector.store.getUsage(force);
+    const data = meshHub ? meshHub.metadata() : source === "centralized"
+      ? await usageCollector.centralizedUsage(force) : usageCollector.store.repository.metadata();
+    const metadata = pageMetadata(data);
+    const safeMetadata = { ...toPublicUsage(metadata), sessionCount: metadata.sessionCount, firstSessionAt: metadata.firstSessionAt };
+    let builder;
+    try { builder = createPageData(safeMetadata, raw); } catch { sendJson(response, 400, { error: "Filtres invalides." }); return true; }
+    const q = builder.query;
+    if (database && !['settings','detail','pricing'].includes(q.view) && q.end-q.start >= 86400000) {
+      await readSessionSlices(database,LOCAL_OWNER,Number.isFinite(q.start)?new Date(q.start).toISOString():'0001-01-01',Number.isFinite(q.end)?new Date(q.end).toISOString():'9999-12-31',false,null,()=>{},false,{aggregate:true,prepareOnly:true});
+    }
+    const etag = `"${createHash("sha256").update(JSON.stringify([data.generatedAt, data.analyzerVersion, data.revision, raw])).digest("hex")}"`;
+    response.setHeader("ETag", etag);
+    response.setHeader("Cache-Control", "private, no-cache");
+    if (matchesQuotaEtag(request.headers["if-none-match"], etag)) { send(response, 304, ""); return true; }
+    if (builder.query.view !== "settings") {
+      if (database) {
+        const nodes = new Map((data.nodes || []).map(node => [node.id,node]));
+        await readSessionSlices(database,LOCAL_OWNER,Number.isFinite(q.start)?new Date(q.start).toISOString():'0001-01-01',Number.isFinite(q.end)?new Date(q.end).toISOString():'9999-12-31',false,meshHub?q.id:null,row => {
+          let session = JSON.parse(row.snapshot_json);
+          if(meshHub) session = {...session,id:`${row.node_id}:${row.session_id}`,sourceSessionId:row.session_id,nodeId:row.node_id,nodeAlias:nodes.get(row.node_id)?.alias};
+          builder.add({...toPublicUsage({sessions:[session]}).sessions[0],calls:session.calls,turns:session.turns});
+        },false,{...(['conversations','detail','pricing'].includes(q.view)?{model:q.model,node:meshHub?q.node:null,folders:q.folders}:{}),sessionId:meshHub?null:q.id,aggregate:!['detail','pricing'].includes(q.view),buckets:q.buckets,prepareCache:false});
+        if(q.view==='conversations') {
+          const filters = await readFilters(database,LOCAL_OWNER);
+          for(const cwd of filters.folders) builder.add({cwd,models:filters.models,calls:[],turns:[]});
+        }
+        if (builder.weekly) await readSessionSlices(database,LOCAL_OWNER,new Date(builder.weekly.from).toISOString(),new Date(builder.weekly.to).toISOString(),false,null,row => {
+          let session = JSON.parse(row.snapshot_json);
+          if(meshHub) session = {...session,id:`${row.node_id}:${row.session_id}`,sourceSessionId:row.session_id,nodeId:row.node_id};
+          builder.addWeekly({...toPublicUsage({sessions:[session]}).sessions[0],calls:session.calls});
+        },false,{aggregate:true,prepareCache:false});
+      } else for (const session of data.sessions) {
+        const safeSession = toPublicUsage({ sessions: [session] }).sessions[0];
+        builder.add(safeSession);
+        builder.addWeekly(safeSession);
+      }
+    }
+    if(database && (meshHub?meshHub.metadata():usageCollector.store.repository.metadata()).revision !== data.revision) {
+      response.removeHeader('ETag');
+      response.setHeader('Cache-Control','private, no-store');
+      sendJson(response,200,{...builder.finish(),revision:null});return true;
+    }
+    sendJson(response, 200, { ...builder.finish(), revision: etag });
+    return true;
+  }
+  if (url.pathname === "/api/usage" && request.method === "GET") {
+    const requestedSource = url.searchParams.get("source") || (dashboardMode === "hub" ? "centralized" : "local");
+    if (!["local", "centralized"].includes(requestedSource)) {
+      sendJson(response, 400, { error: "Source de données invalide.", code: "invalid_usage_source" });
+      return true;
+    }
+    send(response, 200, await serializedUsage(url.searchParams.get("refresh") === "1", requestedSource));
+    return true;
+  }
+  if (url.pathname === "/api/quota" && request.method === "GET") {
+    const source = url.searchParams.get("source") || (dashboardMode === "hub" ? "centralized" : "local");
+    if (!["local", "centralized"].includes(source)) {
+      sendJson(response, 400, { error: "Source de données invalide." });
+      return true;
+    }
+    const force = url.searchParams.get("refresh") === "1";
+    const database = meshHub?.database || (source === 'local' ? usageCollector.store.database : null);
+    if (!meshHub && source === 'local') await usageCollector.store.getUsage(force);
+    const data = meshHub ? meshHub.metadata() : source === "centralized"
+      ? await usageCollector.centralizedUsage(force) : usageCollector.store.repository.metadata();
+    const metadata = quotaMetadata(data);
+    // Keep the existing public privacy contract, including for raw local snapshots.
+    const { toPublicUsage } = await import("./src/public-usage.mjs");
+    const safe = { ...toPublicUsage(metadata), sessionCount: metadata.sessionCount, quotaOnly: true };
+    safe.weeklyQuotaHistory = normalizeQuotaPeriods(safe);
+    safe.weeklyQuota = safe.weeklyQuotaHistory[0] || safe.weeklyQuota;
+    const revision = createHash("sha256").update(JSON.stringify([safe,data.revision])).digest("hex");
+    safe.revision = revision;
+    const etag = `"${revision}:${url.searchParams.get("period") || "current"}"`;
+    response.setHeader("ETag", etag);
+    if (!force && matchesQuotaEtag(request.headers["if-none-match"], etag)) { send(response, 304, ""); return true; }
+    if (url.searchParams.get("detail") !== "1") { sendJson(response, 200, safe); return true; }
+    const detail = createQuotaDetail(safe, url.searchParams.get("period"));
+    if (database) {
+      await readQuotaCalls(database,LOCAL_OWNER,new Date(detail.callsFrom).toISOString(),new Date(detail.sampleTo).toISOString(),(call,nodeId) => {
+        detail.addRecent(call,meshHub?nodeId:null);
+      });
+      await Promise.all([
+        readQuotaCalibration(database,LOCAL_OWNER,detail.calibrationWindows,meshHub?detail.calibrationNodeId:null,(call,nodeId)=>detail.addCalibration(call,meshHub?nodeId:null)),
+        readQuotaSamples(database,LOCAL_OWNER,detail.sampleFrom,detail.callsFrom-1,detail.sampleAnchor,meshHub?detail.calibrationNodeId:null,(call,nodeId)=>detail.addHistoricalSample(call,meshHub?nodeId:null)),
+      ]);
+    }
+    else for (const session of data.sessions || []) for (const call of session.calls || []) {
+      const time = Date.parse(call.timestamp);
+      if (!Number.isFinite(time) || (time >= detail.from && time <= detail.to)) {
+        detail.add({ timestamp: call.timestamp, model: call.model, effort: call.effort, serviceTier: call.serviceTier, usage: call.usage }, session.nodeId);
+      }
+    }
+    if(database && (meshHub?meshHub.metadata():usageCollector.store.repository.metadata()).revision !== data.revision) {
+      response.removeHeader('ETag');
+      response.setHeader('Cache-Control','private, no-store');
+      sendJson(response,200,{...detail.finish(),revision:null});return true;
+    }
+    sendJson(response, 200, detail.finish());
+    return true;
+  }
+  if (url.pathname === "/api/centralized-usage" && request.method === "GET") {
+    send(response, 200, await serializedUsage(url.searchParams.get("refresh") === "1", "centralized"));
+    return true;
+  }
+  if (url.pathname === "/api/health" && request.method === "GET") {
+    const status = healthStatus();
+    sendJson(response, status.ready ? 200 : 503, status);
+    return true;
+  }
+  if (!meshHub || !url.pathname.startsWith("/api/mesh/")) return false;
+
+  if (url.pathname === "/api/mesh/enroll" && request.method === "POST") {
+    sendJson(response, 201, await meshHub.enroll(await readJsonBody(request)));
+    return true;
+  }
+  if (url.pathname === "/api/mesh/ingest" && request.method === "POST") {
+    sendJson(response, 202, await meshHub.ingest(await readJsonBody(request)));
+    return true;
+  }
+  if (url.pathname === "/api/mesh/usage" && request.method === "POST") {
+    sendJson(response, 200, await meshHub.readUsage(await readJsonBody(request)));
+    return true;
+  }
+  if (url.pathname === "/api/mesh/enrollments" && request.method === "POST") {
+    if (!adminAuthorized(request)) {
+      sendJson(response, 401, { error: "Autorisation administrateur requise.", code: "mesh_admin_required" });
+      return true;
+    }
+    sendJson(response, 201, await meshHub.createEnrollment());
+    return true;
+  }
+  const nodeMatch = url.pathname.match(/^\/api\/mesh\/nodes\/([^/]+)$/);
+  if (nodeMatch && request.method === "DELETE") {
+    if (!adminAuthorized(request)) {
+      sendJson(response, 401, { error: "Autorisation administrateur requise.", code: "mesh_admin_required" });
+      return true;
+    }
+    sendJson(response, 200, await meshHub.revokeNode(decodeURIComponent(nodeMatch[1])));
+    return true;
+  }
+  return false;
+}
+
+const server = createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url, "http://localhost");
+    if (await routeApi(request, response, url)) return;
+    if (!["GET", "HEAD"].includes(request.method)) {
+      send(response, 405, "Method not allowed", "text/plain; charset=utf-8");
+      return;
+    }
+    const relative = url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, "");
+    const filePath = path.resolve(publicDir, relative);
+    if (!filePath.startsWith(`${publicDir}${path.sep}`) && filePath !== path.join(publicDir, "index.html")) {
+      send(response, 403, "Forbidden", "text/plain; charset=utf-8");
+      return;
+    }
+    const body = await readFile(filePath);
+    send(response, 200, request.method === "HEAD" ? "" : body, mime[path.extname(filePath)] || "application/octet-stream");
+  } catch (error) {
+    const status = error.status || (error.code === "ENOENT" ? 404 : 500);
+    const message = status === 404 ? "Not found" : error.message;
+    sendJson(response, status, { error: message, code: error.code || "server_error" });
+  }
+});
+
+server.once("error", (error) => {
+  usageCollector?.stop();
+  if (error.code === "EADDRINUSE") {
+    console.error(`${errorHeading(cliText("dashboardAddressOccupied"))}\n\n${cliText("dashboardAddressInUse", dashboardUrl)}`);
+  } else console.error(cliText("dashboardStartFailed", error.message));
+  process.exitCode = 1;
+});
+
+server.listen(port, host, () => {
+  usageCollector?.start();
+  console.log(cliText("dashboardReady", dashboardUrl));
+  if (dashboardMode === "hub") console.log(cliText("meshHub"));
+  else console.log(usageCollector.meshAgent ? cliText("meshEnabled") : cliText("localOnly"));
+});
+
+function shutdown() {
+  usageCollector?.stop();
+  server.close(async () => {
+    try { await usageCollector?.close(); meshHub?.close(); process.exit(0); }
+    catch (error) { console.error(error.message); process.exit(1); }
+  });
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+// The optional helper owns this process; a crash or forced exit must not leave
+// its collector behind. Independent browser/agent processes have no IPC parent.
+if (process.env.CODEX_DESKTOP_HELPER === "1" && process.connected) process.once("disconnect", shutdown);

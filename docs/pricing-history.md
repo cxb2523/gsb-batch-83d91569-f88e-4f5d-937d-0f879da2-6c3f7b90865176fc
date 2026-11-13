@@ -1,0 +1,114 @@
+# Dated OpenAI pricing
+
+Research window: **2025-08-07 to 2026-10-09**, covering more than twelve months.
+Catalog: `public/pricing-catalog.js`, version `2026-10-09.1`.
+Last source review: 2026-10-09 (Europe/Paris). Next routine review: 2026-11-09.
+
+## What the dashboard measures
+
+The dollar total is the estimated **API equivalent of observed Codex token usage**, not an invoice or the price of a subscription. Codex credits use an independent, dated credit card. Observed quota percentages remain observations; neither pricing simulation changes them.
+
+Both the local application and hosted Site use the same public catalog and calculators. The collector sends model, consumption timestamp, service tier and token counters. It does not send calculated prices. A later import uses the original consumption date, never the import, synchronization or deployment date.
+
+Historical mode selects `effectiveFrom <= call.timestamp < effectiveTo`. A new price period does not rewrite an earlier period. Example: one million Sol output tokens on August 20 costs $30; another million on August 22 costs $20; together they remain $50 after the price cut.
+
+## Research ledger
+
+Standard text-token amounts below are USD per million **input / cached input / output**. Launching a different model is distinguished from changing the price of an existing model. The review covered the API changelog throughout the window and checked the dated announcements against the current rate card and individual model pages.
+
+| Date | Event / model | Amounts or change | Evidence |
+| --- | --- | --- | --- |
+| 2025-08-07 | GPT-5, mini, nano launch; baseline before the twelve-month window | GPT-5: 1.25 / 0.125 / 10; mini: 0.25 / 0.025 / 2; nano: 0.05 / 0.005 / 0.40 | [Launch](https://openai.com/index/introducing-gpt-5-for-developers/), [API card](https://developers.openai.com/api/docs/pricing) |
+| 2025-09-23 | GPT-5-Codex API launch | 1.25 / 0.125 / 10 | [Dated API changelog](https://developers.openai.com/api/docs/changelog), [model card](https://developers.openai.com/api/docs/models/gpt-5-codex); reconstructed historical rate |
+| 2025-10-06 | GPT-5 Pro API launch | 15 / unavailable / 120 | [Changelog](https://developers.openai.com/api/docs/changelog), [December price comparison](https://openai.com/index/introducing-gpt-5-2/) |
+| 2025-11-13 | GPT-5.1 and Codex variants | GPT-5.1 keeps GPT-5 rates; Codex: 1.25 / 0.125 / 10; Codex mini: 0.25 / 0.025 / 2 | [Announcement](https://openai.com/index/gpt-5-1-for-developers/), [mini card](https://developers.openai.com/api/docs/models/gpt-5.1-codex-mini); variant history reconstructed |
+| 2025-12-04 | GPT-5.1-Codex-Max API launch | 1.25 / 0.125 / 10 | [Changelog](https://developers.openai.com/api/docs/changelog), [model card](https://developers.openai.com/api/docs/models/gpt-5.1-codex-max); reconstructed |
+| 2025-12-11 | GPT-5.2 and Pro | 1.75 / 0.175 / 14; Pro: 21 / unavailable / 168 | [Dated announcement with price table](https://openai.com/index/introducing-gpt-5-2/) |
+| 2026-01-14 | GPT-5.2-Codex API launch | 1.75 / 0.175 / 14 | [Changelog](https://developers.openai.com/api/docs/changelog), [model card](https://developers.openai.com/api/docs/models/gpt-5.2-codex); reconstructed |
+| 2026-02-24 | GPT-5.3-Codex API launch | 1.75 / 0.175 / 14 | [Changelog](https://developers.openai.com/api/docs/changelog), [API card](https://developers.openai.com/api/docs/pricing); reconstructed |
+| 2026-03-05 | GPT-5.4 and Pro | 2.50 / 0.25 / 15; Pro: 30 / unavailable / 180 | [Announcement and price table](https://openai.com/index/introducing-gpt-5-4/) |
+| 2026-03-17 | GPT-5.4 mini and nano | mini: 0.75 / 0.075 / 4.50; nano: 0.20 / 0.02 / 1.25 | [Changelog](https://developers.openai.com/api/docs/changelog), [API card](https://developers.openai.com/api/docs/pricing) |
+| 2026-04-24 | GPT-5.5 and Pro API launch | 5 / 0.50 / 30; Pro: 30 / unavailable / 180; GPT-5.5 Priority is 2.5x | [Announcement](https://openai.com/index/introducing-gpt-5-5/), [API launch date](https://developers.openai.com/api/docs/changelog) |
+| 2026-07-09 | GPT-5.6 family | Sol: 5 / 0.50 / 30; Terra: 2.50 / 0.25 / 15; Luna: 1 / 0.10 / 6 | [Original launch prices and 90% cache-read discount](https://openai.com/index/gpt-5-6/) |
+| 2026-07-30 | **Existing-model price cuts** | Terra becomes 2 / 0.20 / 12 (-20%); Luna becomes 0.20 / 0.02 / 1.20 (-80%); subscription credit consumption also decreases | [Dated announcement](https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/) |
+| 2026-07-30 | Priority renamed Fast | `priority` remains compatible; GPT-5.6 API Fast is 2x Standard | [Announcement](https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/), [API changelog](https://developers.openai.com/api/docs/changelog) |
+| 2026-08-05 | GPT-5.6 Fast long context | Requests above 272K input tokens become supported in Fast | [Dated API changelog](https://developers.openai.com/api/docs/changelog) |
+| 2026-08-21 | **Sol promotional price cut** | 4 / 0.40 / 20; credits become 100 / 10 / 500 | [Dated changelog](https://developers.openai.com/api/docs/changelog), [API and credit reduction notice](https://openai.com/index/gpt-5-6/), [credit card](https://learn.chatgpt.com/docs/pricing) |
+| 2026-09-03 | GPT-6 Astra | 10 / 1 / 50; API Fast 2x. Credits: 250 / 25 / 1,250; Codex Fast 2.5x | [Launch date](https://developers.openai.com/api/docs/changelog), [Astra rules](https://developers.openai.com/api/docs/models/gpt-6-astra), [API prices](https://developers.openai.com/api/docs/pricing), [credits](https://learn.chatgpt.com/docs/pricing) |
+| 2026-09-22 | GPT-6 Sol and Luna | API input / cached / output: Sol $2 / $0.20 / $10; Luna $0.10 / $0.01 / $0.50. Codex credits: Sol 50 / 5 / 250; Luna 2.5 / 0.25 / 12.5. API Fast is 2x; Codex Fast is 2.5x. API cache writes cost 1.25x input; Codex has no separate cache-write charge. | [Launch and API price change](https://openai.com/index/introducing-gpt-6-sol-and-luna/), [API rate card](https://developers.openai.com/api/docs/pricing), [Sol model card](https://developers.openai.com/api/docs/models/gpt-6-sol), [Luna model card](https://developers.openai.com/api/docs/models/gpt-6-luna), [Codex credit rates](https://learn.chatgpt.com/docs/pricing), [Codex Fast multiplier](https://learn.chatgpt.com/docs/agent-configuration/speed) |
+
+The changelog also covers image, audio, video, tools and storage products. Examples in this window include the December 2025 image-model release, April 2026 image-model release and June 2026 container billing granularity change. Their counters/units are not present in this dashboard's token observations, so they are not silently mixed into text-token estimates. This is a sourced history for supported text/Codex models, not a claim to reconstruct every OpenAI product's invoices or every account-specific contract.
+
+### GPT-6.1 Sol — September 29, 2026
+
+The [API changelog](https://developers.openai.com/api/docs/changelog) dates `gpt-6.1-sol` to September 29. It is a distinct model, not an alias or a price change for `gpt-6-sol`. The [API card](https://developers.openai.com/api/docs/pricing) and [model card](https://developers.openai.com/api/docs/models/gpt-6.1-sol) give $2 / $0.10 / $10 per million input / cached input / output tokens, with $2.50 cache writes. Above 272K input tokens, the whole request uses 2x input/cache/write and 1.5x output; Fast stacks another 2x.
+
+The [Codex card](https://learn.chatgpt.com/docs/pricing#token-rates) gives 50 / 2.5 / 250 credits per million tokens, without a separate cache-write charge. The [speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed) distinguishes purchased-credit/Enterprise Fast billing (2x) from included-subscription consumption (2.5x). Sol 6.1 credit totals and exports use 2x; quota capacity calibration and forecasts use 2.5x. This was initially scoped to Sol 6.1; the October 9 review below corrects the older models as well. Historical Fast observation gates remain September 23 even when the catalog review date advances.
+
+Rates are reviewed on September 30 and applied from the day-only launch boundary at 00:00 UTC on September 29; launch-day calls remain estimated. The date-suffixed ID is recognized, while undocumented moving aliases, private suffixes and tiers outside their independently documented coverage remain unrated.
+
+### October 9 review: service tiers and corrected credit accounting
+
+The [API changelog](https://developers.openai.com/api/docs/changelog) dates Astra Ultrafast to **September 29**, and Sol 6.1 Ultrafast to **October 8**. The [API rate card](https://developers.openai.com/api/docs/pricing) gives 6x Standard for both, including cached reads, cache writes and output. The full-request long-context factors still stack independently. Ultrafast is a `service_tier`, not another model ID. GPT-5.6 Sol's limited preview has no applicable public Ultrafast card in this review and remains unrated.
+
+The [Codex speed rules](https://learn.chatgpt.com/docs/agent-configuration/speed) and [credit card](https://learn.chatgpt.com/docs/pricing) distinguish Fast **2x purchased credits / 2.5x included usage** and Ultrafast **6x purchased credits / 8x included usage**. The prior catalog mixed the first pair for older models. This release corrects that assumption across supported Fast periods without changing base token rates or inventing a new price-cut date. Speed factors before the September 30 direct review remain reconstructed and increment the estimated-call count. For example, the former Astra Fast 97.5-credit estimate becomes 78 purchased credits for the same 39 Standard credits, while subscription calibration still uses 97.5. Old exported reports retain their original embedded rates and remain reproducible.
+
+Astra Ultrafast credit eligibility starts conservatively at the September 30 direct observation; its exact earlier Codex rollout hour was not established. Sol 6.1 credit eligibility uses the [October 8 launch](https://learn.chatgpt.com/docs/whats-new/october-5-9-2026). Launch/boundary days remain estimated. Ultrafast and Fast retain distinct call counts, premiums, profile badges and export buckets, including in SQL aggregates and quota forecasts.
+
+Batch/Flex API rates are supported only for the exact proportional GPT-6 and GPT-5.6 cards verified on October 9, at **0.5x**, including supported long context and cache writes. Earlier eligibility remains unknown and unrated. Other models, cards with rounding differences, and Codex credit/allowance usage do not inherit this discount.
+
+The September 8 API announcement explicitly says GPT-Rosalind Research billing begins **October 5**: its API period is free before that boundary, then $5 / $0.50 / $25. Its 125 / 12.5 / 625 credit card is observed from October 9; no earlier credit-free period is inferred. `chat-latest` has its own observed $5 / $0.50 / $30 API card from October 9 and is never aliased to its moving underlying model. Both have no undocumented speed or cache-write premiums.
+
+The GPT-6 Standard rates are unchanged. API usage-tier names (Build/Launch/Grow), plan availability, GPT-5.5's forthcoming Codex retirement and image-encoding fixes do not alter token charges. Voice duration, tools, images, regional uplifts and negotiated rates require measurements not present in these counters; this release does not invent them.
+
+### October 27 review: GPT-6.1 Terra
+
+The [API changelog](https://developers.openai.com/api/docs/changelog) dates the release to October 26. Its [model card](https://developers.openai.com/api/docs/models/gpt-6.1-terra) and [API rate card](https://developers.openai.com/api/docs/pricing) give $1 / $0.05 / $5 per million input / cached input / output, $1.25 per million 30-minute cache writes, Fast at 2x, Batch and Flex at 0.5x, and the 272,000-token long-context rule. The [Codex rate card](https://learn.chatgpt.com/docs/pricing#token-rates) was observed on October 27 at 25 / 1.25 / 125 credits; Fast uses 2x purchased credits and 2.5x included usage. Credit coverage starts on the observation date. Ultrafast remains unsupported for Terra: the [published API guide](https://developers.openai.com/api/docs/guides/ultrafast-mode) lists Astra and Sol 6.1 only. Launch-day estimates use the existing UTC day convention.
+
+The API introduced optional 12-hour cache retention on October 20, priced at 2.5x input. The collector does not record retention duration, so its existing 1.25x cache-write estimate reflects the 30-minute card and cannot establish a 12-hour charge.
+
+## Evidence, precision and missing history
+
+- `documented`: dated announcement plus published amounts/rules. Base periods continue until the next documented change. This cannot prove the absence of an unannounced/account-specific change.
+- `reconstructed`: a dated model launch combined with an individual price card observed later; not a contemporaneous archived invoice. These calls remain visibly estimated. The model-specific source is retained.
+- `observed`: a rate card known at a particular observation date. The previous application's credit table was explicitly checked on August 11, 2026; see the [retained source at the baseline commit](https://github.com/capisoft-lib/codex_usage/blob/446565d62e1bebfa7be06f48374bf52115706864/public/usage-pricing.js). We start those credit periods there. We do not backdate today's credit card to a model launch or infer credits from API dollars.
+- Earlier credit rates, preview access before API availability, unknown model aliases, missing timestamps and unsupported service tiers stay **unrated**, excluded from monetary sums. Entirely unrated totals display an em dash; partial totals have an asterisk and an excluded-call count. This is not zero-cost usage.
+- Published dates rarely specify an exact rollout hour. Day-only periods use **00:00 UTC** as an explicit convention, regardless of browser timezone. Calls on the change day are marked estimated. Global or regional rollout timing can differ.
+- Generic prefix matching is forbidden: `gpt-6-astra-private` must not inherit Astra's official price. Explicit aliases and date-suffixed model IDs are supported. The `gpt-5.6` alias maps to Sol as documented in the July 9 changelog. An unrecognized moving alias remains unrated.
+- Historical Fast availability is intentionally conservative. Where only the current API Fast card was verified, the catalog does not invent an earlier start date. GPT-5.5 Priority is supported from its API launch announcement; GPT-5.6 Fast and its long-context eligibility have separate dated gates. Fast long context for GPT-5.4/5.5 has no published applicable price in the reviewed current table.
+- Sol's promotion is guaranteed **at least through November 21**, not necessarily ending then. `promotionMinimumUntil` / `reviewAfter` are review reminders, not price-expiration dates. No automatic restoration to the old rate occurs.
+
+## GPT-6 and accounting boundaries
+
+For GPT-6 Astra, Sol, Luna and GPT-6.1 Sol API calls, prompts **strictly above 272,000 input tokens** apply 2x to input/cache and 1.5x to output for the whole request. API Fast applies another 2x; supported Ultrafast applies 6x. These API context factors are not copied into the credit calculator. Credits and subscription quota weighting follow their distinct factors above.
+
+Input includes cached reads and cache writes, so ordinary fresh input is `inputTokens - cachedInputTokens - cacheWriteInputTokens`. The [official cache cost example](https://developers.openai.com/api/docs/guides/prompt-caching) confirms this accounting. Reasoning output is already part of output tokens and is not charged twice. Invalid/nonfinite counters and cache exceeding input are reported rather than coerced into a plausible amount. A missing published cached rate is `null`, not a free cache price.
+
+GPT-5.6 and Astra publish cache-write rates at 1.25x uncached input. Analyzer v8 preserves the optional `cache_write_input_tokens` observation as `cacheWriteInputTokens`. Measured writes are subtracted from ordinary input and charged once at the documented write rate, including API Fast/long-context factors. Older calls without this field remain distinguishable from observed zero writes and carry an unobserved-write count and estimated coverage when uncached input could contain writes. Tool fees, unobserved cache-write surcharges, regional processing uplifts, negotiated rates and other unobserved details are excluded or explicitly unsupported. Estimates are not exact invoices.
+
+## UI, migration and reproducibility
+
+- **Historical** is the default and uses each call's timestamp.
+- **Current simulation** uses the catalog at the recorded `asOf` time. It does not alter raw calls or historical credit totals.
+- **Custom simulation** applies explicit browser-local prices, including optional reasoning overrides. They are not represented as official rates. Untouched effort rows inherit model edits; explicit effort overrides remain independent.
+- Old browser settings are preserved for custom simulation but never silently replace dated official rates. Reset restores the official historical mode. Browser storage remains optional.
+- The pricing dialog exposes the catalog, effective periods, evidence and official source links. It shows the version/verification date and an overdue-review notice.
+- **Export calculation** exports the applied (saved) mode, selection interval, settings, aggregate results, token buckets with applied rates, catalog version and full used rate entries. The buckets reproduce the amount without raw calls, including separate Fast/long-context groups and distinct custom prices for aliases. No raw session, prompt, title or filesystem path is exported. The exported rate entries preserve the evidence even if a later catalog corrects an estimate.
+
+The parser and Mesh envelope are model-agnostic. Astra needs no new model allowlist or re-enrollment. Live inspection found that the previous collector already preserved model/timestamp/tier but discarded the newly observable cache-write counter. Analyzer v8 triggers a reparse of existing source files and transmits the optional counter. Root and hosted validators accept both old and new agents. Deploy the receiving Site first, then restart/update the local reporting agent while preserving its identity. Other machines continue to sync without the optional counter until their agent is updated.
+
+Analyzer v9 also recovers weekly quota observations from retained session files. Optional `observations` arrays contain only timestamps and quota percentages within each period. Compaction preserves the beginning and end of plateaus and every percentage change, including decreases. Both Mesh receivers validate this optional field; existing JSON storage needs no migration. Old agents remain compatible. Deploy receivers before updating agents; identity and enrollment stay unchanged.
+
+The past quota curve uses those recorded percentages independently of token prices. Lines interpolate between observations; no observation is invented before the first point. For the current period, the last known percentage is carried flat to now (bounded by the reset) to join the projection continuously; the observation marker keeps its original timestamp. This display extension does not create a stored measurement. Recorded history remains visible even when future projection cannot be calibrated. When an old agent supplies no observations, the fallback reconstructs cumulative priced calls normalized to the observed percentage and always labels that history estimated.
+
+Forecasts remain separate: they reject incompletely priced calibration periods. Older unrated calls trim EMA history to contiguous priced hours after the latest gap. A partial current week can still project using independent complete-period capacity and recent priced history. Partial totals are never used to infer current capacity.
+
+## Maintaining the catalog
+
+1. Review the [API changelog](https://developers.openai.com/api/docs/changelog), [API prices](https://developers.openai.com/api/docs/pricing), [Codex credits](https://learn.chatgpt.com/docs/pricing) and dated announcements. Record **effective date and observation date separately**. Check input, cache, output, Fast, long-context thresholds/eligibility and promotions independently.
+2. Add a rate period to `public/pricing-catalog.js`; keep older periods. Increment the catalog version and update this ledger, the verification date and next review date. Period ends are derived from the next start to avoid contradictory overlapping edits.
+3. For a correction to an old estimate, document the changed period, previous assumption, new evidence and affected results in the PR. Never present a correction as a new price cut. Existing exported reports remain reproducible from their included rate entries.
+4. Run pricing boundary/import/migration tests and the full root/hosted checks. Sync the shared dashboard bundle, commit and review the diff. The catalog is public data; private usage and credentials must never be committed.
+5. Distribute the validated catalog with the application and deploy the hosted bundle separately. Runtime calculations do not scrape OpenAI or fetch mutable `main` content. They remain available offline.
+
+Useful checks: `node --test test/dated-pricing.test.mjs test/api-pricing.test.mjs test/usage-pricing.test.mjs`, `npm run check`, and `npm test --prefix sites-hub` / `npm run lint --prefix sites-hub`.

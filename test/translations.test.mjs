@@ -1,0 +1,82 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import vm from "node:vm";
+import { ADDITIONAL_I18N, LOCALE_TAGS, THEME_I18N, TIME_FORMAT_I18N, GROUP_I18N, MIGRATION_I18N, QUOTA_CHANGE_I18N, CREDIT_BALANCE_I18N, resolveLanguage } from "../public/translations.js";
+import { PRICING_I18N } from "../public/pricing-ui.js";
+import { FORECAST_GOALS_I18N } from "../public/forecast-goals.js";
+
+const expectedLanguages = ["fr", "en", "de", "es", "it", "pt", "ja", "ru", "zh"];
+const dynamicKeys = [
+  "period.todayLabel",
+  "period.7dLabel",
+  "period.30dLabel",
+  "period.12mLabel",
+  "period.allLabel",
+  "effort.low",
+  "effort.medium",
+  "effort.high",
+  "effort.xhigh",
+  "effort.minimal",
+  "effort.max",
+  "effort.ultra",
+  "theme.green",
+  "theme.blue",
+  "theme.violet",
+  "theme.amber",
+];
+
+function messageKeysIn(source) {
+  return [...source.matchAll(/\bt\(\s*["']([^"']+)["']/g)].map((match) => match[1]);
+}
+
+function attributeKeysIn(source) {
+  return [...source.matchAll(/data-i18n(?:-placeholder|-aria)?="([^"]+)"/g)].map((match) => match[1]);
+}
+
+function placeholdersIn(message) {
+  return [...String(message).matchAll(/\{\w+\}/g)].map((match) => match[0]).sort();
+}
+
+test("exposes the nine supported languages in the selector and locale map", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const optionLanguages = [...html.matchAll(/<option value="([a-z]{2})">[A-Z]{2}<\/option>/g)].map((match) => match[1]);
+
+  assert.deepEqual(optionLanguages, expectedLanguages);
+  assert.deepEqual(Object.keys(LOCALE_TAGS), expectedLanguages);
+  assert.deepEqual(Object.keys(ADDITIONAL_I18N), expectedLanguages.slice(3));
+});
+
+test("resolves exact, regional, and browser language preferences", () => {
+  assert.equal(resolveLanguage("es-MX"), "es");
+  assert.equal(resolveLanguage("pt_BR"), "pt");
+  assert.equal(resolveLanguage("zh-Hans-CN"), "zh");
+  assert.equal(resolveLanguage(["ko-KR", "ja-JP"]), "ja");
+  assert.equal(resolveLanguage("ru"), "ru");
+  assert.equal(resolveLanguage("unknown"), "fr");
+});
+
+test("fully translates every label used by the runtime", async () => {
+  const [app, html, goalsSource] = await Promise.all([
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/forecast-goals.js", import.meta.url), "utf8"),
+  ]);
+  const requiredKeys = [...new Set([...messageKeysIn(app), ...attributeKeysIn(html), ...messageKeysIn(goalsSource), ...Object.keys(FORECAST_GOALS_I18N.en), ...Object.keys(CREDIT_BALANCE_I18N.en), ...dynamicKeys])].sort();
+  const englishBody = app.match(/\r?\n  en: \{([\s\S]*?)\r?\n  \},\r?\n  de:/)?.[1];
+  assert.ok(englishBody, "English reference catalogue not found");
+  const allocationBody = app.match(/const ALLOCATION_I18N = (\{[\s\S]*?\r?\n\});/)?.[1];
+  assert.ok(allocationBody, "Project allocation catalogue not found");
+  const allocation = vm.runInNewContext(`(${allocationBody})`);
+  for (const language of expectedLanguages) assert.ok(allocation[language], `${language} needs allocation translations`);
+  const english = { ...vm.runInNewContext(`({${englishBody}\n})`), ...PRICING_I18N.en, ...THEME_I18N.en, ...TIME_FORMAT_I18N.en, ...MIGRATION_I18N.en, ...QUOTA_CHANGE_I18N.en, ...GROUP_I18N.en, ...allocation.en, ...FORECAST_GOALS_I18N.en, ...CREDIT_BALANCE_I18N.en };
+
+  for (const [language, baseMessages] of Object.entries(ADDITIONAL_I18N)) {
+    const messages = { ...baseMessages, ...PRICING_I18N[language], ...THEME_I18N[language], ...TIME_FORMAT_I18N[language], ...MIGRATION_I18N[language], ...QUOTA_CHANGE_I18N[language], ...GROUP_I18N[language], ...allocation[language], ...FORECAST_GOALS_I18N[language], ...CREDIT_BALANCE_I18N[language] };
+    const missing = requiredKeys.filter((key) => !Object.hasOwn(messages, key));
+    assert.deepEqual(missing, [], `${language} is missing runtime translations`);
+    for (const key of requiredKeys) {
+      assert.deepEqual(placeholdersIn(messages[key]), placeholdersIn(english[key]), `${language}.${key} must preserve placeholders`);
+    }
+  }
+});

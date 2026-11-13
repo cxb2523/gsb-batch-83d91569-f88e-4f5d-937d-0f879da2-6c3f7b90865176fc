@@ -1,0 +1,68 @@
+import { storageErrorResponse } from '../../../lib/storage-health.mjs';
+import { readSessionSlices, readFilters, StorageMigrationPending } from '../../../lib/session-reader';
+import { requireViewer } from '../../../lib/auth';
+import { json } from '../../../lib/mesh';
+import { db } from '../../../lib/db';
+import { quotaMetadataForOwner } from '../../../lib/usage';
+import { createPageData } from '../../../public/dashboard/page-data.js';
+import { matchesQuotaEtag } from '../../../public/dashboard/quota-periods.js';
+
+export async function GET(request: Request) {
+  try {
+    const owner = requireViewer(request).id;
+    const params = new URL(request.url).searchParams;
+    if ((params.get('source') || 'centralized') !== 'centralized') return json({error:'Source invalide.'},400);
+    const raw = params.get('query') || '';
+    if (raw.length > 64000) return json({error:'Requête trop longue.'},400);
+    let parsed;
+    try { parsed=JSON.parse(raw); } catch { return json({error:'Filtres invalides.'},400); }
+    const metadata = await quotaMetadataForOwner(owner, parsed?.view === 'overview' && Date.parse(parsed.start) === 0, false);
+    let builder;
+    try { builder = createPageData(metadata, raw); } catch { return json({error:'Filtres invalides.'},400); }
+    if (builder.query.view === 'project-groups') {
+      // Read only identity fields in one owner-scoped snapshot; no call history,
+      // rollup warming or revision retry is needed for an editable catalogue.
+      const catalogue = await db().prepare(`SELECT s.node_id AS nodeId, s.session_id AS sourceSessionId,
+        json_extract(s.snapshot_json,'$.cwd') AS cwd,
+        json_extract(s.snapshot_json,'$.projectName') AS projectName,
+        json_extract(s.snapshot_json,'$.projectGitHubUrl') AS projectGitHubUrl
+        FROM mesh_sessions s JOIN mesh_nodes n ON n.id=s.node_id
+        WHERE n.owner_id=? AND n.revoked_at IS NULL`).bind(owner).all();
+      for (const row of catalogue.results || []) builder.add(row);
+      return Response.json(builder.finish(), { headers: { 'Cache-Control': 'private, no-store' } });
+    }
+    const q = builder.query;
+    // Continue warming even when the client's unchanged payload receives 304.
+    if (!['settings','detail','pricing'].includes(q.view) && q.end-q.start >= 86400000) {
+      await readSessionSlices(db(),owner,Number.isFinite(q.start)?new Date(q.start).toISOString():'0001-01-01',Number.isFinite(q.end)?new Date(q.end).toISOString():'9999-12-31',false,null,()=>{},false,{aggregate:true,prepareOnly:true});
+    }
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(metadata.revision + raw));
+    const etag = `"${Array.from(new Uint8Array(hash), b=>b.toString(16).padStart(2,'0')).join('')}"`;
+    const headers = {ETag:etag, 'Cache-Control':'private, no-cache', Vary:'Cookie, OAI-Authenticated-User-Id'};
+    if(matchesQuotaEtag(request.headers.get('if-none-match'),etag)) return new Response(null,{status:304,headers});
+    const nodes = new Map(metadata.nodes.filter(n=>!n.revokedAt).map(n=>[n.id,n]));
+    if(q.view !== 'settings') {
+      await readSessionSlices(db(),owner,Number.isFinite(q.start)?new Date(q.start).toISOString():'0001-01-01',Number.isFinite(q.end)?new Date(q.end).toISOString():'9999-12-31',false,q.id || null,(row: {node_id:string;session_id:string;snapshot_json:string})=>{
+        builder.add({...JSON.parse(row.snapshot_json),id:`${row.node_id}:${row.session_id}`,sourceSessionId:row.session_id,nodeId:row.node_id,nodeAlias:nodes.get(row.node_id)?.alias});
+      },false,{...(['conversations','detail','pricing'].includes(q.view)?{model:q.model,node:q.node,folders:q.folders}:{}),aggregate:!['detail','pricing'].includes(q.view),buckets:q.buckets,prepareCache:false});
+      if (builder.weekly) await readSessionSlices(db(),owner,new Date(builder.weekly.from).toISOString(),new Date(builder.weekly.to).toISOString(),false,null,(row: {snapshot_json:string;node_id:string;session_id:string})=>{
+        builder.addWeekly({...JSON.parse(row.snapshot_json),id:`${row.node_id}:${row.session_id}`,sourceSessionId:row.session_id,nodeId:row.node_id});
+      },false,{aggregate:true,prepareCache:false});
+      if(q.view === 'conversations') {
+        const filters=await readFilters(db(),owner);
+        for(const cwd of filters.folders) builder.add({cwd,models:filters.models,calls:[],turns:[]});
+      }
+      // Ingestion and quota updates can advance the revision during a long
+      // history read. The completed summaries remain useful, but must never
+      // be cached as an exact representation of the starting revision.
+      if((await quotaMetadataForOwner(owner, false, false)).revision !== metadata.revision) {
+        return Response.json(builder.finish(), {headers: {'Cache-Control':'private, no-store', Vary:headers.Vary}});
+      }
+    }
+    return Response.json(builder.finish(),{headers});
+  } catch(error) {
+    if(error instanceof Response) return error;
+    if(error instanceof StorageMigrationPending) return json({error:error.message,code:error.code},503);
+    return storageErrorResponse(error,'/api/page');
+  }
+}
