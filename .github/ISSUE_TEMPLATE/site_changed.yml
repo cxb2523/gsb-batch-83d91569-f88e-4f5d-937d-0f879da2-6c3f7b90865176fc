@@ -1,0 +1,63 @@
+name: Site changed / selectors broke
+description: Amazon changed something and the parser no longer matches.
+labels: ["site-change"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most common way a scraper stops working, and it is worth its
+        own report because the fix is different from a code bug: something on
+        amazon.com moved.
+
+        Useful to know before filing: Amazon publishes no JSON-LD, so the
+        parser reads the page kind's own data-attribute anchor
+        (`[data-asin]` on search, `[id^="p13n-asin-index-"]` on best
+        sellers, `[data-hook="reviewContainer"]` on reviews) and falls back
+        to the `/dp/{ASIN}` URL pattern, logging a warning when it does.
+        Which one broke narrows the fix a lot.
+
+  - type: dropdown
+    id: what_broke
+    attributes:
+      label: What stopped matching
+      options:
+        - Products (0 rows on a page that visibly has products)
+        - A specific field is null or wrong (price, brand, sku, image, URL)
+        - Pagination stops early or repeats a page
+        - The captcha detector finds nothing on a page that has one
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: URL
+      description: The exact listing URL, and the country your exit IP was in.
+      placeholder: "https://www.amazon.com/s?k=wireless+headphones (marketplace: .com, exit IP: DE)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence from the page
+      description: |
+        Whichever of these you can get. A capture beats a description.
+
+        - The exact bytes the parser was given: rerun with
+          `--dump-html dump.html` (it writes on success too) and attach it,
+          with session ids and tokens removed.
+        - Whether the run log warned that the `/dp/` URL-pattern fallback ran.
+        - For a field problem: the value you got, and the value on the page.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it reproduces on a second engine, whether it reproduces from a
+        different country, and when it last worked.
