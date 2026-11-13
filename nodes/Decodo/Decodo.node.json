@@ -1,0 +1,18 @@
+{
+  "node": "@decodo/n8n-nodes-decodo.Decodo",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": ["Miscellaneous"],
+  "resources": {
+    "credentialDocumentation": [
+      {
+        "url": "https://help.decodo.com/docs/web-scraping-api-introduction"
+      }
+    ],
+    "primaryDocumentation": [
+      {
+        "url": "https://help.decodo.com/docs/web-scraping-api-introduction"
+      }
+    ]
+  }
+}

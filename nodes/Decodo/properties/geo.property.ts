@@ -1,0 +1,15 @@
+import { INodeProperties } from 'n8n-workflow';
+import { GEO_TARGETS } from '../constants';
+
+export class GeoProperty {
+  static property = {
+    displayName: 'Geolocation',
+    name: 'geo',
+    description:
+      'The country name from which the scraping request will be made. The first letter should be capitalized, e.g., "United States". If not specified, should be empty.',
+    type: 'string',
+    default: '',
+    required: false,
+    displayOptions: { show: { operation: GEO_TARGETS } },
+  } satisfies INodeProperties;
+}
