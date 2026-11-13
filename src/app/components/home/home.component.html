@@ -1,0 +1,607 @@
+<!-- Page body -->
+<div class="page-body mt-5">
+  <div class="container-xl">
+    
+    @if (showAnnouncementBanner ) {
+    <div class="announcement-banner mb-4">
+      <div class="announcement-content">
+        <div class="announcement-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+          </svg>
+        </div>
+        <div class="announcement-text">
+          <div class="announcement-title">
+            🎉 MetaMask integration is now live!
+          </div>
+          <div class="announcement-description">
+            Connect your MetaMask wallet for seamless Nano donations through our MetaMask/Xnap integration.
+          </div>
+        </div>
+        <div class="announcement-action">
+          <button class="btn btn-announcement" (click)="web3.snapConnected() ? null : web3.connect().subscribe()">
+            {{ web3.snapConnected() ? '✓ Connected' : 'Try It Now' }}
+          </button>
+        </div>
+      </div>
+    </div>
+    }
+
+    <div class="row row-cards">
+
+      <div class="col-12 col-md-4 mt-3">
+        <div class="card">
+          <div class="card-body pb-0">
+            <div class="row">
+              <div class="col-7">
+                <div class="d-flex align-items-center">
+                  <div class="subheader">Projects</div>
+                </div>
+                <div class="d-flex align-items-baseline">
+                  <div class="h2 mb-2 me-2" [countUp]="shared.repos().length"></div>
+                  <div class="me-auto">
+                    <span class="text-pink d-inline-flex align-items-center lh-1">
+                      {{shared.repos()[shared.repos().length-1]?.name}}
+                      <app-icon icon="spark" class="ms-1" size="16"></app-icon>
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div class="col-5">
+                <div class="d-flex align-items-center">
+                  <div class="subheader">Contributors</div>
+                </div>
+                <div class="d-flex align-items-baseline">
+                  <div class="h2 mb-2 me-2" [countUp]="shared.contributors().length"></div>
+                </div>
+              </div>
+            </div>
+            <div echarts [options]="reposChartOpts" style="height: 70px;" id="reposChart"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-4 mt-3">
+        <div class="card">
+          <div class="card-body">
+            <div class="card-stamp">
+              <div class="card-stamp-icon bg-purple-lt">
+                <app-icon icon="target" classList="icon icon-taber"></app-icon>
+              </div>
+            </div>
+            <div class="d-flex align-items-center">
+              <div class="subheader">Milestones</div>
+            </div>
+            <div id="carousel-indicators-dot" class="carousel slide carousel-fade" data-bs-ride="carousel">
+              <div class="carousel-indicators carousel-indicators-dot">
+                @for (milestone of shared.milestones(); track $index; let i = $index) {
+                <button type="button" data-bs-target="#carousel-indicators-dot" aria-label="carousel indicator dot" [ngClass]="{'active': i === 0}"
+                  [attr.data-bs-slide-to]="i"></button>
+                }
+              </div>
+              <div class="carousel-inner">
+                @for (milestone of shared.milestones(); track $index; let i = $index) {
+                <div class="carousel-item" [ngClass]="{'active': i === 0}">
+                  <div class="row align-items-center">
+                    <div class="col">
+                      <div class="row g-2 align-items-center mb-3">
+                        <div class="col-auto h2 mb-0">
+                          {{milestone.closedIssues/(milestone.openIssues + milestone.closedIssues) | percent}}
+                        </div>
+                        <div class="col">
+                          <div class="progress progress-sm">
+                            <div class="progress-bar bg-purple" role="progressbar" attr.aria-label="{{milestone.title}} progress"
+                              [ngStyle]="{width: milestone.closedIssues*100/(milestone.openIssues + milestone.closedIssues)+'%' }"
+                              [attr.aria-valuenow]="milestone.closedIssues" [attr.aria-valuemin]="0"
+                              [attr.aria-valuemax]="milestone.openIssues + milestone.closedIssues">
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <a class="text-muted mt-1 d-block"
+                        href="https://github.com/nanocurrency/nano-node/milestone{{milestone.number ? '/' + milestone.number : 's'}}" target="_blank">
+                        {{milestone.title}} ({{milestone.closedIssues}}/{{milestone.closedIssues+milestone.openIssues}})
+                      </a>
+                    </div>
+                  </div>
+                </div>
+                }
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-4 mt-3">
+        <div class="card spotlight">
+          <a href="https://github.com/{{shared.spotlight().fullName}}" target="_blank">
+            <div class="card-body">
+              <div class="card-stamp">
+                <div class="card-stamp-icon">
+                  <app-icon icon="star" classList="icon icon-taber"></app-icon>
+                </div>
+              </div>
+              <div class="d-flex align-items-center">
+                <div class="subheader">Spotlight</div>
+              </div>
+              <div class="d-flex align-items-baseline">
+                <div class="h2 mb-2 me-2">{{shared.spotlight().name}}</div>
+              </div>
+              <p class="text-muted text-truncated">{{shared.spotlight().description}}</p>
+            </div>
+          </a>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-4 mt-3">
+        <div class="card" style="overflow: hidden;">
+          <div class="card-body pb-0 px-0">
+            <div class="row px-3 pb-1">
+              <div class="col-7">
+                <div class="d-flex align-items-center px-1">
+                  <div class="subheader">Protocol Fund</div>
+                </div>
+                <div class="d-flex align-items-baseline px-1">
+                  <span class="h1 mb-0 me-2" style="margin-left: -5px;">
+                    <app-icon icon="nano" size="25" classList="mb-1 d-inline-block"></app-icon>
+                    <span [countUp]="shared.devFund().data[shared.devFund().data.length - 1]"></span>
+                  </span>
+                  <!-- <div class="me-auto">
+                      <span class="text-green d-inline-flex align-items-center lh-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="icon ms-1" width="24" height="24" viewBox="0 0 24 24" stroke-width="2"
+                          stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                          <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                          <path d="M3 17l6 -6l4 4l8 -8"></path>
+                          <path d="M14 7l7 0l0 7"></path>
+                        </svg>
+                      </span>
+                    </div> -->
+                </div>
+              </div>
+              <div class="col-5 text-end">
+                <a href="https://nano.to/Protocol_fund" target="_blank">
+                  Donate
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19.5 12.572l-7.5 7.428l-7.5 -7.428a5 5 0 1 1 7.5 -6.566a5 5 0 1 1 7.5 6.572" />
+                    <path d="M12 6l-3.293 3.293a1 1 0 0 0 0 1.414l.543 .543c.69 .69 1.81 .69 2.5 0l1 -1a3.182 3.182 0 0 1 4.5 0l2.25 2.25" />
+                    <path d="M12.5 15.5l2 2" />
+                    <path d="M15 13l2 2" />
+                  </svg>
+                </a>
+              </div>
+            </div>
+            <div echarts [options]="devFundChartOpts" style="height: 69px; width: 101%;" id="devFundChart"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-12 col-md-4 mt-3">
+        <div class="card">
+          <div class="card-body pb-0 px-0">
+            <div class="row px-3 pb-2">
+              <div class="col-7">
+                <div class="d-flex align-items-center px-1">
+                  <div class="subheader">Biggest Donors</div>
+                </div>
+              </div>
+              <div class="col-5 text-end">
+                <a routerLink="/leaderboard" class="text-yellow">
+                  Leaderboard
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none"
+                    stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 2px;">
+                    <path d="M8 21l8 0" />
+                    <path d="M12 17l0 4" />
+                    <path d="M7 4l10 0" />
+                    <path d="M17 4v8a5 5 0 0 1 -10 0v-8" />
+                    <path d="M5 9m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" />
+                    <path d="M19 9m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" />
+                  </svg>
+                </a>
+              </div>
+            </div>
+            <div echarts [options]="donorsChartOpts" style="height: 90px;" id="donorsChart"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="row">
+      <div class="col-12 mt-3">
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Keeping busy</h3>
+            <div class="ms-3 lh-1">
+              <div class="dropdown">
+                <a class="dropdown-toggle text-muted p-2" href="#" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false">{{busyWindow ===
+                  'busyWeek' ?
+                  'Last week' : 'Last month'}}</a>
+                <div class="dropdown-menu dropdown-menu-end">
+                  <a class="dropdown-item" [ngClass]="{active: busyWindow === 'busyWeek'}" (click)="busyWindow = 'busyWeek'">Last week</a>
+                  <a class="dropdown-item" [ngClass]="{active: busyWindow === 'busyMonth'}" (click)="busyWindow = 'busyMonth'">Last month</a>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="d-flex pb-2" style="overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding: 0 10px; scrollbar-width: thin;">
+              @for (busy of shared.repos() | filter:busyWindow | asRepo | sort:busyWindow | asRepo | slice:0:20; track $index; let last = $last) {
+              <div [ngClass]="last ? '' : 'me-4'" class="p-3 mt-2 busy-repo" style="scroll-snap-align: end;">
+                <img [src]="busy.avatarUrl + '&s=40'" [alt]="busy.fullName" width="36" height="36" style="border-radius: 4px;" class="d-block me-3 mb-2">
+                <a [href]="'https://github.com/' + busy.fullName" [attr.aria-label]="busy.fullName.split('/')[1]">{{busy.fullName.split('/')[1]}}</a>
+                <div class="mt-2">
+                  <span class="text-muted d-inline-block" style="font-size: 0.8rem; vertical-align: middle; line-height: 0.8rem;" title="Commits">
+                    <app-icon icon="commit"></app-icon>
+                    {{busyWindow === 'busyWeek' ? busy.commits7d : busy.commits30d || 0}}</span>
+                  <span class="ms-2 text-muted d-inline-block" style="font-size: 0.8rem; vertical-align: middle; line-height: 0.8rem;" title="Pull requests">
+                    <app-icon icon="pr"></app-icon>
+                    {{busyWindow === 'busyWeek' ? busy.prs7d : busy.prs30d}}</span>
+                </div>
+              </div>
+              }
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-12 col-md-8 mt-3">
+        <div class="card" style="height: 484px;">
+          <div class="card-body p-1 p-md-3">
+            <div class="card-title pt-3 px-3 pt-md-0 px-md-0">
+              <h3>Weekly activity</h3>
+            </div>
+            <div echarts [options]="commitsChartOpts" class="chart" id="commitsChart"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-md-4 mt-3">
+        <div class="card" style="height: 484px;">
+          <div class="card-header">
+            <ul class="nav nav-tabs card-header-tabs nav-fill" data-bs-toggle="tabs" role="tablist">
+              <li class="nav-item " role="presentation">
+                <a href="#node-tab" class="nav-link active" data-bs-toggle="tab" aria-selected="true" role="tab">
+                  <app-icon icon="nano" class="me-1"></app-icon>
+                  Node Development
+                </a>
+              </li>
+              <li class="nav-item" role="presentation">
+                <a href="#ecosystem-tab" class="nav-link" data-bs-toggle="tab" aria-selected="true" role="tab" tabindex="-1">
+                  <app-icon icon="oss" class="me-1"></app-icon>
+                  Ecosystem
+                </a>
+              </li>
+            </ul>
+          </div>
+          <div class="table-responsive" style="scrollbar-width: thin;">
+            <div class="tab-content">
+              <div class="tab-pane active show" id="node-tab" role="tabpanel">
+                <table class="table table-vcenter">
+                  <tbody>
+                    @for (event of shared.nodeEvents(); track $index) {
+                    <tr>
+                      <td class="w-1 py-1">
+                        <a target="_blank" [href]="event.event.event_url">
+                          <img class="avatar avatar-sm" src="{{event.avatarUrl + '&s=40'}}" [alt]="event.author" [title]="event.author" loading="lazy">
+                        </a>
+                      </td>
+                      <td class="td-truncate p-1">
+                        <div class="text-truncate opacity-80 font-size-13">
+                          <span class="text-muted me-1">{{event.event.action}}</span>
+                          <a class="text-white" [href]="event.event.event_url" [title]="event.event.title">{{event.event.title}}</a>
+                        </div>
+                      </td>
+                      <td class="text-nowrap text-muted py-1 font-size-13" [title]="event.createdAt | date:'short'">{{event.createdAt | timeago}}</td>
+                    </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+              <div class="tab-pane" id="ecosystem-tab" role="tabpanel">
+                <table class="table table-vcenter">
+                  <tbody>
+                    @for (event of shared.events(); track $index) {
+                    <tr>
+                      <td class="w-1 py-1">
+                        <a target="_blank" href="https://github.com/{{event.repoFullName}}"><img class="avatar avatar-sm" src="{{event.avatarUrl + '&s=40'}}"
+                            [alt]="event.repoFullName" [title]="event.repoFullName" loading="lazy">
+                        </a>
+                      </td>
+                      <td class="td-truncate p-1">
+                        <div class="text-truncate opacity-80" title="By {{event.author}}">
+                          {{event.message}}
+                        </div>
+                      </td>
+                      <td class="text-nowrap text-muted py-1" [title]="event.date | date:'short'">{{event.date | timeago}}</td>
+                    </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 mt-3">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Projects</h3>
+          <div class="ms-3 lh-1">
+            <div class="dropdown">
+              <a class="dropdown-toggle text-muted p-2" href="#" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false">{{reposSort === 'date'
+                ?
+                'Recently created' : reposSort === 'stars' ? 'Most popular' : 'Recent activity'}}</a>
+              <div class="dropdown-menu dropdown-menu-end">
+                <a class="dropdown-item" [ngClass]="{active: reposSort === 'stars'}" (click)="reposSort = 'stars'">Most popular</a>
+                <a class="dropdown-item" [ngClass]="{active: reposSort === 'date'}" (click)="reposSort = 'date'">Recently created</a>
+                <a class="dropdown-item" [ngClass]="{active: reposSort === 'activity'}" (click)="reposSort = 'activity'">Recently updated</a>
+              </div>
+            </div>
+          </div>
+          <div class="ms-auto d-inline-block">
+            <input type="text" class="form-control form-control-sm search" aria-label="Search repos" placeholder="Search by name or description"
+              [(ngModel)]="reposQuery">
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-vcenter card-table">
+            <thead>
+              <tr>
+                <th style="min-width: 220px;">Name</th>
+                <th style="min-width: 350px;">Description</th>
+                <th class="text-center">
+                  <app-icon icon="clock"></app-icon>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (repo of reposPage; track $index) {
+              <tr>
+                <td data-label="Name" class="py-2">
+                  <div class="d-flex align-items-center">
+                    <img class="avatar avatar-sm me-2" [src]="repo.avatarUrl + '&s=40'" loading="lazy" [alt]="repo.name">
+                    <div class="flex-fill">
+                      <div class="font-weight-medium">
+                        <a href="https://github.com/{{repo.fullName}}" target="_blank">
+                          <span style="vertical-align: middle;">{{repo.name}}</span>
+                          <span class="badge bg-yellow-lt ms-2">
+                            <app-icon fill="#f59f00" icon="star" size="14"></app-icon>
+                            {{repo.stargazersCount}}
+                          </span>
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </td>
+                <td data-label="Description">
+                  <span class="opacity-75">{{repo.description}}</span>
+                </td>
+                <td data-label="Date created" class="text-muted text-center" [title]="(reposSort === 'activity' ? repo.mostRecentCommit : repo.createdAt) | date">
+                  {{(reposSort === 'activity' ? repo.mostRecentCommit : repo.createdAt) | timeago}}
+                </td>
+              </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+        <app-pagination [pageSize]="15" [items]="shared.repos() | filter:'repo':reposQuery | sort:'repo':reposSort"
+          (itemsChange)="reposPage = $event.items"></app-pagination>
+      </div>
+    </div>
+
+    <div class="col-12 mt-3">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Contributors</h3>
+          <div class="ms-auto d-inline-block">
+            <input type="text" class="form-control form-control-sm search" aria-label="Search users" placeholder="Search by username, repos"
+              [(ngModel)]="contributorsQuery">
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-vcenter card-table">
+            <thead>
+              <tr>
+                <th width="30px">#</th>
+                <th style="min-width: 220px">Name</th>
+                <th (click)="contributorsSort = 'total'" class="ptr">Total commits <app-icon
+                    [icon]="contributorsSort === 'total' ? 'double-down' : 'down'"></app-icon>
+                </th>
+                <th (click)="contributorsSort = 'month'" class="ptr">Past 30 days <app-icon
+                    [icon]="contributorsSort === 'month' ? 'double-down' : 'down'"></app-icon>
+                </th>
+                <th style="width: 130px;">Goal</th>
+                <th style="width: 150px;" class="text-center">Sponsor</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (user of contributorsPage; track $index; let i = $index) {
+              <tr>
+                <td class="py-2" scope="row">{{(i+1) + ((shared.isSmallScreen ? 12 : 40) * (contributorsPageIndex-1))}}</td>
+                <td data-label="Name" class="py-2">
+                  <div class="d-flex align-items-center">
+                    <img class="avatar me-3" [src]="user.image + '&s=40'" loading="lazy" [alt]="user.githubLogin">
+                    <div class="flex-fill">
+                      <div class="font-weight-medium">
+                        <a class="me-2" href="https://github.com/{{user.githubLogin}}" target="_blank">
+                          <span>{{user.githubLogin}}</span>
+                        </a>
+                        @if (user.nodeContributor) {
+                        <span class="badge bg-cyan-lt ms-1 ms-md-2 cursor-help" title="Contributed to the nano-node repo">
+                          <app-icon icon="veteran" fill="#17a2b8" size="16" strokeWidth="2"></app-icon>
+                        </span>
+                        }
+                        @if (user.repos.length >= 10) {
+                        <span class="badge bg-purple-lt ms-1 ms-md-2 cursor-help" title="Contributed to 10 repos or more">
+                          <app-icon icon="rockstar" size="16" strokeWidth="2"></app-icon>
+                        </span>
+                        }
+                        @if (user.hasPopularRepo) {
+                        <span class="badge bg-orange-lt ms-1 ms-md-2 cursor-help" title="Contributed to a popular repo">
+                          <app-icon icon="mvp" size="16" strokeWidth="2"></app-icon>
+                        </span>
+                        }
+                      </div>
+                    </div>
+                  </div>
+                </td>
+                <td class="py-2" data-label="Total commits">
+                  <span class="opacity-75" style="vertical-align: middle;">{{user.contributions | number}}</span>
+                  <span class="badge bg-indigo-lt ms-2 cursor-help" title="Contributed to {{user.repos?.length}} repos">
+                    {{user.repos?.length}}
+                    <app-icon icon="repo" size="16" strokeWidth="2"></app-icon>
+                  </span>
+                </td>
+                <td class="py-2" data-label="Past 30 days">
+                  <span [ngStyle]="{opacity: user.lastMonth ? 0.75 : 0.25}">{{user.lastMonth}}</span>
+                </td>
+                <td>
+                  @if (user.goalAmount) {
+                  <app-goal [amount]="user.goalAmount" [address]="user.goalNanoAddress" [sid]="'id'+user.githubLogin"></app-goal>
+                  }
+                </td>
+                <td class="py-2">
+                  <div class="btn-list flex-nowrap justify-content-end">
+                  @if (user.nanoAddress) {
+                  @if (donatingToUser === user.githubLogin) {
+                  <div class="donation-input-wrapper">
+                    <div class="input-group input-group-sm">
+                      <div class="form-control donation-input px-1 d-flex align-items-center justify-content-between">
+                        <app-icon icon="nano" size="17" class="text-muted me-1 d-flex"></app-icon>
+                        <div contenteditable="true" style="min-width: 20px; outline: none;" role="textbox"
+                          (input)="updateDonationAmount($event)" (keydown.enter)="submitDonation(user)"
+                          (keydown.escape)="donatingToUser = null">
+                          {{donationAmount}}
+                        </div>
+                      </div>
+                      <button class="btn bg-azure-lt btn-icon" type="button" (click)="submitDonation(user)"
+                        title="Send Transaction">
+                        <app-icon icon="check" size="18"></app-icon>
+                      </button>
+                    </div>
+                  </div>
+                  } @else {
+                  <a (click)="handleDonate(user)" class="btn bg-azure-lt btn-icon" title="Donate nano">
+                    <app-icon icon="nano"></app-icon>
+                  </a>
+                  }
+                  }
+                    @if (user.patreonUrl) {
+                    <a target="_blank" href="{{user.patreonUrl}}" class="btn bg-white-lt btn-icon" title="Become a patron">
+                      <app-icon icon="patreon"></app-icon>
+                    </a>
+                    }
+                    @if (user.donationUrl) {
+                    <a target="_blank" [href]="user.donationUrl" class="btn bg-white-lt btn-icon" title="Donate">
+                      <app-icon [icon]="donationIcon(user.donationUrl)"></app-icon>
+                    </a>
+                    }
+                    @if (user.ghSponsors) {
+                      <a target="_blank" href="https://github.com/sponsors/{{user.githubLogin}}" class="btn bg-pink-lt btn-icon" title="Sponsor on GitHub">
+                      <app-icon icon="heart"></app-icon>
+                    </a>
+                    }
+                    <a href="#" class="btn bg-blue-lt btn-icon" title="More info" data-bs-toggle="modal" data-bs-target="#modal-profile"
+                      (click)="shared.selectUser(user)">
+                      <app-icon icon="profile"></app-icon>
+                    </a>
+                  </div>
+                </td>
+              </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+        <app-pagination [pageSize]="shared.isSmallScreen ? 12 : 40"
+          [items]="shared.contributors() | filter:'user':contributorsQuery | sort:'user':contributorsSort"
+          (itemsChange)="contributorsPage = $event.items; contributorsPageIndex = $event.page"></app-pagination>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="modal modal-blur fade" id="modal-profile" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+    @if (shared.selectedUser()) {
+    <div class="modal-content">
+      <div class="modal-body pt-5">
+        <img [src]="shared.selectedUser().image + '&s=100'" class="profile avatar" [alt]="shared.selectedUser().githubLogin">
+        <div class="row">
+          <div class="col-12 col-md-4 my-1">
+            @if (shared.selectedUser().website) {
+            <a href="https://{{shared.selectedUser().website}}" target="_blank" class="h4 px-2" title="Their website">
+              <app-icon icon="web"></app-icon>
+            </a>
+            }
+            <a href="https://github.com/{{shared.selectedUser().githubLogin}}" target="_blank" class="h4 px-2" title="Follow on GitHub">
+              <app-icon icon="github"></app-icon>
+            </a>
+            @if (shared.selectedUser().twitterUsername) {
+            <a href="https://twitter.com/{{shared.selectedUser().twitterUsername}}" target="_blank" class="h4 px-2" title="Follow on Twitter">
+              <app-icon icon="twitter"></app-icon>
+            </a>
+            }
+          </div>
+          <div class="col-12 col-md-4"></div>
+          <div class="col-12 col-md-4 btn-list flex-nowrap my-1">
+            @if (shared.selectedUser().nanoAddress) {
+            <a href="https://nano.to/account/{{shared.selectedUser().nanoAddress}}" target="_blank" class="btn bg-azure-lt w-100 btn-icon" title="Donate nano">
+              <app-icon icon="nano"></app-icon>
+            </a>
+            }
+            @if (shared.selectedUser().patreonUrl) {
+            <a target="_blank" [href]="shared.selectedUser().patreonUrl" class="btn bg-white-lt w-100 btn-icon" title="Become a patron">
+              <app-icon icon="patreon"></app-icon>
+            </a>
+            }
+            @if (shared.selectedUser().donationUrl) {
+            <a target="_blank" [href]="shared.selectedUser().donationUrl" class="btn bg-white-lt w-100 btn-icon" title="Donate">
+              <app-icon [icon]="donationIcon(shared.selectedUser().donationUrl)"></app-icon>
+            </a>
+            }
+            @if (shared.selectedUser().ghSponsors) {
+            <a target="_blank" href="https://github.com/sponsors/{{shared.selectedUser().githubLogin}}" class="btn bg-pink-lt w-100 btn-icon"
+              title="Sponsor on GitHub">
+              <app-icon icon="heart"></app-icon>
+            </a>
+            }
+          </div>
+        </div>
+
+        @if (shared.selectedUser().bio) {
+        <div class="subheader mt-3 mb-2">About {{shared.selectedUser().githubLogin}}</div>
+        }
+        <div [innerHTML]="shared.selectedUser().bio"></div>
+
+        <div class="subheader mt-3 mb-2">{{shared.selectedUser().githubLogin}} contributed to</div>
+        <div>
+          @for (repo of shared.selectedUser().repos; track $index) {
+          <a href="https://github.com/{{repo}}"><span class="badge badge-outline badge-pill text-azure me-2 mb-2 p-2">{{repo}}</span></a>
+          }
+        </div>
+        <div class="subheader mt-3 mb-2">Funding goal</div>
+        @if (shared.selectedUser().goalAmount) {
+        <div class="text-body d-block">
+          <span class="inline-goal">
+            <app-goal [sid]="'id_'+shared.selectedUser().githubLogin" [title]="shared.selectedUser().goalTitle" [amount]="shared.selectedUser().goalAmount"
+              [address]="shared.selectedUser().goalNanoAddress" [barOnly]="false" [description]="shared.selectedUser().goalDescription">
+            </app-goal>
+          </span>
+        </div>
+        } @else {
+        <div class="text-muted italic text-center">No funding goal set.</div>
+        }
+
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn me-auto" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+    }
+  </div>
+</div>

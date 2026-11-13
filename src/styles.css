@@ -1,0 +1,125 @@
+[data-bs-theme="dark"] {
+  --tblr-secondary: #6e829c;
+  --tblr-body-bg: #151F2C;
+  --tblr-card-bg: #182433;
+  --tblr-bg-surface: #182433;
+  --tblr-bg-surface-tertiary: #141f2c;
+  --tblr-table-striped-bg: #151F2C;
+  --tblr-navbar-border-color: #486e9524;
+  --tblr-btn-border-color: #486e9524;
+  --tblr-border-color: #486e9524;
+}
+
+body {
+  font-family: "Open Sans", Tahoma, Geneva, Arial, Helvetica, sans-serif;
+  text-rendering: optimizeLegibility;
+}
+.card {
+  min-height: 140px;
+  justify-content: center;
+}
+a {
+  color: #4492ee;
+}
+a:hover {
+  cursor: pointer;
+  text-decoration: none;
+}
+.badge {
+  display: inline-block;
+  vertical-align: middle;
+  line-height: normal;
+}
+.badge-pill {
+  border-color: #3982bf4f;
+}
+.badge-pill:hover {
+  border-color: #3982bf8c;
+}
+.avatar {
+  object-fit: cover;
+  width: 32px;
+  height: 32px;
+  max-width: initial;
+}
+.avatar.avatar-sm {
+  object-fit: cover;
+  width: 28px;
+  height: 28px;
+  max-width: initial;
+}
+.avatar.avatar-lg {
+  height: 40px;
+  width: 40px;
+  padding: 5px;
+}
+
+.icon.small {
+  width: 1rem;
+  height: 1rem;
+}
+.carousel-indicators {
+  margin-bottom: -2rem;
+}
+[data-bs-theme="dark"] .carousel .carousel-indicators [data-bs-target],
+[data-bs-theme="dark"].carousel .carousel-indicators [data-bs-target] {
+  background-color: #ae3ec9;
+}
+.profile {
+  margin: 0 auto;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  transform: translateY(-104px);
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+.busy-repo {
+  background-color: #141f2d;
+  border-radius: 4px;
+  min-width: 130px;
+  min-height: 130px;
+}
+.busy-repo a {
+  font-size: 0.875rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  max-width: 100px;
+  display: inline-block;
+}
+.ptr:hover {
+  cursor: pointer;
+}
+
+.sticky {
+  position: sticky;
+  top: 0px;
+  background: #1d273b;
+  z-index: 2;
+}
+
+#funding-wrap {
+  border: none !important;
+  padding: 0 !important;
+}
+
+#glass {
+  height: 10px !important;
+  background: #20334c !important;
+}
+
+.font-size-13 {
+  font-size: 13px;
+}
+.dropdown-toggle::after {
+  border-top: none !important;
+  border-right: none !important;
+}
+.text-muted {
+  color: var(--tblr-secondary) !important;
+}
+.nav-link.active {
+  color: lightblue !important;
+}

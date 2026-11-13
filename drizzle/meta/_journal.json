@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1763572525744,
+      "tag": "0000_bent_oracle",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1764077160407,
+      "tag": "0001_striped_proudstar",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794337961186,
+      "tag": "0002_youthful_microchip",
+      "breakpoints": true
+    }
+  ]
+}
