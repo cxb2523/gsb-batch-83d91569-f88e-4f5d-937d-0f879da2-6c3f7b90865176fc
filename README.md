@@ -110,6 +110,16 @@ python run.py                         # 采集 → 分析 → 生成指南
 4. 每关键词换新 session + 无空格关键词 + 退避重试，稳定不被限流。
 
 登录后更全，`export BILI_SESSDATA=你的cookie` 再跑。
+
+**每次搜索都有可核对结论**（`data/raw/bilibili_search_report.json`，与原始数据同目录）：
+
+- 每个关键词记 `status`：`ok` 成功有结果 / `empty` 成功但无结果 / `blocked` 重试耗尽仍被风控 / `error` 请求异常
+- 记 `attempts`（实际尝试次数）、`raw_hits`（接口原始命中）、`kept`（通过 90 天时效过滤）
+- `discarded` 逐条列出被丢弃视频及原因：`发布时间过旧` / `发布时间缺失或非法` / `标题清洗后为空`
+- `attempt_log` 记录每次尝试的结果，`problem_keywords` 直接列出需要排查的关键词
+- 原始视频仍是 `data/raw/bilibili_videos.json` 旧格式 `{关键词: [{title, author, play, like, bvid, pubdate}]}`，旧分析代码照旧可读
+
+> 排障：看到 `0 条` 时先看结论文件里的 `status`——`empty` 才是真没新视频，`blocked` / `error` 需要换 cookie、降频或稍后重试。
 </details>
 
 <details>
@@ -165,7 +175,7 @@ wangzhe-guide/
 ├── config.py               # 路径 / 角色映射 / 数据源清单
 ├── crawlers/
 │   ├── official_pvp.py     # ✅ 官方英雄 + 装备
-│   ├── bilibili.py         # ✅ B站攻略热度（指纹+WBI+风控绕过）
+│   ├── bilibili.py         # ✅ B站攻略热度（指纹+WBI+风控绕过；每次搜索带可核对结论）
 │   ├── strategy_sites.py   # ✅ crawl4ai 攻略站梯度
 │   └── xiaohongshu.py      # ✅ Playwright 小红书（需登录）
 ├── analysis/
@@ -176,8 +186,9 @@ wangzhe-guide/
 │   └── generate_guide.py   # 汇总出 Markdown 指南
 ├── data/
 │   ├── tier_current.json   # ⭐ 当前赛季梯度（换赛季只改这个）
-│   ├── raw/                # 原始抓取
+│   ├── raw/                # 原始抓取（bilibili_videos.json + bilibili_search_report.json）
 │   └── processed/          # 清洗后
+├── tests/                  # 离线验收（假响应替代真实网络，pytest tests/）
 └── guide/王者荣耀指南.md    # 📄 最终产物
 ```
 

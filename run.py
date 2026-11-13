@@ -19,10 +19,20 @@ def step_crawl(with_xhs=False):
     print(f"[1/4 官方] 英雄 {len(hs)}，装备 {len(its)}")
 
     # 2) B站攻略热度 —— 公开，需 curl_cffi
+    #    每个关键词都有可核对结论（成功/空/风控/异常），落盘在
+    #    data/raw/bilibili_search_report.json；这里只打印汇总，
+    #    任何关键词失败都不影响官方采集和后续分析出稿。
     try:
         from crawlers import bilibili
         vids = bilibili.crawl()
-        print(f"[2/4 B站] {sum(len(v) for v in vids.values())} 条视频")
+        report = bilibili.last_report() or {}
+        s = report.get("summary", {})
+        print(f"[2/4 B站] {sum(len(v) for v in vids.values())} 条视频｜"
+              f"成功 {s.get('ok', 0)}／空结果 {s.get('empty', 0)}／"
+              f"风控 {s.get('blocked', 0)}／异常 {s.get('error', 0)}")
+        if s.get("blocked") or s.get("error"):
+            print(f"[2/4 B站] 需排查：{report.get('problem_keywords')}"
+                  f"（详见 data/raw/bilibili_search_report.json）")
     except ImportError:
         print("[2/4 B站] 跳过：未装 curl_cffi（pip install curl_cffi）")
     except Exception as e:                            # noqa: BLE001
