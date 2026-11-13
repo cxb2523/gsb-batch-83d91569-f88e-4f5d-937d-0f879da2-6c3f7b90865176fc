@@ -1,0 +1,571 @@
+"""Wave 6.1a — Live-view server.
+
+Streams the active browser's frames over a WebSocket so you can watch what
+an agent is doing in a normal browser tab. Two modes:
+
+- **Read-only** (default): pure observation. Frames flow server → client.
+- **Takeover** (`--takeover`): client → server `{type:click,x,y}` /
+  `{type:key,code}` events go to `page.mouse.click(x,y)` / `page.keyboard.press(code)`.
+
+Endpoints (default port 9223, bound to 127.0.0.1):
+  GET  /                          → session list + viewer links
+  GET  /viewer/<session_name>     → HTML viewer (canvas + JS WebSocket client)
+  GET  /ws/<session_name>         → WebSocket: binary JPEG frames + JSON takeover
+
+Security: binds 127.0.0.1 by default. `--bind 0.0.0.0` requires the explicit
+`--insecure-public` flag because exposing this on a LAN gives whoever connects
+full control of your browser.
+
+Loopback is NOT sufficient auth on its own. WebSockets are exempt from the
+same-origin policy and from CORS preflight, so any page the operator happens to
+load in their ORDINARY browser can open `ws://127.0.0.1:<port>/ws/<session>` —
+session names are guessable — and read frames from a session logged into their
+real accounts, or drive input into it when takeover is on. Every endpoint
+therefore requires a per-server ephemeral token (`?token=`, the same shape
+`rest.py` uses because browsers cannot set an Authorization header on a
+WebSocket), and the WS upgrade additionally rejects any request carrying a
+foreign `Origin`. Tokens live and die with the server; they are never persisted.
+
+Takeover is a SEPARATE grant: `token` streams frames read-only, `control_token`
+(minted only when the server is started with takeover) is what unlocks input.
+So a watch-only link can be handed out without also handing over the keyboard.
+
+Threading: the frame loop does NOT acquire `entry.lock` because Playwright's
+`page.screenshot()` is safe to call concurrently with other CDP operations
+(holding the lock for 50-200 ms every frame would gum up the session). Takeover
+events DO acquire the lock — they're mutations on the page.
+
+Cost: at 5 fps, JPEG quality 60, 1920×1080 viewport ≈ 8-15 KB per frame,
+so ~40-75 KB/s per connected viewer. One frame-loop task per session
+regardless of viewer count (broadcast model).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import secrets
+from collections import defaultdict
+from typing import TYPE_CHECKING
+
+log = logging.getLogger("vibatchium.liveview")
+
+if TYPE_CHECKING:
+    from .daemon.registry import SessionRegistry
+
+
+# Inlined viewer HTML — keeping it in-process means no MANIFEST changes /
+# resource-path lookups / static-dir packaging hassles. Two templates:
+# INDEX_HTML lists running sessions; VIEWER_HTML is the per-session canvas.
+
+# The VB badge, 32x32, inlined as a data URI for the same reason the HTML is
+# inlined — and because a live-view page must not reach the network for an
+# asset. Substituted into both templates below rather than into their format()
+# calls, so INDEX_HTML (which is served verbatim) gets it too.
+_FAVICON = (
+    "data:image/png;base64,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"
+)
+
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="__FAVICON__">
+<title>vibatchium — live-view</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0a0a0a; color: #e0e0e0; margin: 0; padding: 32px; }
+  h1 { font-weight: 300; letter-spacing: -0.5px; }
+  .meta { color: #777; font-size: 14px; }
+  ul { list-style: none; padding: 0; }
+  li { padding: 10px 14px; background: #1a1a1a; border-radius: 6px;
+       margin-bottom: 8px; }
+  a { color: #6ab7ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .tag { background: #2a4d3a; color: #7fe3a4; padding: 2px 8px; border-radius: 4px;
+         font-size: 11px; font-family: monospace; margin-left: 8px; }
+  .empty { color: #555; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>vibatchium <span class="meta">live-view</span></h1>
+<p class="meta">Running sessions (auto-refresh every 5s):</p>
+<ul id="sessions"></ul>
+<script>
+// Carry this page's token onto the API call and the per-session links.
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const Q = TOKEN ? ('?token=' + encodeURIComponent(TOKEN)) : '';
+
+async function refresh() {
+  const r = await fetch('/sessions.json' + Q);
+  const data = await r.json();
+  const ul = document.getElementById('sessions');
+  if (data.sessions.length === 0) {
+    ul.innerHTML = '<li class="empty">no sessions running — try `vb session new foo && vb --session foo start`</li>';
+    return;
+  }
+  ul.innerHTML = data.sessions.map(s =>
+    `<li><a href="/viewer/${s.name}${Q}">${s.name}</a> <span class="tag">${s.backend || 'patchright'}</span> <span class="meta">${s.url || '(blank)'}</span></li>`
+  ).join('');
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>"""
+
+
+VIEWER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="__FAVICON__">
+<title>vibatchium — {name}</title>
+<style>
+  body {{ margin: 0; background: #000; overflow: hidden;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+  #frame {{ display: block; max-width: 100vw; max-height: 100vh;
+            margin: 0 auto; cursor: {cursor}; image-rendering: auto; }}
+  #status {{ position: fixed; bottom: 8px; left: 8px; padding: 4px 10px;
+             background: rgba(0,0,0,0.6); color: #aaa; font-size: 11px;
+             border-radius: 4px; font-family: monospace; }}
+  #status.takeover {{ color: #7fe3a4; }}
+  #status.error {{ color: #ff7777; }}
+</style>
+</head>
+<body>
+<img id="frame" alt="loading" />
+<div id="status">connecting…</div>
+<script>
+const NAME = {name_json};
+const TAKEOVER = {takeover};
+// The link IS the credential — carry the token from this page's URL onto the
+// socket. Browsers cannot set an Authorization header on a WebSocket.
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const img = document.getElementById('frame');
+const status = document.getElementById('status');
+let ws;
+let frameCount = 0;
+let lastFrameTs = Date.now();
+let viewportW = null, viewportH = null;
+let currentBlobUrl = null;
+
+function connect() {{
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${{proto}}://${{location.host}}/ws/${{NAME}}?token=${{encodeURIComponent(TOKEN)}}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {{
+    status.textContent = TAKEOVER ? 'takeover · streaming' : 'streaming';
+    status.className = TAKEOVER ? 'takeover' : '';
+  }};
+  ws.onclose = () => {{
+    status.textContent = 'disconnected — retrying in 2s';
+    status.className = 'error';
+    setTimeout(connect, 2000);
+  }};
+  ws.onerror = () => {{
+    status.textContent = 'error';
+    status.className = 'error';
+  }};
+  ws.onmessage = (e) => {{
+    if (typeof e.data === 'string') {{
+      // JSON envelope: hello or error
+      try {{
+        const m = JSON.parse(e.data);
+        if (m.type === 'hello') {{
+          viewportW = m.viewport_width;
+          viewportH = m.viewport_height;
+        }} else if (m.type === 'error') {{
+          status.textContent = 'error: ' + m.error;
+          status.className = 'error';
+        }}
+      }} catch (err) {{}}
+      return;
+    }}
+    // Binary JPEG frame
+    if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+    const blob = new Blob([e.data], {{type: 'image/jpeg'}});
+    currentBlobUrl = URL.createObjectURL(blob);
+    img.src = currentBlobUrl;
+    frameCount++;
+    const now = Date.now();
+    if (now - lastFrameTs > 1000) {{
+      const fps = (frameCount * 1000 / (now - lastFrameTs)).toFixed(1);
+      status.textContent = `${{TAKEOVER ? 'takeover · ' : ''}}${{fps}} fps`;
+      frameCount = 0;
+      lastFrameTs = now;
+    }}
+  }};
+}}
+
+// Map a click on the canvas-rendered image back to page coordinates.
+function imageCoords(ev) {{
+  const rect = img.getBoundingClientRect();
+  const scaleX = (viewportW || img.naturalWidth) / rect.width;
+  const scaleY = (viewportH || img.naturalHeight) / rect.height;
+  return {{
+    x: Math.round((ev.clientX - rect.left) * scaleX),
+    y: Math.round((ev.clientY - rect.top) * scaleY),
+  }};
+}}
+
+function send(evt) {{
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify(evt));
+}}
+
+if (TAKEOVER) {{
+  img.addEventListener('click', (ev) => {{
+    const c = imageCoords(ev);
+    send({{type: 'click', x: c.x, y: c.y, button: 'left'}});
+  }});
+  img.addEventListener('contextmenu', (ev) => {{
+    ev.preventDefault();
+    const c = imageCoords(ev);
+    send({{type: 'click', x: c.x, y: c.y, button: 'right'}});
+  }});
+  window.addEventListener('keydown', (ev) => {{
+    // Only forward when image area has focus-ish (not in dev tools etc).
+    if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;
+    if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {{
+      send({{type: 'type', text: ev.key}});
+    }} else {{
+      // Translate to a Playwright-friendly key code.
+      send({{type: 'key', code: ev.key, ctrl: ev.ctrlKey, shift: ev.shiftKey,
+             alt: ev.altKey, meta: ev.metaKey}});
+    }}
+    ev.preventDefault();
+  }});
+  img.addEventListener('wheel', (ev) => {{
+    ev.preventDefault();
+    send({{type: 'scroll', dx: ev.deltaX, dy: ev.deltaY}});
+  }}, {{passive: false}});
+}}
+
+connect();
+</script>
+</body>
+</html>"""
+
+INDEX_HTML = INDEX_HTML.replace("__FAVICON__", _FAVICON)
+VIEWER_HTML = VIEWER_HTML.replace("__FAVICON__", _FAVICON)
+
+
+def _render_viewer(name: str, takeover: bool) -> str:
+    return VIEWER_HTML.format(
+        name=name,
+        name_json=json.dumps(name),
+        takeover='true' if takeover else 'false',
+        cursor='crosshair' if takeover else 'default',
+    )
+
+
+class LiveViewServer:
+    """One server per daemon. Manages a frame-loop task per active session
+    and broadcasts JPEG frames to any connected WebSocket clients."""
+
+    def __init__(self, registry: SessionRegistry, *, host: str = "127.0.0.1",
+                 port: int = 9223, fps: int = 5, jpeg_quality: int = 60,
+                 takeover: bool = False, token: str | None = None) -> None:
+        self.registry = registry
+        self.host = host
+        self.port = port
+        self.fps = fps
+        self.jpeg_quality = jpeg_quality
+        self.takeover = takeover
+        # Watch token: required by EVERY endpoint. Ephemeral — regenerated per
+        # server, never written to disk (unlike the REST shim's persisted one).
+        self.token = token or secrets.token_urlsafe(32)
+        # Control token: minted ONLY in takeover mode. Holding `token` streams
+        # frames but cannot send input, so a read-only link is safe to share.
+        self.control_token = secrets.token_urlsafe(32) if takeover else None
+        self.app = None
+        self.runner = None
+        self.site = None
+        # Per-session: set of connected WSResponse objects; frame-loop task
+        self._clients: dict[str, set] = defaultdict(set)
+        self._frame_tasks: dict[str, asyncio.Task] = {}
+        self._running = False
+
+    async def start(self) -> None:
+        try:
+            from aiohttp import web
+        except ImportError as exc:
+            raise RuntimeError(
+                "live-view requires `pip install vibatchium[liveview]` "
+                f"(import error: {exc})"
+            ) from exc
+
+        self.app = web.Application()
+        self.app.router.add_get('/', self._handle_index)
+        self.app.router.add_get('/sessions.json', self._handle_sessions_json)
+        self.app.router.add_get('/viewer/{name}', self._handle_viewer)
+        self.app.router.add_get('/ws/{name}', self._handle_ws)
+
+        self.runner = web.AppRunner(self.app, access_log=None)
+        await self.runner.setup()
+        self.site = web.TCPSite(self.runner, self.host, self.port)
+        await self.site.start()
+        self._running = True
+        log.info("live-view listening on http://%s:%d (takeover=%s, fps=%d)",
+                 self.host, self.port, self.takeover, self.fps)
+
+    async def stop(self) -> None:
+        self._running = False
+        # Cancel all frame-loop tasks
+        for task in list(self._frame_tasks.values()):
+            task.cancel()
+        for task in list(self._frame_tasks.values()):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._frame_tasks.clear()
+        # Close all WebSocket clients
+        for clients in self._clients.values():
+            for ws in list(clients):
+                try:
+                    await ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._clients.clear()
+        # Stop HTTP server
+        if self.site is not None:
+            await self.site.stop()
+        if self.runner is not None:
+            await self.runner.cleanup()
+        self.site = None
+        self.runner = None
+        self.app = None
+        log.info("live-view stopped")
+
+    def url(self, session_name: str | None = None, *, control: bool = False) -> str:
+        """Viewer URL WITH the token embedded — the link is the credential.
+
+        `control=True` returns the takeover link (only distinct when the server
+        was started in takeover mode); otherwise the watch-only link.
+        """
+        tok = self.control_token if (control and self.control_token) else self.token
+        base = f"http://{self.host}:{self.port}"
+        path = f"{base}/viewer/{session_name}" if session_name else f"{base}/"
+        return f"{path}?token={tok}"
+
+    # ─── auth ───────────────────────────────────────────────────────
+
+    def _origin_ok(self, request) -> bool:
+        """Reject a WS upgrade carrying a FOREIGN Origin.
+
+        A browser always sets Origin on a cross-site WebSocket, so this is what
+        actually stops the drive-by. A non-browser client (curl, our tests, a
+        script) sends no Origin at all — and cannot be a CSWSH vector, since
+        the attack requires a page running in the victim's browser — so an
+        absent Origin is allowed.
+        """
+        origin = request.headers.get("Origin")
+        if origin is None:
+            return True
+        allowed = {
+            f"http://{self.host}:{self.port}",
+            f"http://127.0.0.1:{self.port}",
+            f"http://localhost:{self.port}",
+            f"http://[::1]:{self.port}",
+        }
+        return origin in allowed
+
+    def _grant(self, request) -> str | None:
+        """'control' | 'watch' | None for this request's `?token=`."""
+        tok = request.query.get("token", "")
+        if not tok:
+            return None
+        if self.control_token and secrets.compare_digest(tok, self.control_token):
+            return "control"
+        if secrets.compare_digest(tok, self.token):
+            return "watch"
+        return None
+
+    # ─── HTTP handlers ──────────────────────────────────────────────
+
+    async def _handle_index(self, request):
+        from aiohttp import web
+        if self._grant(request) is None:
+            return web.Response(text="forbidden — missing or bad ?token=", status=403)
+        return web.Response(text=INDEX_HTML, content_type='text/html')
+
+    async def _handle_sessions_json(self, request):
+        from aiohttp import web
+        # Session names are the guessable half of a /ws/<name> URL — do not
+        # enumerate them to an unauthenticated caller.
+        if self._grant(request) is None:
+            return web.json_response({"error": "forbidden"}, status=403)
+        sessions = []
+        for name in self.registry.list_running():
+            entry = self.registry.get(name)
+            if entry is None:
+                continue
+            try:
+                url = entry.session.page.url
+            except Exception:  # noqa: BLE001
+                url = None
+            sessions.append({
+                "name": name,
+                "url": url,
+                "backend": entry.flags.get("backend", "patchright"),
+            })
+        return web.json_response({"sessions": sessions})
+
+    async def _handle_viewer(self, request):
+        from aiohttp import web
+        name = request.match_info['name']
+        grant = self._grant(request)
+        if grant is None:
+            return web.Response(text="forbidden — missing or bad ?token=", status=403)
+        if not self.registry.has(name):
+            return web.Response(text=f"no session {name!r}", status=404)
+        # Only a control-token viewer renders the input-forwarding JS.
+        return web.Response(text=_render_viewer(name, self.takeover and grant == "control"),
+                            content_type='text/html')
+
+    async def _handle_ws(self, request):
+        from aiohttp import web, WSMsgType
+        name = request.match_info['name']
+        # AUTH BEFORE prepare(): once the handshake completes the socket is
+        # live and frames start flowing, so the check has to happen here.
+        if not self._origin_ok(request):
+            log.warning("liveview: rejected ws upgrade for %s — foreign Origin %r",
+                        name, request.headers.get("Origin"))
+            return web.Response(text="forbidden — bad Origin", status=403)
+        grant = self._grant(request)
+        if grant is None:
+            log.warning("liveview: rejected ws upgrade for %s — missing/bad token", name)
+            return web.Response(text="forbidden — missing or bad ?token=", status=403)
+        can_control = (grant == "control")
+        if not self.registry.has(name):
+            return web.Response(text="no session", status=404)
+
+        ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
+        await ws.prepare(request)
+        self._clients[name].add(ws)
+
+        # Send hello with viewport dimensions for client-side coord scaling
+        try:
+            entry = self.registry.get(name)
+            page = entry.session.page
+            vp = page.viewport_size or {}
+            # Fallback: query window.innerWidth/Height if viewport not set
+            if not vp:
+                try:
+                    vp = await page.evaluate(
+                        "() => ({width: window.innerWidth, height: window.innerHeight})"
+                    )
+                except Exception:  # noqa: BLE001
+                    vp = {"width": 1280, "height": 720}
+            await ws.send_json({
+                "type": "hello",
+                "viewport_width": vp.get("width", 1280),
+                "viewport_height": vp.get("height", 720),
+                "takeover": self.takeover and can_control,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("liveview hello failed for %s: %s", name, exc)
+
+        # Start frame loop if not already running for this session
+        if name not in self._frame_tasks or self._frame_tasks[name].done():
+            self._frame_tasks[name] = asyncio.create_task(self._frame_loop(name))
+
+        # Loop reading takeover events from the client
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    # Server must be in takeover mode AND this connection must
+                    # hold the control token — a watch grant is inert.
+                    if self.takeover and can_control:
+                        await self._handle_takeover(name, msg.data)
+                elif msg.type == WSMsgType.ERROR:
+                    log.warning("ws error for %s: %s", name, ws.exception())
+                    break
+        finally:
+            self._clients[name].discard(ws)
+            # If no more viewers, stop the frame loop to save CPU
+            if not self._clients[name]:
+                task = self._frame_tasks.pop(name, None)
+                if task is not None and not task.done():
+                    task.cancel()
+        return ws
+
+    # ─── frame loop + takeover ──────────────────────────────────────
+
+    async def _frame_loop(self, name: str) -> None:
+        """Capture screenshots at `self.fps` and broadcast to all WS clients
+        for this session. Does NOT hold the session lock — Playwright
+        `page.screenshot()` is safe to call concurrently with other CDP ops.
+        """
+        interval = 1.0 / max(1, self.fps)
+        log.debug("frame loop started for %s @ %d fps", name, self.fps)
+        try:
+            while self._running:
+                entry = self.registry.get(name)
+                if entry is None:
+                    log.debug("session %s gone, stopping frame loop", name)
+                    return
+                if not self._clients.get(name):
+                    return  # no viewers
+                try:
+                    png = await entry.session.page.screenshot(
+                        type='jpeg', quality=self.jpeg_quality,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Page might be navigating or closing — skip this frame
+                    log.debug("screenshot failed for %s: %s", name, exc)
+                    await asyncio.sleep(interval)
+                    continue
+                # Broadcast (snapshot the client set; clients may disconnect mid-iter)
+                for ws in list(self._clients.get(name, ())):
+                    if ws.closed:
+                        self._clients[name].discard(ws)
+                        continue
+                    try:
+                        await ws.send_bytes(png)
+                    except Exception:  # noqa: BLE001
+                        self._clients[name].discard(ws)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+
+    async def _handle_takeover(self, name: str, data: str) -> None:
+        """Forward a client takeover event to the session's page. Acquires the
+        session lock to serialize with regular handler calls."""
+        try:
+            ev = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        entry = self.registry.get(name)
+        if entry is None:
+            return
+        async with entry.lock:
+            page = entry.session.page
+            try:
+                etype = ev.get('type')
+                if etype == 'click':
+                    await page.mouse.click(
+                        float(ev['x']), float(ev['y']),
+                        button=ev.get('button', 'left'),
+                    )
+                elif etype == 'type':
+                    await page.keyboard.type(ev.get('text', ''))
+                elif etype == 'key':
+                    code = ev.get('code', '')
+                    # Compose modifiers (Playwright uses '+' separator)
+                    parts = []
+                    if ev.get('ctrl'): parts.append('Control')
+                    if ev.get('shift'): parts.append('Shift')
+                    if ev.get('alt'): parts.append('Alt')
+                    if ev.get('meta'): parts.append('Meta')
+                    parts.append(code if code else 'Unidentified')
+                    await page.keyboard.press('+'.join(parts))
+                elif etype == 'scroll':
+                    await page.mouse.wheel(
+                        float(ev.get('dx', 0)), float(ev.get('dy', 0)),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("takeover %s failed: %s", etype, exc)

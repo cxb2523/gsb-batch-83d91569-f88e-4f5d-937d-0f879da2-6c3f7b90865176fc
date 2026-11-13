@@ -1,0 +1,479 @@
+"""Filesystem locations for the daemon socket, pidfile, profiles, and session registry.
+
+Vibatchium uses a **1:1 profile↔session** model: every named session has a
+matching profile dir under `~/.config/vibatchium/profiles/<name>/`. The OS-level
+lock on Chrome's `user-data-dir` enforces this — two sessions cannot share a
+profile concurrently — so the 1:1 mapping is the path of least surprise.
+
+- "session name" is the active identifier the CLI/MCP uses to address one
+  concurrent browser (e.g. `vb --session work click @e3`).
+- "profile dir" is the on-disk Chrome user-data-dir that holds cookies,
+  localStorage, IndexedDB, etc. It persists across `session close` so
+  re-opening keeps you logged in.
+
+`active-session` and `active-profile` files are kept in sync (1:1) — for
+backwards-compat with the pre-multi-session API, `profile_*` verbs are aliases
+for the corresponding `session_*` verbs.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import re
+import shutil
+from pathlib import Path
+
+# ─── name validation (Wave 7.5b — path-traversal hardening) ──────────────
+
+# Single allowed-name regex shared by every verb that interpolates a
+# caller-supplied identifier into a filesystem path. Rejects path separators,
+# leading dot, parent-dir segments, and any control characters.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Hard cap so a 4 KB name can't blow out a path on filesystems with PATH_MAX.
+_NAME_MAX_LEN = 64
+
+
+def validate_name(name: str | None, *, kind: str = "name") -> str:
+    """Validate a session/profile/checkpoint identifier.
+
+    Raises ValueError if the name would be unsafe to splice into a path:
+      - empty / non-string
+      - longer than 64 characters
+      - contains anything outside [A-Za-z0-9._-]
+      - starts with a dot (would create a hidden file, or be `..`)
+      - is exactly `.` or `..`
+
+    Returns the name unchanged on success — caller-friendly chaining.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"bad {kind}: must be a non-empty string")
+    if len(name) > _NAME_MAX_LEN:
+        raise ValueError(
+            f"bad {kind} {name!r}: max {_NAME_MAX_LEN} characters"
+        )
+    if name in {".", ".."}:
+        raise ValueError(f"bad {kind} {name!r}: reserved")
+    if not _NAME_RE.match(name):
+        raise ValueError(
+            f"bad {kind} {name!r}: only [A-Za-z0-9._-] allowed, "
+            f"must not start with '.'"
+        )
+    return name
+
+
+# A session NAME as a caller addresses it (`--session X`, MCP `session=X`, the
+# `_session` socket arg). Deliberately looser than validate_name: real profiles
+# on long-lived boxes carry names validate_name would refuse (spaces, e.g. a
+# `--session "Some Research Topic"`), and refusing those would strand the
+# identity behind them. What this DOES refuse is every shape that makes
+# `PROFILES_DIR / name` leave PROFILES_DIR or name something that isn't one
+# directory entry: an absolute path (pathlib discards the left operand — that is
+# how `session="/abs/dir"` used to bypass fspolicy.check_profile_dir), a path
+# separator, `.`/`..`, NUL and control characters, and anything longer than a
+# filesystem name can be.
+_SESSION_REF_MAX_BYTES = 255
+
+
+def validate_session_ref(name, *, kind: str = "session name") -> str:
+    """Validate a caller-addressed session name. Raises ValueError; returns
+    ``name`` unchanged on success."""
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"bad {kind}: must be a non-empty string")
+    if name in {".", ".."}:
+        raise ValueError(f"bad {kind} {name!r}: reserved")
+    if "/" in name or "\\" in name or os.sep in name or (
+            os.altsep and os.altsep in name):
+        raise ValueError(
+            f"bad {kind} {name!r}: a session name is not a path — use "
+            f"`start --profile <dir>` to run a session on a directory of your "
+            f"choice")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+        raise ValueError(f"bad {kind} {name!r}: control characters not allowed")
+    if len(name.encode("utf-8", "surrogatepass")) > _SESSION_REF_MAX_BYTES:
+        raise ValueError(
+            f"bad {kind}: max {_SESSION_REF_MAX_BYTES} bytes")
+    return name
+
+_xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+if _xdg_runtime and Path(_xdg_runtime).is_dir():
+    CACHE_DIR = Path(_xdg_runtime) / "vibatchium"
+else:
+    CACHE_DIR = Path.home() / ".cache" / "vibatchium"
+
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# Wave 7.5d: enforce 0700 on the cache root so other system users can't
+# browse session names / cached data. (mkdir respects umask, which is
+# typically 0022 → 0755; we narrow it explicitly.)
+try:
+    os.chmod(CACHE_DIR, 0o700)
+except OSError:
+    pass
+
+# Profiles live OUTSIDE the runtime dir so they survive reboots. Sock+pid stay
+# in the runtime dir so a stale socket doesn't persist across reboots.
+CONFIG_DIR = Path.home() / ".config" / "vibatchium"
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(CONFIG_DIR, 0o700)
+except OSError:
+    pass
+PROFILES_DIR = CONFIG_DIR / "profiles"
+PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(PROFILES_DIR, 0o700)
+except OSError:
+    pass
+# Wave 7.5e: retroactively narrow any pre-existing profile sub-dirs (created
+# by older vibatchium versions under loose umask). These hold cookies +
+# localStorage — same risk as their parent. Only touch the dir mode, not
+# Chrome's inner files (those are 0700 because Chrome chmods them itself).
+for _pdir in PROFILES_DIR.iterdir() if PROFILES_DIR.exists() else ():
+    if _pdir.is_dir():
+        try:
+            os.chmod(_pdir, 0o700)
+        except OSError:
+            pass
+# Also retroactively narrow the legacy `chrome-profile` dir that older
+# vibatchium versions created directly under CACHE_DIR (pre-multi-session
+# layout). New code uses PROFILES_DIR/<name> instead.
+_legacy_chrome_profile = CACHE_DIR / "chrome-profile"
+if _legacy_chrome_profile.is_dir():
+    try:
+        os.chmod(_legacy_chrome_profile, 0o700)
+    except OSError:
+        pass
+# 0.20.0: operator-written launch config (browser.json, persona.json) for
+# profile dirs vibatchium does NOT manage — `start --profile /some/dir`. Such a
+# dir is caller-chosen: an agent may point `start --profile` at a directory
+# under its own roots and get attacker bytes into it (`download_save`), so a
+# config file INSIDE it can't be trusted to name the executable the daemon
+# runs. Pins for those dirs live here instead, keyed by the dir's realpath.
+# CONFIG_DIR is on fspolicy's read+write deny list, so no caller path reaches
+# it. It sits beside, not inside, PROFILES_DIR so it never lists as a session
+# or gets swept as a stale profile. Created lazily on the first write — a
+# box that never pins an unmanaged dir never grows it.
+PINS_DIR = CONFIG_DIR / "pins"
+
+
+def is_managed_profile(profile_dir, managed_root=None) -> bool:
+    """True iff ``profile_dir`` is strictly inside vibatchium's PROFILES_DIR
+    (realpath on both sides, so a symlink can't fake membership)."""
+    root = os.path.realpath(os.fspath(managed_root if managed_root is not None
+                                      else PROFILES_DIR))
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.fspath(profile_dir))))
+    return real != root and real.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def profile_config_dir(profile_dir, *, managed_root=None, pins_root=None) -> Path:
+    """Where operator-only launch config for ``profile_dir`` lives: the profile
+    dir itself when vibatchium manages it, else ``PINS_DIR/<sha256(realpath)>``.
+    Pure — creates nothing (reads of a never-pinned dir must leave no trace)."""
+    if is_managed_profile(profile_dir, managed_root):
+        return Path(profile_dir)
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.fspath(profile_dir))))
+    key = hashlib.sha256(real.encode("utf-8", "surrogateescape")).hexdigest()
+    return Path(pins_root if pins_root is not None else PINS_DIR) / key
+
+
+def ensure_profile_config_dir(profile_dir, *, managed_root=None,
+                              pins_root=None) -> Path:
+    """profile_config_dir(), created (0700) for a write. A pins-store entry
+    also records which profile dir it belongs to (``profile``), so an operator
+    — and the persona GPU-node balancer — can map it back."""
+    out = profile_config_dir(profile_dir, managed_root=managed_root,
+                             pins_root=pins_root)
+    if out == Path(profile_dir):
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+    secure_mkdir(out.parent)
+    secure_mkdir(out)
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.fspath(profile_dir))))
+    secure_write(out / "profile", real)
+    return out
+
+
+ACTIVE_PROFILE_PATH = CONFIG_DIR / "active-profile"
+ACTIVE_SESSION_PATH = CONFIG_DIR / "active-session"
+
+
+def cache_mirror_dir(profile_dir: Path) -> Path | None:
+    """Where Chromium puts this profile's disk cache when we DON'T pin it.
+
+    Chromium derives the default cache location by taking the user-data-dir's
+    position relative to $XDG_CONFIG_HOME and re-rooting it at $XDG_CACHE_HOME.
+    Because PROFILES_DIR lives under ~/.config, every profile silently grows a
+    cache twin somewhere we never look:
+
+        ~/.config/vibatchium/profiles/<name>   the profile — we create/delete it
+        ~/.cache/vibatchium/profiles/<name>    Chrome's cache — nothing deleted it
+
+    Since 0.18.13 both launchers pin --disk-cache-dir INSIDE the profile, so a
+    new session's cache never lands here — though Chrome still creates the empty
+    directory skeleton, so this is not the same as "no twin exists". This
+    function locates it for the code that cleans up: both profile-deletion paths
+    drop a profile's own twin, and `clean` sweeps the ones left behind by older
+    versions, whether or not their profile survived.
+
+    Returns None when the profile isn't under XDG_CONFIG_HOME at all (an
+    attached or explicitly-placed profile) — no remap happens, so no twin.
+    Never returns a path outside XDG_CACHE_HOME.
+    """
+    cfg_home = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    try:
+        rel = Path(os.path.abspath(profile_dir)).relative_to(os.path.abspath(cfg_home))
+    except ValueError:
+        return None
+    if not rel.parts:
+        return None
+    return cache_home / rel
+
+
+def drop_cache_mirror(profile_dir: Path) -> bool:
+    """Remove a deleted profile's cache twin. True if one was there.
+
+    Call this from EVERY path that removes a profile. There are two — the
+    ephemeral close in `SessionRegistry.close` and `delete_profile_dir` — and
+    the ephemeral one is by far the busier, so a fix applied to only the other
+    would miss most of the leak it was written for.
+
+    Best-effort by design: the profile is already gone, and a cache we can't
+    remove must not turn a successful close into an error.
+    """
+    twin = cache_mirror_dir(profile_dir)
+    if twin is None or twin.is_symlink() or not twin.is_dir():
+        return False
+    try:
+        shutil.rmtree(twin)
+        return True
+    except OSError as exc:
+        logging.getLogger("vibatchium.paths").warning(
+            "cache mirror %s: %s", twin, exc)
+        return False
+
+SOCK_PATH = CACHE_DIR / "daemon.sock"
+PID_PATH = CACHE_DIR / "daemon.pid"
+# 0.9.1: a daemon holds an exclusive flock on this file for its whole life —
+# the race-free singleton guarantee (one daemon per XDG runtime dir / socket).
+LOCK_PATH = CACHE_DIR / "daemon.lock"
+
+# 0.9.2: the daemon LOG lives in a PERSISTENT state dir (survives reboots and
+# daemon bounces), NOT the volatile runtime CACHE_DIR — so the per-verb forensic
+# trail (tracebacks, self-heal, ghost readbacks) is no longer wiped on every
+# restart. Socket/pid/lock deliberately STAY in CACHE_DIR (a stale socket SHOULD
+# die on reboot; the flock is inode-bound). The server writes via a rotating
+# handler so the on-disk log stays bounded. Override the full path with
+# VIBATCHIUM_LOG_FILE (e.g. for tests or a custom location).
+#
+# 0.9.3: the LOG FILENAME carries a per-daemon suffix derived from the runtime
+# dir (see _runtime_log_suffix). The state dir is HOME-derived (shared by every
+# daemon for this user) while socket/pid/lock are XDG_RUNTIME_DIR-derived
+# (unique per daemon); without the suffix the primary live daemon and an
+# isolated daemon (e.g. project-scouter on its own XDG_RUNTIME_DIR) would both
+# open the SAME daemon.log with their OWN RotatingFileHandler and race on
+# rotation, shredding each other's history. The primary daemon keeps the
+# documented bare daemon.log; only an isolated runtime dir gets a suffix.
+_xdg_state = os.environ.get("XDG_STATE_HOME")
+if _xdg_state and Path(_xdg_state).is_dir():
+    _state_base = Path(_xdg_state) / "vibatchium"
+else:
+    _state_base = Path.home() / ".local" / "state" / "vibatchium"
+# FAIL-SAFE: paths.py is imported by every entrypoint, so a failure here would
+# break all of `vb` AND the daemon. If the persistent state dir can't be created
+# (read-only HOME, odd env), fall back to the runtime CACHE_DIR — a volatile log,
+# i.e. exactly the pre-0.9.2 behaviour, never a crash.
+try:
+    _state_base.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(_state_base, 0o700)
+    except OSError:
+        pass
+    STATE_DIR = _state_base
+except OSError:
+    STATE_DIR = CACHE_DIR
+def _runtime_log_suffix(runtime_dir: str | None) -> str:
+    """Per-daemon log-file suffix so daemons on DIFFERENT runtime dirs never
+    share one persistent log file.
+
+    The daemon LOG lives under the HOME-derived STATE_DIR (shared across every
+    daemon for this user), while the socket/pid/lock live under the
+    XDG_RUNTIME_DIR-derived CACHE_DIR (unique per daemon). Without a suffix the
+    primary live daemon and an isolated daemon (e.g. project-scouter's
+    XDG_RUNTIME_DIR=/run/user/<uid>/scouter-vb) would both open
+    STATE_DIR/daemon.log with their OWN RotatingFileHandler and RACE on the
+    daemon.log -> daemon.log.1 rename at rotation — silently shredding each
+    other's history.
+
+    The PRIMARY daemon — the default systemd runtime dir (/run/user/<uid>), or
+    no runtime dir at all (the ~/.cache fallback) — keeps the documented bare
+    `daemon.log` for backward-compat. Any OTHER (intentionally isolated) runtime
+    dir gets a stable, readable, collision-safe `-<name>-<hash8>` suffix. Pure
+    function of the path (no env reads) so it's directly unit-testable.
+    """
+    if not runtime_dir or not Path(runtime_dir).is_dir():
+        return ""  # ~/.cache fallback / no per-user runtime dir -> single daemon
+    try:
+        if hasattr(os, "getuid"):
+            if Path(runtime_dir).resolve() == Path(f"/run/user/{os.getuid()}").resolve():
+                return ""  # the primary daemon keeps the bare daemon.log
+    except OSError:
+        pass
+    token = re.sub(r"[^A-Za-z0-9_-]", "-", Path(runtime_dir).name).strip("-") or "rt"
+    digest = hashlib.sha1(runtime_dir.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"-{token}-{digest}"
+
+
+_LOG_SUFFIX = _runtime_log_suffix(os.environ.get("XDG_RUNTIME_DIR"))
+_log_override = os.environ.get("VIBATCHIUM_LOG_FILE")
+if _log_override:
+    LOG_PATH = Path(_log_override).expanduser()
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+else:
+    LOG_PATH = STATE_DIR / f"daemon{_LOG_SUFFIX}.log"
+DEFAULT_PROFILE_DIR = PROFILES_DIR / "default"
+DEFAULT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(DEFAULT_PROFILE_DIR, 0o700)
+except OSError:
+    pass
+# Retroactively narrow daemon.log if it exists from a pre-fix run.
+if LOG_PATH.exists():
+    try:
+        os.chmod(LOG_PATH, 0o600)
+    except OSError:
+        pass
+
+DEFAULT_SESSION_NAME = "default"
+
+
+# ─── Wave 7.5d: secure write helper ──────────────────────────────────────
+
+def secure_write(path: Path, content: str | bytes) -> None:
+    """Write a file with 0600 perms regardless of umask.
+
+    Use this for every file vibatchium produces that could carry sensitive
+    data (cookies, auth headers, request bodies, cached intents, secrets).
+    Caller-controlled output paths (`vb screenshot -o foo.png`) are
+    explicitly NOT routed through this — the user picked the path and
+    may want to share the artifact; for those, document the perms model
+    instead of forcing it.
+
+    Atomic: writes to a temp file in the same directory, fchmods to 0600
+    *before* the rename, then renames. Eliminates the brief window where
+    the file could be world-readable after creation but before chmod.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Tempfile in same dir so rename is atomic on the same fs.
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    mode = "wb" if isinstance(content, (bytes, bytearray)) else "w"
+    try:
+        # os.open with mode lets us chmod-on-open atomically.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(tmp), flags, 0o600)
+        with os.fdopen(fd, mode) as f:
+            f.write(content)
+        os.replace(str(tmp), str(path))
+    except Exception:
+        # Best-effort cleanup
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def secure_mkdir(path: Path) -> Path:
+    """mkdir -p with 0700 perms — for any dir vibatchium creates that may
+    hold sensitive children (checkpoints, network dumps, vision cache)."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+# ─── session naming + registry ───────────────────────────────────────────────
+
+
+def _read_name(path: Path, fallback: str) -> str:
+    if path.exists():
+        v = path.read_text().strip()
+        if v:
+            return v
+    return fallback
+
+
+def get_active_session_name() -> str:
+    """Resolve the active session name.
+
+    Order: ACTIVE_SESSION_PATH file → legacy ACTIVE_PROFILE_PATH file → 'default'.
+    Reading the legacy path keeps pre-Wave-5 setups working without migration.
+    """
+    name = _read_name(ACTIVE_SESSION_PATH, "")
+    if name:
+        return name
+    return _read_name(ACTIVE_PROFILE_PATH, DEFAULT_SESSION_NAME)
+
+
+def set_active_session_name(name: str) -> None:
+    """Persist the active session. Mirrors to ACTIVE_PROFILE_PATH so the legacy
+    `profile_use` verb stays in sync (1:1 model)."""
+    secure_write(ACTIVE_SESSION_PATH, name)
+    secure_write(ACTIVE_PROFILE_PATH, name)
+
+
+def session_dir(name: str) -> Path:
+    """Return the on-disk dir for a session (creates if missing).
+
+    Always ``PROFILES_DIR/<name>``. An absolute path or any other path-shaped
+    name raises ValueError (validate_session_ref): it used to be accepted
+    as-is, which let a caller-chosen session NAME pick an arbitrary
+    user-data-dir without the fspolicy check `start --profile` gets. A custom
+    directory is what `start --profile <dir>` is for.
+    """
+    if not name:
+        name = DEFAULT_SESSION_NAME
+    validate_session_ref(name)
+    out = PROFILES_DIR / name
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def list_session_names() -> list[str]:
+    """List all on-disk session/profile names (sorted)."""
+    if not PROFILES_DIR.exists():
+        return []
+    return sorted(p.name for p in PROFILES_DIR.iterdir() if p.is_dir())
+
+
+# ─── legacy profile API (1:1 aliases) ────────────────────────────────────────
+
+
+def get_active_profile_name() -> str:
+    """Legacy alias — returns the active session name (1:1)."""
+    return get_active_session_name()
+
+
+def set_active_profile_name(name: str) -> None:
+    """Legacy alias — sets the active session name."""
+    set_active_session_name(name)
+
+
+def get_active_profile_dir() -> Path:
+    """Legacy alias — returns the dir of the active session."""
+    return session_dir(get_active_session_name())
+
+
+def list_profile_names() -> list[str]:
+    """Legacy alias — same as list_session_names()."""
+    return list_session_names()
