@@ -171,9 +171,13 @@ cookies, IP), not in the generated payload. The most common root causes, in orde
    Chrome-version policy, header-order shapes). Use it to **analyze a powhttp capture**
    (the HAR MCP can't read powhttp's live TLS / HTTP/2 data), to reason by hand when no MCP
    is available, or to write correct requests up front. Per-product flow checks live in the
-   HAR analysis MCP and the product references. It ships a runnable helper,
-   `scripts/sec_ch_ua.py`, to compute the exact expected `sec-ch-ua` for any Chrome version
-   — use it instead of eyeballing.
+   HAR analysis MCP and the product references. It ships runnable helpers in
+   `scripts/`: `sec_ch_ua.py` computes the exact expected `sec-ch-ua` for any Chrome
+   version (use it instead of eyeballing), and `request_selfcheck.py` turns the whole
+   rule set into a reusable, per-rule self-check — pass it a request description (HTTP
+   version, headers in real order, User-Agent, optional Accept-CH set) and get back a
+   structured pass/fail verdict per rule plus an overall result. An offline demo is in
+   `scripts/request_selfcheck_example.py`.
 4. **Symptom → cause → fix** — `references/debugging.md`, per product and cross-cutting.
 
 ## Getting help / escalating to Hyper Solutions

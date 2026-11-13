@@ -78,6 +78,9 @@ rule out those — prefer powhttp for the live wire. See `references/har-analyze
 .mcp.json                     Bundled MCP servers: powhttp (local) + har-analyzer (hosted)
 SKILL.md                      Entry point: mental model, requirements, routing, debugging
 scripts/sec_ch_ua.py          Compute the exact sec-ch-ua (GREASE) for a Chrome version
+scripts/request_selfcheck.py  Reusable per-rule self-check of a captured/hand-written request
+scripts/request_selfcheck_example.py  Offline demo: one passing + one failing request
+tests/test_request_selfcheck.py       Automated tests (normal, boundary, negative paths)
 references/
   authentication.md           x-api-key, JWT x-signature, organization headers
   tls-and-headers.md          TLS fingerprinting, header order, IP/proxy, Chrome version
