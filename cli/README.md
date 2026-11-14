@@ -126,6 +126,7 @@ easypost fill --input task.json
 - 扩展 `0.1.31` 的动态 capabilities 包含 `weibo`、`toutiao`、`juejin`。三者支持 CLI `fill` 与 `publish --yes`；掘金指定圈子时可同时传 `extra.juejin.topic` 与 `publishGuard.expectedTargets.juejin` 做精确核对。
 - `fill` 保持兼容，可不传 guard；一旦提供 `data.publishGuard`，仍校验圈子和公开链接配置，账号名称不参与校验。`capabilities` 返回 `accountPolicy=current_browser_session`、`accountNameRequired=false` 和 `expectedAccounts=deprecated_ignored`。
 - `assets[].path` 必须是绝对路径且指向普通文件。`role` 只能是 `media`、`cover`、`horizontalCover` 或 `wordFile`，省略时为 `media`；`type` 省略时从文件头和扩展名识别；`sourceUrl` 只接受不含用户名/密码的 HTTP(S)。
+- 带 `sourceUrl` 的素材在 `prepare`/`fill`/`publish` 前逐条采集：本地文件缺失或与远端不一致（按大小与 SHA256 比对）时，先下载到同目录临时文件再原子替换；已一致则跳过并记为 `already_ready`。下载设超时与有限重试，仅网络错误与 5xx 重试，4xx 与非法 URL 直接判失败。单条失败不中断其余素材；同一 `path` 的并发下载只有一个写入者，其余等待复用结果。命令输出的 `assetFetch` 汇总总数、下载、跳过、失败数与每条结局；有失败时命令以退出码 `40` 结束，已成功素材保留可用，修复失败项后重跑即可。
 
 ### 平台特殊规范
 

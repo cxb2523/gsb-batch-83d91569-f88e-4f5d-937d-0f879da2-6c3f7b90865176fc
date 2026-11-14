@@ -13,6 +13,7 @@
   },
   "exports": {
     ".": "./src/index.js",
+    "./asset-fetch": "./src/asset-fetch.js",
     "./asset-server": "./src/asset-server.js",
     "./bridge": "./src/bridge-client.js",
     "./framing": "./src/native-framing.js",

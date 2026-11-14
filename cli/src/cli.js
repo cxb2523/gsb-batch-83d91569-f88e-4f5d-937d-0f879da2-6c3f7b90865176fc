@@ -17,6 +17,7 @@ import { BRIDGE_ID_PATTERN, rememberRequestRoute, readRequestRoute } from "./bri
 import { CliError, asCliError, exitCodeForRemoteCode, remoteErrorToCliError } from "./errors.js";
 import { parseInputJson, normalizeInput, validateRequestId } from "./schema.js";
 import { inspectAssets } from "./assets.js";
+import { fetchRemoteAssets } from "./asset-fetch.js";
 import { prepareXArticleImages } from "./x-article-images.js";
 import { createPayloadDigest } from "./canonical-json.js";
 import { startAssetServer } from "./asset-server.js";
@@ -181,7 +182,7 @@ function helpResult(command) {
       doctor: "检查 Native Messaging 桥、扩展唤醒和 ID 漂移；--repair 自动修复 host 配置",
       bridges: "列出所有在线桥及目标身份（bridges list）",
       capabilities: "读取扩展支持的内容类型、平台与已保存发布组合",
-      prepare: "校验输入并流式计算素材大小、MIME 和 SHA256",
+      prepare: "校验输入，按 sourceUrl 逐条采集远端素材（失败隔离、可重跑），并流式计算大小、MIME 和 SHA256",
       fill: "让扩展打开平台页面并填入内容；支持 --dry-run",
       publish: "执行直接发布；必须显式传 --yes；支持 --dry-run",
       status: "查询指定 requestId 的状态",
@@ -204,7 +205,7 @@ function helpResult(command) {
             path: "absolute regular-file path",
             role: "optional; defaults to media",
             type: "optional MIME override",
-            sourceUrl: "optional http(s) source URL",
+            sourceUrl: "optional http(s) source URL (no credentials); downloaded to path when missing or stale, skipped when size+SHA256 match",
           },
         ],
       },
@@ -278,6 +279,23 @@ export async function prepareInput(input, mode) {
       hint: "确认圈子等发布目标，并要求公开链接读回",
     });
   }
+  // Remote assets are fetched before inspection: each sourceUrl asset gets an
+  // individual outcome, failures stay isolated, and any failure fails the
+  // command with a non-zero exit while leaving downloaded files in place.
+  const assetFetch = input.assets.some((asset) => asset.sourceUrl !== undefined)
+    ? await fetchRemoteAssets(input.assets)
+    : undefined;
+  if (assetFetch && assetFetch.failed > 0) {
+    throw new CliError(
+      "ASSET_FETCH_FAILED",
+      `素材采集未全部完成：${assetFetch.failed}/${assetFetch.total} 失败`,
+      {
+        exitCode: EXIT_CODES.EXECUTION,
+        hint: "查看 assetFetch.results 逐条结局，修复失败项后重跑；已就绪素材会跳过下载",
+        details: { assetFetch },
+      },
+    );
+  }
   const assets = await inspectAssets(input.assets);
   const payloadDigest = createPayloadDigest({
     browserContext: input.browserContext,
@@ -303,6 +321,7 @@ export async function prepareInput(input, mode) {
     platforms: input.platforms,
     data: input.data,
     assets,
+    ...(assetFetch ? { assetFetch } : {}),
     payloadDigest,
   };
   return prepared;
