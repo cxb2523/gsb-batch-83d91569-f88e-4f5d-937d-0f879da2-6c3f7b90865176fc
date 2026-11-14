@@ -1,0 +1,29 @@
+name: Sync to Public EasyPost Repo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cli/**'
+      - 'skills/**'
+      - 'docs/**'
+      - 'assets/**'
+      - 'README.md'
+      - 'LICENSE'
+  workflow_dispatch: # 支持后台手动点击运行
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出当前私有母库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: 执行开源目录单向同步
+        env:
+          PUBLIC_REPO: "https://x-access-token:${{ secrets.SYNC_PAT }}@github.com/gybin02/easypost.git"
+        run: |
+          chmod +x ./scripts/sync-public.sh
+          ./scripts/sync-public.sh

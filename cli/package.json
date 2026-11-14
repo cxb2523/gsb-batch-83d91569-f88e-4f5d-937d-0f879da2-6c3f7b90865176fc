@@ -1,0 +1,43 @@
+{
+  "name": "easypost-cli",
+  "version": "1.0.0",
+  "description": "快推 EasyPost 极速多平台分发 Chrome 扩展的本地 Agent CLI 与 Native Messaging 桥",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "easypost": "./bin/easypost.js",
+    "ep": "./bin/easypost.js",
+    "easypost-native-host": "./bin/easypost-native-host.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./asset-server": "./src/asset-server.js",
+    "./bridge": "./src/bridge-client.js",
+    "./framing": "./src/native-framing.js",
+    "./host-install": "./src/host-install.js",
+    "./schema": "./src/schema.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "easypost",
+    "chrome-extension",
+    "native-messaging",
+    "cli",
+    "social-media",
+    "auto-upload",
+    "agent-skills"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
