@@ -1,0 +1,129 @@
+"""
+Caja de herramientas común de captura (compartida por redes/*): scroll+captura
+de viewport o de un elemento, esperas de ritmo humano, sesión con storage_state
+y el error de sesión inválida. Lo específico de cada red vive en redes/<red>.py.
+
+Dry-run sin login ni red (prueba la maquinaria de scroll+captura contra cualquier
+URL, ej. el feed falso de testdata servido por localhost):
+    python browser.py --url http://127.0.0.1:8123/feed_falso.html --scrolls 3
+
+Playwright se importa DIFERIDO: la suite corre sin playwright instalado.
+"""
+import argparse
+import random
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+TIMEOUT_FEED_MS = 30000
+
+UA_MAJOR_FALLBACK = "120"
+
+
+def _user_agent(version: str) -> str:
+    """UA de Chrome para Windows usando el major REAL del navegador (ej. '140.0.7259.5'
+    -> 140), para que no se desactualice. Sin el token 'HeadlessChrome'. Si `version`
+    no empieza con dígitos, usa UA_MAJOR_FALLBACK."""
+    major = (version or "").split(".")[0]
+    if not major.isdigit():
+        major = UA_MAJOR_FALLBACK
+    return (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{major}.0.0.0 Safari/537.36")
+
+
+class SesionInvalidaError(Exception):
+    """La sesión no sirve de verdad (la red redirigió a login/challenge). Es la
+    ÚNICA evidencia que amerita quemar la cuenta: la vuelta es login manual."""
+
+
+class DesafioTemporalError(Exception):
+    """Challenge transitorio: captcha, muro anti-bot o feed que no carga a tiempo.
+    La cookie de sesión casi seguro sigue viva — el desafío es a la máquina/IP, no
+    a la cuenta (medido 2026-09-30: dos cuentas de TikTok "muertas" con 2 min de
+    diferencia eran el anti-bot, y Twitter tuvo timeouts de 30s con sesiones
+    sanas). No quemar: warning, saltear y reintentar en la corrida siguiente."""
+
+
+def esperar_aleatorio(rango) -> None:
+    """Espera un tiempo aleatorio dentro del rango (ritmo humano)."""
+    time.sleep(random.uniform(rango[0], rango[1]))
+
+
+def capturar_pagina(page, scrolls: int, esperas, carpeta: Path, prefijo: str) -> list[Path]:
+    """Captura el viewport `scrolls` veces scrolleando ~90% de pantalla entre capturas.
+    Separado de la navegación para poder probarlo contra cualquier página."""
+    carpeta.mkdir(parents=True, exist_ok=True)
+    rutas: list[Path] = []
+    for n in range(scrolls):
+        ruta = carpeta / f"{prefijo}-{n + 1}.png"
+        page.screenshot(path=str(ruta))
+        rutas.append(ruta)
+        if n + 1 < scrolls:
+            page.evaluate("window.scrollBy(0, window.innerHeight * 0.9)")
+            esperar_aleatorio(esperas)
+    return rutas
+
+
+def capturar_elemento(page, selector: str, scrolls: int, esperas,
+                      carpeta: Path, prefijo: str) -> list[Path]:
+    """Como capturar_pagina, pero screenshotea y scrollea UN elemento (ej. el panel
+    de comentarios de un video), no la ventana."""
+    carpeta.mkdir(parents=True, exist_ok=True)
+    rutas: list[Path] = []
+    for n in range(scrolls):
+        ruta = carpeta / f"{prefijo}-{n + 1}.png"
+        page.locator(selector).first.screenshot(path=str(ruta))
+        rutas.append(ruta)
+        if n + 1 < scrolls:
+            page.eval_on_selector(selector, "el => el.scrollBy(0, el.clientHeight * 0.9)")
+            esperar_aleatorio(esperas)
+    return rutas
+
+
+@contextmanager
+def pagina_con_sesion(sesion: Path, viewport, headless: bool):
+    """Abre Chromium con la sesión (storage_state) de una cuenta y entrega un Page.
+    Cierra el navegador al salir. Mismo flag anti-detección que el login: con
+    navigator.webdriver=true las redes interponen challenges que acá se leerían
+    como cuenta quemada."""
+    from playwright.sync_api import sync_playwright  # diferido
+    with sync_playwright() as p:
+        navegador = p.chromium.launch(
+            headless=headless, args=["--disable-blink-features=AutomationControlled"])
+        context = navegador.new_context(
+            storage_state=str(sesion),
+            viewport={"width": viewport[0], "height": viewport[1]},
+            user_agent=_user_agent(navegador.version),
+            locale="es-AR",
+            timezone_id="America/Argentina/Buenos_Aires",
+            permissions=["notifications"])  # evita el popup "Activar notificaciones"
+        try:
+            yield context.new_page()
+        finally:
+            navegador.close()
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Dry-run de la maquinaria de capturas (sin login, contra cualquier URL).")
+    ap.add_argument("--url", required=True, help="URL a capturar (ej. el feed falso en localhost)")
+    ap.add_argument("--scrolls", type=int, default=3)
+    ap.add_argument("--visible", action="store_true", help="navegador visible (default headless)")
+    ap.add_argument("--out", default="capturas/dry-run", help="carpeta de salida")
+    args = ap.parse_args(argv)
+    from playwright.sync_api import sync_playwright  # diferido
+    with sync_playwright() as p:
+        navegador = p.chromium.launch(headless=not args.visible)
+        page = navegador.new_page(viewport={"width": 950, "height": 1300})
+        page.goto(args.url)
+        rutas = capturar_pagina(page, args.scrolls, (0.5, 1.0), Path(args.out), "dry")
+        navegador.close()
+    for r in rutas:
+        print(r)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

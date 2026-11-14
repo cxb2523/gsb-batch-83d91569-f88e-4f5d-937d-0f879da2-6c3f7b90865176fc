@@ -1,0 +1,658 @@
+import re
+
+import electoral as el
+import pytest
+
+
+CSV_OK = (
+    "consultora,fecha,candidato,porcentaje\n"
+    "Consultora X,2026-08-01,Javier Milei,42.5\n"
+    "Consultora X,2026-08-01,Axel Kicillof,38.0\n"
+    "Consultora Y,2026-08-15,Javier Milei,40.1\n"
+)
+
+
+# Fake id-agnóstico de analyze_posts_electoral para los tests de integración de
+# run_boca_de_urna: atribuye a cada post el candidato cuyo nombre/apellido aparece en
+# su texto. No depende del esquema de ids (ahora "{red}_i") ni de Gemini.
+_FAKE_CANDS = ["Javier Milei", "Axel Kicillof"]
+
+
+def _fake_analyze_por_texto(posts_by_id, network_context=""):
+    out = []
+    for pid, p in posts_by_id.items():
+        txt = (p.get("text") or "").lower()
+        cands = [{"nombre": full, "postura": "a_favor", "confianza": 0.9}
+                 for full in _FAKE_CANDS if any(w in txt for w in full.lower().split())]
+        out.append({"id": pid, "es_electoral": bool(cands), "cita": p.get("text", ""),
+                    "candidatos": cands})
+    return out
+
+
+def test_parse_csv_happy_path():
+    rows, warnings = el.parse_pollster_csv(CSV_OK)
+    assert len(rows) == 3
+    assert warnings == []
+    assert rows[0] == {"consultora": "Consultora X", "fecha": "2026-08-01",
+                       "candidato": "Javier Milei", "porcentaje": 42.5}
+    assert rows[1]["porcentaje"] == 38.0  # coma decimal normalizada
+
+
+def test_parse_csv_saltea_filas_invalidas_con_warning():
+    csv = ("consultora,fecha,candidato,porcentaje\n"
+           "Buena,2026-08-01,Milei,40\n"
+           "MalPct,2026-08-01,Milei,no-num\n"
+           "MalFecha,ayer,Milei,30\n")
+    rows, warnings = el.parse_pollster_csv(csv)
+    assert len(rows) == 1 and rows[0]["consultora"] == "Buena"
+    assert len(warnings) == 2
+
+
+def test_parse_pct_comma_decimal():
+    assert el._parse_pct("42,5") == 42.5
+
+
+def test_parse_csv_header_invalido_es_error():
+    with pytest.raises(ValueError):
+        el.parse_pollster_csv("foo,bar\n1,2\n")
+
+
+def test_parse_csv_vacio_devuelve_vacio():
+    rows, warnings = el.parse_pollster_csv("")
+    assert rows == [] and warnings == []
+
+
+def _analysis_fake(items):
+    """Devuelve un run_with_rotation fake que responde un mirror fijo."""
+    return lambda prompt: (items, None)
+
+
+def test_analyze_mapea_por_id_y_sanea_postura(monkeypatch):
+    import gemini_client as gc
+    posts_by_id = {
+        "Post_0": {"text": "Milei la rompe", "network": "twitter"},
+        "Post_1": {"text": "Basta de Milei", "network": "instagram"},
+    }
+    mirror = [
+        {"id": "Post_0", "candidatos": [{"nombre": "Javier Milei", "postura": "a_favor", "confianza": 0.9}],
+         "cita": "Milei la rompe", "es_electoral": True},
+        {"id": "Post_1", "candidatos": [{"nombre": "Javier Milei", "postura": "INVALIDA", "confianza": 0.8}],
+         "cita": "Basta de Milei", "es_electoral": True},
+    ]
+    monkeypatch.setattr(gc, "run_with_rotation", _analysis_fake(mirror))
+    out = el.analyze_posts_electoral(posts_by_id)
+    assert out[0]["candidatos"][0]["postura"] == "a_favor"
+    # postura inválida se descarta -> candidato sin postura válida queda fuera
+    assert out[1]["candidatos"] == []
+
+
+def test_analyze_upstream_falla_devuelve_none(monkeypatch):
+    import gemini_client as gc
+    monkeypatch.setattr(gc, "run_with_rotation", lambda prompt: (None, 503))
+    assert el.analyze_posts_electoral({"Post_0": {"text": "x", "network": "twitter"}}) is None
+
+
+def test_analyze_ids_inventados_se_ignoran(monkeypatch):
+    import gemini_client as gc
+    monkeypatch.setattr(gc, "run_with_rotation",
+                        _analysis_fake([{"id": "Post_999", "candidatos": [], "cita": "", "es_electoral": False}]))
+    out = el.analyze_posts_electoral({"Post_0": {"text": "x", "network": "twitter"}})
+    assert out == []  # el id inventado no matchea ningún post
+
+
+def test_canonical_key_unifica_acentos_y_may():
+    assert el.canonical_key("Sergio Massa") == el.canonical_key("  sergio  massa ")
+    assert el.canonical_key("Patricia Bullrich") == el.canonical_key("PATRICIA BULLRICH")
+
+
+def test_aggregate_neto_y_confianza():
+    analysis = [
+        {"id": "Post_0", "es_electoral": True, "cita": "a",
+         "candidatos": [{"nombre": "Javier Milei", "postura": "a_favor", "confianza": 0.9}]},
+        {"id": "Post_1", "es_electoral": True, "cita": "b",
+         "candidatos": [{"nombre": "javier  milei", "postura": "a_favor", "confianza": 0.8}]},
+        {"id": "Post_2", "es_electoral": True, "cita": "c",
+         "candidatos": [{"nombre": "Javier Milei", "postura": "en_contra", "confianza": 0.7}]},
+        {"id": "Post_3", "es_electoral": True, "cita": "d",
+         "candidatos": [{"nombre": "Axel Kicillof", "postura": "a_favor", "confianza": 0.9}]},
+        {"id": "Post_4", "es_electoral": True, "cita": "e",
+         "candidatos": [{"nombre": "Javier Milei", "postura": "a_favor", "confianza": 0.2}]},  # baja conf: descartada
+    ]
+    candidatos, baja_conf = el.aggregate_net_sentiment(analysis)
+    assert baja_conf == 1
+    milei = next(c for c in candidatos if el.canonical_key(c["nombre"]) == el.canonical_key("Javier Milei"))
+    assert (milei["pos"], milei["neg"], milei["menciones"]) == (2, 1, 3)  # sentimiento se conserva
+    kici = next(c for c in candidatos if el.canonical_key(c["nombre"]) == el.canonical_key("Axel Kicillof"))
+    assert kici["pos"] == 1
+    # pct = share de menciones: Milei 3 de 4 (75%), Kicillof 1 de 4 (25%).
+    assert milei["pct"] == 75.0 and kici["pct"] == 25.0
+    assert candidatos == sorted(candidatos, key=lambda c: c["pct"], reverse=True)
+
+
+def test_aggregate_incluye_porcentajes_de_sentimiento():
+    """Además del total y los conteos, cada candidato trae el % de cada postura
+    (positivo/negativo/neutral) para mostrar 'Milei 25% positivo, 25% negativo…'."""
+    analysis = [
+        {"candidatos": [{"nombre": "Milei", "postura": "a_favor", "confianza": 0.9}], "cita": ""},
+        {"candidatos": [{"nombre": "Milei", "postura": "en_contra", "confianza": 0.9}], "cita": ""},
+        {"candidatos": [{"nombre": "Milei", "postura": "neutro", "confianza": 0.9}], "cita": ""},
+        {"candidatos": [{"nombre": "Milei", "postura": "neutro", "confianza": 0.9}], "cita": ""},
+    ]
+    candidatos, _bc = el.aggregate_net_sentiment(analysis)
+    m = candidatos[0]
+    # 1 pos, 1 neg, 2 neu sobre 4 menciones -> 25 / 25 / 50.
+    assert (m["pos_pct"], m["neg_pct"], m["neu_pct"]) == (25.0, 25.0, 50.0)
+
+
+def test_aggregate_pct_es_share_de_menciones():
+    """pct siempre es volumen de menciones, sin importar el sentimiento (así todos
+    los candidatos detectados aparecen; antes colapsaba a uno con sentimiento neto)."""
+    analysis = [
+        {"id": "Post_0", "candidatos": [{"nombre": "A", "postura": "en_contra", "confianza": 0.9}], "cita": ""},
+        {"id": "Post_1", "candidatos": [{"nombre": "A", "postura": "en_contra", "confianza": 0.9}], "cita": ""},
+        {"id": "Post_2", "candidatos": [{"nombre": "B", "postura": "en_contra", "confianza": 0.9}], "cita": ""},
+    ]
+    candidatos, _bc = el.aggregate_net_sentiment(analysis)
+    a = next(c for c in candidatos if c["nombre"] == "A")
+    b = next(c for c in candidatos if c["nombre"] == "B")
+    assert a["pct"] == 66.7 and b["pct"] == 33.3  # 2/3 y 1/3, aunque todo sea en_contra
+
+
+def test_build_evidence_ordena_por_confianza_y_adjunta_post():
+    analysis = [
+        {"id": "Post_0", "cita": "cita floja",
+         "candidatos": [{"nombre": "Milei", "postura": "a_favor", "confianza": 0.6}]},
+        {"id": "Post_1", "cita": "cita fuerte",
+         "candidatos": [{"nombre": "Milei", "postura": "a_favor", "confianza": 0.95}]},
+    ]
+    posts_by_id = {
+        "Post_0": {"text": "t0", "network": "twitter", "post_url": "u0", "author": "a0", "author_url": "", "date": ""},
+        "Post_1": {"text": "t1", "network": "tiktok", "post_url": "u1", "author": "a1", "author_url": "", "date": ""},
+    }
+    ev = el.build_evidence(analysis, posts_by_id)
+    assert ev[0]["cita"] == "cita fuerte"  # mayor confianza primero
+    assert ev[0]["post"]["post_url"] == "u1"
+    assert ev[0]["candidato"] == "Milei"
+
+
+def _mencion(pid, red, conf, cita):
+    return (
+        {"id": pid, "cita": cita, "candidatos": [{"nombre": "Milei", "postura": "a_favor", "confianza": conf}]},
+        {pid: {"text": cita, "network": red, "post_url": "", "author": "", "author_url": "", "date": ""}},
+    )
+
+
+def test_build_evidence_garantiza_una_cita_de_instagram_por_candidato():
+    # 5 menciones X/TikTok de alta confianza + 1 de IG más floja. Con el cap de 5,
+    # la de IG quedaría afuera; debe entrar igual (una IG garantizada por candidato)
+    # desplazando a la de MENOR confianza de las no-IG, sin pasarse del cap.
+    analysis, posts_by_id = [], {}
+    for i, cf in enumerate([0.95, 0.9, 0.85, 0.8, 0.75]):
+        a, p = _mencion(f"P{i}", "twitter" if i % 2 else "tiktok", cf, f"nolg{i}")
+        analysis.append(a); posts_by_id.update(p)
+    a, p = _mencion("IG", "instagram", 0.5, "citaIG")
+    analysis.append(a); posts_by_id.update(p)
+
+    milei = [e for e in el.build_evidence(analysis, posts_by_id, por_candidato=5)
+             if e["candidato"] == "Milei"]
+    assert len(milei) == 5                                   # se respeta el cap
+    assert "instagram" in [e["post"]["network"] for e in milei]   # IG entró
+    citas = [e["cita"] for e in milei]
+    assert "citaIG" in citas
+    assert "nolg4" not in citas                              # desplazó a la más floja
+    assert "nolg0" in citas                                  # las fuertes siguen
+
+
+def test_build_evidence_sin_instagram_no_fuerza_nada():
+    analysis, posts_by_id = [], {}
+    for i, cf in enumerate([0.95, 0.9, 0.85, 0.8, 0.75, 0.7]):
+        a, p = _mencion(f"P{i}", "twitter" if i % 2 else "tiktok", cf, f"c{i}")
+        analysis.append(a); posts_by_id.update(p)
+    milei = [e for e in el.build_evidence(analysis, posts_by_id, por_candidato=5)
+             if e["candidato"] == "Milei"]
+    assert len(milei) == 5
+    assert "c5" not in [e["cita"] for e in milei]            # la 6.ª (más floja) afuera, sin cambios
+
+
+def test_compare_calcula_gap_y_promedio():
+    candidatos = [{"nombre": "Javier Milei", "pct": 44.0, "pos": 0, "neg": 0, "neu": 0, "menciones": 0}]
+    rows = [
+        {"consultora": "X", "fecha": "2026-08-01", "candidato": "milei", "porcentaje": 42.0},
+        {"consultora": "X", "fecha": "2026-08-20", "candidato": "Milei", "porcentaje": 40.0},  # más reciente gana
+        {"consultora": "Y", "fecha": "2026-08-10", "candidato": "Javier Milei", "porcentaje": 46.0},
+    ]
+    comp, warnings = el.compare_vs_pollsters(candidatos, rows)
+    milei = comp[0]
+    consultora_x = next(c for c in milei["consultoras"] if c["consultora"] == "X")
+    assert consultora_x["pct"] == 40.0 and consultora_x["gap"] == 4.0  # 44 - 40
+    assert milei["promedio_consultoras"] == 43.0  # (40 + 46)/2
+    assert milei["gap_promedio"] == 1.0           # 44 - 43
+
+
+def test_compare_avisa_no_reconciliados():
+    candidatos = [{"nombre": "Milei", "pct": 44.0, "pos": 0, "neg": 0, "neu": 0, "menciones": 0}]
+    rows = [{"consultora": "X", "fecha": "2026-08-01", "candidato": "Kicillof", "porcentaje": 30.0}]
+    comp, warnings = el.compare_vs_pollsters(candidatos, rows)
+    assert comp[0]["consultoras"] == [] and comp[0]["promedio_consultoras"] is None
+    assert any("Kicillof" in w for w in warnings)   # candidato del CSV sin par en redes
+
+
+def test_compare_sin_csv_devuelve_solo_redes():
+    candidatos = [{"nombre": "Milei", "pct": 100.0, "pos": 0, "neg": 0, "neu": 0, "menciones": 0}]
+    comp, warnings = el.compare_vs_pollsters(candidatos, [])
+    assert comp[0]["consultoras"] == [] and warnings == []
+
+
+def test_run_boca_de_urna_flujo_completo(monkeypatch):
+    """Flujo completo con BLOQUES por red: X trae el post de Milei, Instagram el de
+    Kicillof; se combinan con desglose por_red + comparación con consultoras."""
+    import normalizer
+    milei = {"id": "1", "network": "twitter", "author": "a", "author_url": "", "text": "Milei la rompe",
+             "date": "", "post_url": "u1", "relevance_score": 80, "relevance_level": "alta",
+             "matched_terms": [], "video_url": None}
+    kici = {"id": "2", "network": "instagram", "author": "b", "author_url": "", "text": "Kicillof presidente",
+            "date": "", "post_url": "u2", "relevance_score": 70, "relevance_level": "alta",
+            "matched_terms": [], "video_url": None}
+
+    def fake_fetch(**kw):
+        net = (kw.get("networks") or ["twitter"])[0]
+        if net == "twitter":
+            return [milei], False
+        if net == "instagram":
+            return [kici], False
+        return [], False
+
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", fake_fetch)
+    monkeypatch.setattr(el, "analyze_posts_electoral", _fake_analyze_por_texto)
+
+    csv = ("consultora,fecha,candidato,porcentaje\n"
+           "X,2026-08-01,Javier Milei,48\n")
+    out = el.run_boca_de_urna(keywords=["elecciones"], networks=["twitter", "instagram"],
+                              date=None, country="ar", pollster_csv=csv)
+    assert out["meta"]["total_posts"] == 2 and out["meta"]["posts_electorales"] == 2
+    assert out["meta"]["disclaimer"] == el.DISCLAIMER
+    assert {c["nombre"] for c in out["candidatos"]} == {"Javier Milei", "Axel Kicillof"}
+    assert len(out["evidencia"]) == 2
+    # Desglose por red: Milei vino del bloque X, Kicillof del de Instagram.
+    m = next(c for c in out["candidatos"] if el.canonical_key(c["nombre"]) == el.canonical_key("Javier Milei"))
+    assert m["por_red"] == {"twitter": 1}
+    # La meta trae el estado por bloque.
+    assert {b["red"] for b in out["meta"]["bloques"]} == {"twitter", "instagram"}
+    milei_comp = next(c for c in out["comparacion"] if el.canonical_key(c["candidato"]) == el.canonical_key("Javier Milei"))
+    assert milei_comp["consultoras"][0]["consultora"] == "X"
+
+
+def test_analyze_posts_electoral_inyecta_contexto_de_red(monkeypatch):
+    """El clasificador acepta un contexto por red y lo mete en el prompt (para que
+    cada bloque interprete su red con su propio criterio). Sin contexto, el prompt
+    no cambia (comportamiento actual)."""
+    import gemini_client as gc
+    prompts = []
+    monkeypatch.setattr(gc, "run_with_rotation",
+                        lambda prompt: (prompts.append(prompt) or ([], None)))
+    posts_by_id = {"Post_0": {"text": "x", "network": "instagram"}}
+    el.analyze_posts_electoral(posts_by_id, network_context="CONTEXTO_IG_UNICO")
+    assert "CONTEXTO_IG_UNICO" in prompts[0]
+    # Sin contexto: no aparece ningún encabezado de contexto.
+    prompts.clear()
+    el.analyze_posts_electoral(posts_by_id)
+    assert "CONTEXTO DE LA RED" not in prompts[0]
+
+
+def test_run_boca_de_urna_avisa_clasificacion_parcial(monkeypatch):
+    """Si el clasificador procesa menos posts que el corpus (lotes que fallan por
+    rate-limit), la meta expone 'analizados' y se agrega un aviso — para no creer
+    que 'hay pocos posts' cuando en realidad se perdió la clasificación."""
+    import normalizer
+    posts = [{"id": str(i), "network": "twitter", "author": "", "author_url": "", "text": f"Milei {i}",
+              "date": "", "post_url": f"u{i}", "relevance_score": 50, "relevance_level": "media",
+              "matched_terms": [], "video_url": None} for i in range(2)]
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", lambda **kw: (posts, False))
+
+    # El clasificador solo devuelve 1 de los 2 posts (el otro "se perdió" por rate-limit).
+    def partial_analyze(posts_by_id, network_context=""):
+        pid = next(iter(posts_by_id))
+        return [{"id": pid, "es_electoral": True, "cita": "Milei",
+                 "candidatos": [{"nombre": "Javier Milei", "postura": "a_favor", "confianza": 0.9}]}]
+
+    monkeypatch.setattr(el, "analyze_posts_electoral", partial_analyze)
+    out = el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar", pollster_csv="")
+    assert out["meta"]["total_posts"] == 2
+    assert out["meta"]["analizados"] == 1
+    assert any("parcial" in w.lower() for w in out["meta"]["warnings"])
+
+
+def test_run_boca_de_urna_reporta_progreso(monkeypatch):
+    """El análisis async necesita reportar progreso: run_boca_de_urna llama a
+    progress_cb(phase, pct) en los hitos, con pct no decreciente."""
+    import normalizer
+    posts = [{"id": "1", "network": "twitter", "author": "", "author_url": "", "text": "Milei",
+              "date": "", "post_url": "u1", "relevance_score": 50, "relevance_level": "media",
+              "matched_terms": [], "video_url": None}]
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", lambda **kw: (posts, False))
+    monkeypatch.setattr(el, "analyze_posts_electoral", _fake_analyze_por_texto)
+    hitos = []
+    el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar",
+                        pollster_csv="", progress_cb=lambda phase, pct: hitos.append((phase, pct)))
+    assert hitos                                              # reportó progreso
+    assert [p for _, p in hitos] == sorted(p for _, p in hitos)   # pct no decreciente
+    # Menciona el bloque por red y el armado final.
+    assert any("bloque" in p.lower() for p, _ in hitos)
+
+
+def test_run_boca_de_urna_cero_posts(monkeypatch):
+    import normalizer
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", lambda **kw: ([], False))
+    out = el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar", pollster_csv="")
+    assert out["candidatos"] == [] and out["comparacion"] == []
+    assert any("publicaciones" in w.lower() for w in out["meta"]["warnings"])
+
+
+def test_empty_key_no_absorbe_candidatos_csv(monkeypatch):
+    """Regresión: un candidato cuyo nombre normaliza a '' (ej. solo espacios o
+    caracteres combinatorios puros) no debe matchear ningún CSV ni contaminar
+    compare_vs_pollsters; además analyze_posts_electoral debe descartarlo en origen."""
+    import gemini_client as gc
+
+    # Nombre que canonical_key reduce a "" (solo espacios).
+    NOMBRE_VACIO_KEY = "   "
+    assert el.canonical_key(NOMBRE_VACIO_KEY) == ""
+
+    # 1) _keys_match: clave vacía nunca matchea una no vacía (y viceversa).
+    assert not el._keys_match("", "javier milei")
+    assert not el._keys_match("javier milei", "")
+    # Dos vacíos sí se igualan entre sí (corner-case trivial, no produce merge real).
+    assert el._keys_match("", "")
+
+    # 2) compare_vs_pollsters: un candidato de redes con nombre de clave vacía no
+    #    absorbe los datos de consultoras de candidatos reales.
+    candidatos_redes = [
+        {"nombre": "Javier Milei", "pct": 44.0, "pos": 4, "neg": 0, "neu": 0, "menciones": 4},
+        # nombre que canonical_key reduce a ""
+        {"nombre": NOMBRE_VACIO_KEY, "pct": 10.0, "pos": 1, "neg": 0, "neu": 0, "menciones": 1},
+    ]
+    rows = [{"consultora": "Z", "fecha": "2026-08-01", "candidato": "Javier Milei", "porcentaje": 40.0}]
+    comp, warnings = el.compare_vs_pollsters(candidatos_redes, rows)
+    # El candidato de clave vacía no debe tener consultoras (no absorbió a Milei).
+    vacio = next(c for c in comp if el.canonical_key(c["candidato"]) == "")
+    assert vacio["consultoras"] == [] and vacio["promedio_consultoras"] is None
+    # Milei sí debe tener su consultora intacta.
+    milei = next(c for c in comp if el.canonical_key(c["candidato"]) == "javier milei")
+    assert milei["consultoras"][0]["consultora"] == "Z"
+
+    # 3) analyze_posts_electoral: un candidato cuya clave normalizada es '' se descarta.
+    posts_by_id = {"Post_0": {"text": "texto irrelevante", "network": "twitter"}}
+    monkeypatch.setattr(gc, "run_with_rotation", _analysis_fake([
+        {"id": "Post_0", "es_electoral": True, "cita": "",
+         "candidatos": [{"nombre": NOMBRE_VACIO_KEY, "postura": "a_favor", "confianza": 0.9}]},
+    ]))
+    out = el.analyze_posts_electoral(posts_by_id)
+    assert out[0]["candidatos"] == []
+
+
+def test_run_boca_de_urna_upstream_falla_propaga(monkeypatch):
+    import normalizer, gemini_client as gc
+    posts = [{"id": "1", "network": "twitter", "author": "", "author_url": "", "text": "x", "date": "",
+              "post_url": "u", "relevance_score": 50, "relevance_level": "media", "matched_terms": [], "video_url": None}]
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", lambda **kw: (posts, False))
+    monkeypatch.setattr(gc, "run_with_rotation", lambda prompt: (None, 503))
+    with pytest.raises(el.UpstreamUnavailableError):
+        el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar", pollster_csv="")
+
+
+def test_run_boca_de_urna_serpapi_caido_es_upstream(monkeypatch):
+    """Sin posts Y con error de SerpAPI (any_upstream=True) -> 503, no vacío."""
+    import normalizer
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", lambda **kw: ([], True))
+    with pytest.raises(el.UpstreamUnavailableError):
+        el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar", pollster_csv="")
+
+
+def test_build_candidate_search_list_une_fijos_y_csv():
+    # "Maximiliano Pullaro" NO está en la lista fija -> debe sumarse desde el CSV.
+    NUEVO_CSV = "Maximiliano Pullaro"
+    assert not any(el.canonical_key(NUEVO_CSV) == el.canonical_key(n) for n in el.CANDIDATOS_DEFAULT)
+    rows = [
+        {"consultora": "X", "fecha": "2026-08-01", "candidato": "Javier Milei", "porcentaje": 42.0},  # ya en la fija
+        {"consultora": "X", "fecha": "2026-08-01", "candidato": NUEVO_CSV, "porcentaje": 5.0},        # nuevo
+    ]
+    lista = el.build_candidate_search_list(rows)
+    # Todos los fijos están.
+    for fijo in el.CANDIDATOS_DEFAULT:
+        assert any(el.canonical_key(fijo) == el.canonical_key(n) for n in lista)
+    # El del CSV que no estaba se suma.
+    assert any(el.canonical_key(n) == el.canonical_key(NUEVO_CSV) for n in lista)
+    # Milei no se duplica (estaba en la fija y en el CSV).
+    milei_keys = [n for n in lista if el.canonical_key(n) == el.canonical_key("Javier Milei")]
+    assert len(milei_keys) == 1
+
+
+def test_run_network_block_usa_el_contexto_de_su_red(monkeypatch):
+    """Cada bloque verifica SUS posts con el CONTEXTO de su red (no un prompt genérico)."""
+    import normalizer
+
+    def fake_fetch(**kw):
+        net = kw["networks"][0]
+        return [{"network": net, "text": "Milei", "post_url": f"u-{net}", "author": "",
+                 "author_url": "", "date": "", "relevance_score": 50, "relevance_level": "media",
+                 "matched_terms": [], "video_url": None}], False
+
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", fake_fetch)
+    captured = {}
+
+    def fake_analyze(posts_by_id, network_context=""):
+        captured["ctx"] = network_context
+        return [{"id": k, "es_electoral": True, "cita": "", "candidatos": []} for k in posts_by_id]
+
+    monkeypatch.setattr(el, "analyze_posts_electoral", fake_analyze)
+    block, up = el.run_network_block("tiktok", "elecciones", ["elecciones"],
+                                     ["Javier Milei"], None, "ar")
+    assert block["network"] == "tiktok"
+    assert captured["ctx"] == el.NETWORK_CONTEXT["tiktok"]  # contexto propio de la red
+    assert block["status"]["red"] == "tiktok"
+    assert block["status"]["encontrados"] == 1 and block["status"]["analizados"] == 1
+    assert up is False
+
+
+def test_run_boca_de_urna_modo_stored_devuelve_el_snapshot(monkeypatch):
+    """Con URNA_FETCH_BACKEND=stored, la urna NO busca en vivo: lee el último snapshot
+    guardado (del scraper local batch) y lo devuelve tal cual, con su fecha."""
+    import store
+    snap = {"candidatos": [{"nombre": "Javier Milei", "menciones": 42}], "evidencia": [],
+            "comparacion": [], "meta": {"total_posts": 120, "posts_electorales": 67,
+                                        "ultima_actualizacion": "2026-09-21T10:00:00Z", "warnings": []}}
+    monkeypatch.setenv("URNA_FETCH_BACKEND", "stored")
+    monkeypatch.setattr(store, "read_latest_snapshot", lambda: snap)
+    out = el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar", pollster_csv="")
+    assert out is snap
+    assert out["meta"]["ultima_actualizacion"] == "2026-09-21T10:00:00Z"
+
+
+def test_run_boca_de_urna_modo_stored_sin_snapshot_avisa(monkeypatch):
+    """En modo stored, si todavía no hay ningún snapshot, avisa (no rompe feo)."""
+    import store
+    monkeypatch.setenv("URNA_FETCH_BACKEND", "stored")
+    monkeypatch.setattr(store, "read_latest_snapshot", lambda: None)
+    with pytest.raises(el.UpstreamUnavailableError):
+        el.run_boca_de_urna(keywords=["x"], networks=["twitter"], date=None, country="ar", pollster_csv="")
+
+
+def test_run_network_block_usa_serpapi_por_defecto(monkeypatch):
+    """Sin el feature flag, el bloque sigue usando SerpAPI (fetch_raw_posts) — cero
+    cambio de comportamiento hasta prender el scraper."""
+    import normalizer
+    monkeypatch.delenv("URNA_FETCH_BACKEND", raising=False)
+    usados = []
+    def fake_fetch(**kw):
+        usados.append("serpapi")
+        return [], False
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", fake_fetch)
+    monkeypatch.setattr(el, "analyze_posts_electoral", lambda pbi, network_context="": [])
+    el.run_network_block("twitter", "Milei", ["Milei"], ["Javier Milei"], None, "ar")
+    assert "serpapi" in usados
+
+
+def test_run_network_block_usa_scraper_si_flag_activo(monkeypatch):
+    """Con URNA_FETCH_BACKEND=scraper y la red en URNA_SCRAPER_NETWORKS, el bloque
+    obtiene los posts vía scrapers.scrape_network, NO vía SerpAPI."""
+    import normalizer, scrapers
+    monkeypatch.setenv("URNA_FETCH_BACKEND", "scraper")
+    monkeypatch.setenv("URNA_SCRAPER_NETWORKS", "twitter")
+    usados = []
+    def fake_scrape(network, termino, **kw):
+        usados.append(("scraper", network))
+        return [], False
+    def fake_fetch(**kw):
+        usados.append(("serpapi", kw["networks"][0]))
+        return [], False
+    monkeypatch.setattr(scrapers, "scrape_network", fake_scrape)
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", fake_fetch)
+    monkeypatch.setattr(el, "analyze_posts_electoral", lambda pbi, network_context="": [])
+    el.run_network_block("twitter", "Milei", ["Milei"], ["Javier Milei"], None, "ar")
+    assert ("scraper", "twitter") in usados
+    assert all(kind != "serpapi" for kind, _ in usados)  # X no cayó a SerpAPI
+
+
+def test_run_network_block_flag_por_red_deja_otras_en_serpapi(monkeypatch):
+    """URNA_SCRAPER_NETWORKS='twitter' prende el scraper SOLO en X; Instagram sigue
+    en SerpAPI (permite migrar de a una red)."""
+    import normalizer, scrapers
+    monkeypatch.setenv("URNA_FETCH_BACKEND", "scraper")
+    monkeypatch.setenv("URNA_SCRAPER_NETWORKS", "twitter")
+    usados = []
+    monkeypatch.setattr(scrapers, "scrape_network",
+                        lambda network, termino, **kw: (usados.append(("scraper", network)), ([], False))[1])
+    monkeypatch.setattr(normalizer, "fetch_raw_posts",
+                        lambda **kw: (usados.append(("serpapi", kw["networks"][0])), ([], False))[1])
+    monkeypatch.setattr(el, "analyze_posts_electoral", lambda pbi, network_context="": [])
+    el.run_network_block("instagram", "Milei", ["Milei"], ["Javier Milei"], None, "ar")
+    assert ("serpapi", "instagram") in usados
+    assert ("scraper", "instagram") not in usados
+
+
+def test_run_boca_de_urna_bloques_por_red(monkeypatch):
+    """Cada red es un BLOQUE autónomo: busca SOLO en su red. La general va por red; en
+    X se busca a TODOS los candidatos, en IG/TikTok solo a los top_n; el candidato top
+    recibe top_pages (paginación honda)."""
+    import normalizer
+    llamados = []  # (termino, red, pages)
+
+    def fake_fetch(**kw):
+        nets = kw["networks"]
+        assert len(nets) == 1, "cada búsqueda es de UNA sola red (bloque)"
+        llamados.append((kw["termino"], nets[0], kw.get("pages", 1)))
+        return [], False
+
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", fake_fetch)
+    el.run_boca_de_urna(keywords=["elecciones presidenciales"],
+                        networks=["twitter", "instagram", "tiktok"],
+                        date=None, country="ar", pollster_csv="")
+    assert {red for _t, red, _p in llamados} == {"twitter", "instagram", "tiktok"}
+    # La general se busca en cada red, con sus general_pages.
+    for net in ("twitter", "instagram", "tiktok"):
+        assert ("elecciones presidenciales", net, el.NETWORK_SEARCH_BUDGET[net]["general_pages"]) in llamados
+    # X busca a TODOS los candidatos (rest_pages=1); IG solo a los top_n (rest_pages=0).
+    cand_tw = [t for t, red, _p in llamados if red == "twitter" and t != "elecciones presidenciales"]
+    cand_ig = [t for t, red, _p in llamados if red == "instagram" and t != "elecciones presidenciales"]
+    assert len(cand_tw) == len(el.CANDIDATOS_DEFAULT)
+    assert len(cand_ig) == el.NETWORK_SEARCH_BUDGET["instagram"]["top_n"]
+    # El candidato top recibe top_pages en X (paginación honda hacia los ~80).
+    top = el.CANDIDATOS_DEFAULT[0]
+    top_pages = next(pg for t, red, pg in llamados if red == "twitter" and t.startswith(top))
+    assert top_pages == el.NETWORK_SEARCH_BUDGET["twitter"]["top_pages"]
+
+
+def _fake_rotation_por_contenido(monkeypatch, fail_if_contains_index=None):
+    """Instala un run_with_rotation que responde según el CONTENIDO del lote (los
+    lotes corren en paralelo, así que no se puede depender del orden de llamada).
+
+    Cada post de test tiene texto 'MARK_<i>'; el fake detecta qué índices trae el
+    prompt y devuelve un mirror con esos ids. Si `fail_if_contains_index` está en
+    el lote, ese lote devuelve (None, 503) simulando una falla upstream. Registra
+    las llamadas en la lista devuelta (append es thread-safe bajo el GIL)."""
+    import gemini_client as gc
+    calls = []
+
+    def fake(prompt):
+        calls.append(1)
+        idx = [int(m) for m in re.findall(r"MARK_(\d+)", prompt)]
+        if fail_if_contains_index is not None and fail_if_contains_index in idx:
+            return None, 503
+        mirror = [{"id": f"Post_{i}", "candidatos": [], "cita": "", "es_electoral": True} for i in idx]
+        return mirror, None
+
+    monkeypatch.setattr(gc, "run_with_rotation", fake)
+    return calls
+
+
+def test_analyze_posts_electoral_batchea_y_mergea(monkeypatch):
+    """Con más posts que ELECTORAL_BATCH_SIZE se hacen varias llamadas (en paralelo)
+    y cada lote conserva SOLO sus propios ids; el merge no pierde ni duplica."""
+    n = el.ELECTORAL_BATCH_SIZE + 5
+    posts_by_id = {f"Post_{i}": {"text": f"MARK_{i}", "network": "twitter"} for i in range(n)}
+    calls = _fake_rotation_por_contenido(monkeypatch)
+    out = el.analyze_posts_electoral(posts_by_id)
+    assert len(calls) == 2                # ceil(n / BATCH_SIZE) == 2 lotes
+    assert len(out) == n                  # cada id aparece exactamente una vez
+    assert {o["id"] for o in out} == set(posts_by_id)
+
+
+def test_analyze_posts_electoral_fallo_parcial_devuelve_parcial(monkeypatch):
+    """Si un lote falla (None) pero otro anda, se devuelven resultados parciales,
+    no None. Independiente del orden en que terminen los lotes paralelos."""
+    n = el.ELECTORAL_BATCH_SIZE + 5
+    posts_by_id = {f"Post_{i}": {"text": f"MARK_{i}", "network": "twitter"} for i in range(n)}
+    # El lote que contiene Post_0 (el primero, de tamaño BATCH_SIZE) falla.
+    calls = _fake_rotation_por_contenido(monkeypatch, fail_if_contains_index=0)
+    out = el.analyze_posts_electoral(posts_by_id)
+    assert out is not None
+    assert len(calls) == 2
+    # Sobreviven todos menos el primer lote (Post_0..Post_{BATCH_SIZE-1}).
+    assert len(out) == n - el.ELECTORAL_BATCH_SIZE
+    assert all(int(o["id"].split("_")[1]) >= el.ELECTORAL_BATCH_SIZE for o in out)
+
+
+def test_compare_arrastra_la_fuente():
+    candidatos = [{"nombre": "Javier Milei", "pct": 44.0, "pos": 0, "neg": 0, "neu": 0, "menciones": 0}]
+    rows = [{"consultora": "Opinaia", "fecha": "2026-09-01", "candidato": "Javier Milei",
+             "porcentaje": 40.0, "fuente_url": "https://n/1", "fuente_titulo": "Nota Opinaia"}]
+    comp, _w = el.compare_vs_pollsters(candidatos, rows)
+    cell = comp[0]["consultoras"][0]
+    assert cell["consultora"] == "Opinaia" and cell["pct"] == 40.0 and cell["gap"] == 4.0
+    assert cell["fuente_url"] == "https://n/1" and cell["fuente_titulo"] == "Nota Opinaia"
+    assert cell["fecha"] == "2026-09-01"
+
+
+def test_compare_sin_fuente_csv_no_rompe():
+    # Filas de CSV (sin campos de fuente) -> las claves de fuente quedan None/"".
+    candidatos = [{"nombre": "Milei", "pct": 44.0, "pos": 0, "neg": 0, "neu": 0, "menciones": 0}]
+    rows = [{"consultora": "X", "fecha": "2026-08-01", "candidato": "Milei", "porcentaje": 42.0}]
+    comp, _w = el.compare_vs_pollsters(candidatos, rows)
+    cell = comp[0]["consultoras"][0]
+    assert cell["pct"] == 42.0 and cell.get("fuente_url") is None
+
+
+def test_merge_pollster_rows_csv_pisa_auto():
+    auto = [{"consultora": "Opinaia", "fecha": "2026-09-01", "candidato": "Javier Milei",
+             "porcentaje": 40.0, "fuente_url": "u", "fuente_titulo": "t"}]
+    manual = [{"consultora": "Opinaia", "fecha": "2026-08-01", "candidato": "javier milei",
+               "porcentaje": 48.0}]  # misma consultora+candidato -> pisa
+    out = el._merge_pollster_rows(auto, manual)
+    assert len(out) == 1 and out[0]["porcentaje"] == 48.0
+
+
+def test_run_boca_auto_consultoras_llena_comparacion(monkeypatch):
+    import normalizer, pollsters
+    posts = [{"id": "1", "network": "twitter", "author": "", "author_url": "", "text": "Milei",
+              "date": "", "post_url": "u1", "relevance_score": 80, "relevance_level": "alta",
+              "matched_terms": [], "video_url": None}]
+    monkeypatch.setattr(normalizer, "fetch_raw_posts", lambda **kw: (posts, False))
+    monkeypatch.setattr(el, "analyze_posts_electoral", _fake_analyze_por_texto)
+    monkeypatch.setattr(pollsters, "fetch_pollster_rows", lambda **kw: ([
+        {"consultora": "Opinaia", "fecha": "2026-09-01", "candidato": "Javier Milei",
+         "porcentaje": 41.0, "fuente_url": "https://n/1", "fuente_titulo": "Nota"}], []))
+    out = el.run_boca_de_urna(keywords=["elecciones"], networks=["twitter"], date=None,
+                              country="ar", pollster_csv="", auto_consultoras=True)
+    milei = next(c for c in out["comparacion"]
+                 if el.canonical_key(c["candidato"]) == el.canonical_key("Javier Milei"))
+    assert milei["consultoras"][0]["fuente_url"] == "https://n/1"

@@ -1,0 +1,36 @@
+{
+  "redes": {
+    "twitter": { "scrolls_por_candidato": 3 },
+    "tiktok": {
+      "scrolls_por_candidato": 3,
+      "videos_comentarios": 2,
+      "scrolls_comentarios": 2,
+      "candidatos_comentarios": [
+        "Javier Milei",
+        "Axel Kicillof",
+        "Sergio Massa",
+        "Patricia Bullrich",
+        "Cristina Fernández de Kirchner"
+      ]
+    },
+    "instagram": {
+      "scrolls_por_candidato": 1,
+      "posts_por_candidato": 3,
+      "candidatos_posts": [
+        "Javier Milei",
+        "Axel Kicillof",
+        "Sergio Massa",
+        "Patricia Bullrich",
+        "Cristina Fernández de Kirchner"
+      ]
+    }
+  },
+  "candidatos": null,
+  "alertas": { "umbral_warnings": 8 },
+  "espera_entre_scrolls": [2, 5],
+  "espera_entre_candidatos": [20, 40],
+  "viewport": [950, 1300],
+  "headless": true,
+  "min_posts_electorales": 1,
+  "conservar_corridas": 3
+}

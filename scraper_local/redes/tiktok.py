@@ -1,0 +1,163 @@
+"""Búsqueda + comentarios top de TikTok (Fase 4 del scraper local).
+
+Por candidato: capturas de la página de búsqueda (cards con descripción visible).
+Si el candidato está en cfg_red["candidatos_comentarios"], además abre los primeros
+`videos_comentarios` videos y captura el panel de comentarios scrolleándolo — ahí
+está la opinión de la audiencia. Fallas por video degradan a warning (la búsqueda
+de ese candidato ya quedó capturada); challenge/captcha/redirect a login lanzan
+SesionInvalidaError y run.py decide la rotación de cuenta.
+
+Los selectores REALES se tunean en la PC de la oficina (marcados TUNEAR)."""
+import urllib.parse
+from pathlib import Path
+
+import browser
+
+TIKTOK_FYP_URL = "https://www.tiktok.com/foryou"
+LOGIN_URL = "https://www.tiktok.com/login"
+# Tab "Top" retorna error anti-bot; tab "Vídeos" funciona correctamente.
+SELECTOR_TAB_VIDEOS = "text=Vídeos"
+SELECTOR_RESULTADOS = "[data-e2e='search_video-item']"   # cards en tab Vídeos
+SELECTOR_LINKS_VIDEO = "a[href*='/video/']"              # links a videos dentro de las cards
+# Layout 2026 (verificado en vivo 2026-10-02): el panel derecho del video arranca
+# en la pestaña "Podría interesarte" — los comentarios NO se renderizan hasta
+# clickear el comment-icon, y ya no existe [data-e2e='comment-list'].
+SELECTOR_ICONO_COMENTARIOS = "[data-e2e='comment-icon']"  # abre la pestaña Comentarios (hay otro oculto en el inbox)
+SELECTOR_COMENTARIO = "[data-e2e='comment-level-1']"      # un comentario renderizado
+SELECTOR_PANEL_COMENTARIOS = "[class*='DivCommentMain']"  # contenedor scrolleable del panel (sufijo semántico estable)
+SELECTOR_CAPTCHA = "[id*='captcha'], [class*='captcha']"  # overlay del captcha-puzzle
+# URLs a las que TikTok redirige cuando exige login.
+MARCAS_SESION_MUERTA = ("/login", "/signup")
+
+
+def login_completado(url: str) -> bool:
+    """TikTok sale de /login al terminar (típicamente redirige a /foryou)."""
+    return "/login" not in url and "/signup" not in url
+
+
+def url_busqueda(termino: str) -> str:
+    """URL de búsqueda directa (referencia; no usar para navegar — usar FYP primero)."""
+    return f"https://www.tiktok.com/search/video?q={urllib.parse.quote(termino)}"
+
+
+def _resolver_headless(cfg: dict, cfg_red: dict) -> bool:
+    """headless efectivo para TikTok.
+
+    En modo headless TikTok sirve un captcha-slider ("Drag the slider to fit the
+    puzzle") en la grilla de /search/video y la búsqueda devuelve 0 resultados
+    (verificado en vivo 2026-09-30: visible → 12 resultados, headless → captcha).
+    Por eso TikTok corre VISIBLE por defecto, independientemente del `headless`
+    global (que Twitter/Instagram sí toleran). Se puede forzar con un override
+    explícito `headless` en el bloque `redes.tiktok` del config."""
+    if "headless" in cfg_red:
+        return bool(cfg_red["headless"])
+    return False
+
+
+def links_de_videos(hrefs: list[str], cantidad: int) -> list[str]:
+    """Primeros `cantidad` links de video únicos, en orden de aparición (pura)."""
+    out: list[str] = []
+    for h in hrefs:
+        if "/video/" in h and h not in out:
+            out.append(h)
+        if len(out) == cantidad:
+            break
+    return out
+
+
+def _verificar_sesion(page) -> None:
+    if any(marca in page.url for marca in MARCAS_SESION_MUERTA):
+        raise browser.SesionInvalidaError(f"redirigido a {page.url}")
+    if page.locator(SELECTOR_CAPTCHA).count() > 0:
+        # El captcha desafía a la máquina/IP, no a la cuenta: la sesión sigue viva.
+        raise browser.DesafioTemporalError("captcha de TikTok en pantalla")
+
+
+def _abrir_comentarios(page) -> bool:
+    """Clic en el primer comment-icon VISIBLE para abrir la pestaña Comentarios.
+    El selector matchea también un botón oculto del inbox del header, por eso se
+    filtra por visibilidad. False si no hay ninguno clickeable (ej. comentarios
+    desactivados)."""
+    iconos = page.locator(SELECTOR_ICONO_COMENTARIOS)
+    for i in range(iconos.count()):
+        if iconos.nth(i).is_visible():
+            iconos.nth(i).click()
+            return True
+    return False
+
+
+def _capturar_comentarios(page, termino: str, video_url: str, cfg: dict, cfg_red: dict,
+                          carpeta: Path, prefijo: str, warnings: list[str]) -> list[dict]:
+    """Capturas del panel de comentarios de UN video. Fallas que no son de sesión
+    degradan a warning y devuelven [] (la corrida sigue)."""
+    esperas = tuple(cfg["espera_entre_scrolls"])
+    try:
+        page.goto(video_url, timeout=browser.TIMEOUT_FEED_MS)
+        _verificar_sesion(page)
+        # La página hidrata lento: esperar el ícono VISIBLE antes de buscarlo
+        # (el goto resuelve con el DOM todavía sin los botones de acción).
+        page.wait_for_selector(SELECTOR_ICONO_COMENTARIOS + ":visible",
+                               timeout=browser.TIMEOUT_FEED_MS)
+        if not _abrir_comentarios(page):
+            warnings.append(f"TikTok: comentarios de un video de '{termino}' sin capturar "
+                            "(sin ícono de comentarios visible).")
+            return []
+        page.wait_for_selector(SELECTOR_COMENTARIO, timeout=browser.TIMEOUT_FEED_MS)
+        browser.esperar_aleatorio(esperas)
+        rutas = browser.capturar_elemento(page, SELECTOR_PANEL_COMENTARIOS,
+                                          cfg_red["scrolls_comentarios"],
+                                          esperas, carpeta, prefijo)
+    except browser.SesionInvalidaError:
+        raise
+    except Exception as e:
+        warnings.append(f"TikTok: comentarios de un video de '{termino}' sin capturar ({e}).")
+        return []
+    contexto = (f"panel de comentarios de un video de TikTok sobre {termino}; "
+                "cada comentario visible cuenta como una publicación")
+    return [{"ruta": r, "contexto": contexto} for r in rutas]
+
+
+def capturar(sesion: Path, termino: str, cfg: dict, cfg_red: dict,
+             carpeta: Path, prefijo: str, warnings: list[str]) -> list[dict]:
+    from playwright.sync_api import TimeoutError as PWTimeout  # diferido
+    esperas = tuple(cfg["espera_entre_scrolls"])
+    headless = _resolver_headless(cfg, cfg_red)
+    with browser.pagina_con_sesion(sesion, tuple(cfg["viewport"]), headless) as page:
+        # La URL /search directa activa anti-bot ("Hubo un problema").
+        # Flujo correcto: FYP → lupita → tipeo humano → Enter → tab Vídeos.
+        page.goto(TIKTOK_FYP_URL, timeout=browser.TIMEOUT_FEED_MS)
+        browser.esperar_aleatorio((2, 4))
+        _verificar_sesion(page)
+        page.locator("[data-e2e='nav-search']").click()
+        browser.esperar_aleatorio((1, 2))
+        page.keyboard.type(termino, delay=80)
+        page.keyboard.press("Enter")
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        # Tab "Top" puede seguir mostrando error anti-bot; "Vídeos" sí devuelve contenido.
+        try:
+            tab = page.locator(SELECTOR_TAB_VIDEOS)
+            if not tab.count():
+                tab = page.locator("text=Videos")
+            if tab.count():
+                tab.first.click()
+                browser.esperar_aleatorio((2, 3))
+        except Exception:
+            pass
+        try:
+            page.wait_for_selector(SELECTOR_RESULTADOS, timeout=browser.TIMEOUT_FEED_MS)
+        except PWTimeout:
+            raise browser.DesafioTemporalError(
+                "los resultados de TikTok no aparecieron (captcha/anti-bot probable)")
+        browser.esperar_aleatorio(esperas)
+        capturas = [{"ruta": r, "contexto": ""} for r in browser.capturar_pagina(
+            page, cfg_red["scrolls_por_candidato"], esperas, carpeta, prefijo)]
+        if termino in (cfg_red.get("candidatos_comentarios") or []):
+            hrefs = page.eval_on_selector_all(SELECTOR_LINKS_VIDEO, "els => els.map(e => e.href)")
+            for i, link in enumerate(links_de_videos(hrefs, cfg_red["videos_comentarios"])):
+                capturas += _capturar_comentarios(
+                    page, termino, link, cfg, cfg_red, carpeta,
+                    f"{prefijo}-comentarios-{i + 1}", warnings)
+    return capturas
