@@ -10,11 +10,19 @@ problems as terse, machine-friendly findings.
 Usage:
   python check_chart.py path/to/chart.py [--cwd DIR] [--json]
                         [--dest blog|social|social_portrait|slide|report|mobile] [--verbose]
+                        [--sources FILE] [--cache-dir DIR] [--fetch-timeout S] [--fetch-retries N]
   python check_chart.py --list-checks
 
+Data sources: when --sources is given (or <chart-stem>.sources.json sits next
+to the chart), every declared source is fetched into a cache directory first
+(see fetch_data.py's docstring for the manifest format) and the chart script
+reads them via the EVIDENT_DATA_DIR / EVIDENT_DATA_PATHS environment
+variables. A failed required source fails the collection and the chart check
+is skipped; a failed optional source is only recorded.
+
 Exit codes: 0 no fails (warns allowed), 1 at least one fail,
-2 missing file or matplotlib, script error (including a figure that fails to
-render), or no figures produced.
+2 missing file or matplotlib, data-collection failure (chart check skipped),
+script error (including a figure that fails to render), or no figures produced.
 
 Not implemented: bubble-area. Matplotlib's scatter `s` is already an area
 (points^2), so the classic "radius scaled by value" mistake leaves no
@@ -103,6 +111,7 @@ except (OSError, ValueError):
 # CVD_FACTOR x the mark's DE_FLOOR (V6), text meets TEXT_MIN (V2), marks MARK_MIN / INVISIBLE (V3).
 from check_palette import (CVD_FACTOR, DE_FLOOR, INVISIBLE, MARK_MIN, TEXT_MIN, TEXT_MIN_LARGE,  # noqa: E402
                            Color, contrast, de)
+import fetch_data  # noqa: E402  data-source collection before the chart script runs
 
 TEXT_OVERLAP_MIN_PT = 1.0      # unrotated texts: min horizontal overlap to fail
 TEXT_OVERLAP_MIN_FRAC = 0.15   # rotated texts: overlap area / smaller box area to fail
@@ -2938,6 +2947,13 @@ def main(argv=None):
                     help="Display target for small-text and title-too-long.")
     ap.add_argument("--verbose", action="store_true", help="Show script stdout and per-figure inventory.")
     ap.add_argument("--list-checks", action="store_true", help="List checks and exit.")
+    ap.add_argument("--sources", type=Path, default=None,
+                    help="Data-source manifest JSON (default: <chart-stem>.sources.json next to the chart, "
+                         "if present). Sources are fetched into the cache before the chart script runs.")
+    ap.add_argument("--cache-dir", type=Path, default=None,
+                    help="Where fetched data is cached (default: .chart_data_cache next to the chart).")
+    ap.add_argument("--fetch-timeout", type=float, default=10.0, help="Per-attempt fetch timeout in seconds.")
+    ap.add_argument("--fetch-retries", type=int, default=2, help="Extra fetch attempts after the first.")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # chart text (U+2212 minus, ...) must not crash a cp1252 console
         if hasattr(stream, "reconfigure"):
@@ -2963,10 +2979,49 @@ def main(argv=None):
         return error(f"chart file not found: {args.chart}")
     if args.cwd is not None and not args.cwd.is_dir():
         return error(f"cwd not found: {args.cwd}")
+
+    # Data-source collection: fetch declared sources into the cache before the
+    # chart script runs, so "data did not arrive" is reported as such instead
+    # of surfacing as a script exception.
+    sources_path = args.sources
+    if sources_path is None:
+        candidate = args.chart.with_name(args.chart.stem + ".sources.json")
+        if candidate.is_file():
+            sources_path = candidate
+    collection = None
+    if sources_path is not None:
+        if not sources_path.is_file():
+            return error(f"sources file not found: {sources_path}")
+        try:
+            sources = fetch_data.load_sources(sources_path)
+        except (OSError, ValueError) as e:
+            return error(f"cannot read sources manifest {sources_path}: {e}")
+        cache_dir = args.cache_dir or args.chart.parent / ".chart_data_cache"
+        collection = fetch_data.collect(sources, cache_dir,
+                                        timeout=args.fetch_timeout, retries=args.fetch_retries)
+        if not args.json:
+            for line in fetch_data.summary_lines(collection):
+                print(line)
+        if not collection["ok"]:
+            if args.json:
+                print(json.dumps({"result": "data-failed", "chart_check": "skipped",
+                                  "failures": collection["failures"], "collection": collection}, indent=1))
+            else:
+                print(f"RESULT DATA-FAILED: required source(s) failed: {', '.join(collection['failures'])}; "
+                      "chart check skipped")
+            return 2
+        os.environ["EVIDENT_DATA_DIR"] = str(collection["cache_dir"])
+        os.environ["EVIDENT_DATA_PATHS"] = json.dumps(collection["paths"])
+
     try:
         res = run_checks(args.chart, args.cwd, args.dest, args.verbose)
     except ScriptError as e:
         return error(e.tail.rstrip())
+    finally:
+        os.environ.pop("EVIDENT_DATA_DIR", None)
+        os.environ.pop("EVIDENT_DATA_PATHS", None)
+    if collection is not None:
+        res["collection"] = collection
 
     if not args.verbose:
         res.pop("inventory")

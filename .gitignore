@@ -6,3 +6,4 @@ examples/output/
 .local/
 dist/
 .playwright-mcp/
+.chart_data_cache/

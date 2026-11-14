@@ -45,6 +45,7 @@ FILES = (
     "skills/evident-charts/scripts/check_palette.py",
     "skills/evident-charts/scripts/check_svg.py",
     "skills/evident-charts/scripts/evident.py",
+    "skills/evident-charts/scripts/fetch_data.py",
     "skills/evident-charts/scripts/measure_svg.js",
     "skills/evident-charts/scripts/side_by_side.py",
 )
