@@ -40,7 +40,9 @@ report.key_environment_present = Boolean(process.env.FTSHARE_API_KEY);
 if (keyPath) {
   try {
     const info = await stat(resolve(root, keyPath));
-    report.key_file = { exists: true, restrictive_permissions: (info.mode & 0o077) === 0, permissions: (info.mode & 0o777).toString(8) };
+    // POSIX permission bits are only meaningful on POSIX filesystems; Windows ACLs do not map to them.
+    const posix = process.platform !== 'win32';
+    report.key_file = { exists: true, restrictive_permissions: posix ? (info.mode & 0o077) === 0 : null, permissions: (info.mode & 0o777).toString(8) };
   } catch { report.key_file = { exists: false }; }
 }
 try {

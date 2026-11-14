@@ -5,6 +5,7 @@ import { createUpstreamGuard } from '../scripts/lib/upstream-guard.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const url = 'https://market.ft.tech/gateway/mcp';
@@ -64,7 +65,8 @@ test('Mac check reports network observations without printing credentials or cla
     if (input === 'https://api6.ipify.org') return new Response('2001:db8::42');
     throw new Error('No network in test');
   };`);
-  const output = execFileSync(process.execPath, ['--import', preload, 'scripts/mac-check.mjs'], {
+  // --import needs a file:// URL; a bare Windows path (D:\...) is not a valid ESM specifier.
+  const output = execFileSync(process.execPath, ['--import', pathToFileURL(preload).href, 'scripts/mac-check.mjs'], {
     cwd: root, encoding: 'utf8', timeout: 15000,
     env: { ...process.env, FTSHARE_API_KEY: key, FTSHARE_API_KEY_FILE: 'local-secret.txt', HTTPS_PROXY: 'http://synthetic-user:proxy-password@example.invalid' }
   });
@@ -72,5 +74,5 @@ test('Mac check reports network observations without printing credentials or cla
   const report = JSON.parse(await readFile(resolve(root, '.local/macmini-check.json'), 'utf8'));
   assert.equal(report.egress_ipv4, '192.0.2.42');
   assert.match(report.public_inbound_access, /Not tested/);
-  assert.equal(report.key_file.restrictive_permissions, true);
+  assert.equal(report.key_file.restrictive_permissions, process.platform === 'win32' ? null : true);
 });

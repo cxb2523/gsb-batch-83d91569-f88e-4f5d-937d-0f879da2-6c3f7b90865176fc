@@ -15,6 +15,14 @@ const cache = {
     return pending;
   }
 };
-async function run() { console.log(JSON.stringify(await collectMinute({ FTSHARE_CACHE: cache, FTSHARE_API_KEY: key }, { force: process.argv.includes('--now') }))); }
-await run();
-if (process.argv.includes('--watch')) for (;;) { await new Promise(resolve => setTimeout(resolve, 60000)); await run(); }
+// Outcomes that need no operator action; anything else fails a one-shot run.
+const QUIET = new Set(['saved', 'outside_trading_session', 'already_collected_or_cooling_down', 'market_holiday']);
+async function run() {
+  const result = await collectMinute({ FTSHARE_CACHE: cache, FTSHARE_API_KEY: key }, { force: process.argv.includes('--now') });
+  console.log(JSON.stringify(result));
+  return result;
+}
+const watch = process.argv.includes('--watch');
+const first = await run();
+if (!watch && !QUIET.has(first.status)) process.exitCode = 1;
+if (watch) for (;;) { await new Promise(resolve => setTimeout(resolve, 60000)); await run(); }

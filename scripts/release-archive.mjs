@@ -14,7 +14,9 @@ if (version.status !== 0) throw new Error('A compatible tar command is required 
 const ownership = /bsdtar|libarchive/i.test(version.stdout)
   ? ['--uid=0', '--gid=0', '--uname=root', '--gname=root']
   : ['--owner=0', '--group=0', '--numeric-owner'];
-const result = spawnSync('tar', [...ownership, '-czf', archive, '-T', '-'], { cwd: root, input: files.join('\n') + '\n', encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } });
+// Pass the archive as a relative path: an absolute Windows path (D:\...) is
+// parsed by GNU tar as a remote host unless --force-local is given.
+const result = spawnSync('tar', [...ownership, '--force-local', '-czf', 'releases/' + name, '-T', '-'], { cwd: root, input: files.join('\n') + '\n', encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } });
 if (result.status !== 0) throw new Error('Source archive failed: ' + (result.stderr || result.error));
 const hash = createHash('sha256').update(await readFile(archive)).digest('hex');
 await writeFile(archive + '.sha256', hash + '  ' + name + '\n');

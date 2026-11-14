@@ -13,7 +13,15 @@ async function optionalJSON(path) {
 async function replaceLink(path, target) {
   const pending = path + '.' + randomUUID();
   await symlink(target, pending, 'dir');
-  try { await rename(pending, path); } finally { await rm(pending, { force: true }); }
+  try {
+    try { await rename(pending, path); }
+    catch (error) {
+      // Windows cannot rename over an existing symlink; swap non-atomically there.
+      if (!['EPERM', 'EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+      await rm(path, { force: true });
+      await rename(pending, path);
+    }
+  } finally { await rm(pending, { force: true }); }
 }
 export async function probeServer(port, expected, attempts = 25) {
   for (let n = 0; n < attempts; n++) {

@@ -32,12 +32,26 @@ export function kvResponseCache(kv, now = Date.now) {
     }
   };
 }
+// Every collectMinute run ends in exactly one of these structured outcomes.
+export const COLLECT_OUTCOMES = ['outside_trading_session', 'already_collected_or_cooling_down', 'market_holiday',
+  'saved', 'incomplete_snapshot', 'rate_limited', 'quota_exceeded', 'upstream_error'];
+// A plain 429 cools down per Retry-After (one minute floor); an exhausted account quota cools down much longer.
+const RATE_LIMIT_COOLDOWN_MS = 60000;
+const QUOTA_EXCEEDED_COOLDOWN_MS = 3600000;
+// Only a snapshot that passes this integrity check may replace the stored live value.
+function completeLiveSnapshot(next, date) {
+  return Boolean(next) && next.date === date && next.amount != null && Array.isArray(next.coverage) && next.coverage.some(v => v === 20);
+}
 export async function collectMinute(env, { now = Date.now, fetcher = fetch, force = false } = {}) {
-  const time = now(); if (!force && !tradingMinute(time)) return { skipped: 'outside_trading_session' };
+  const time = now();
   const kv = env.FTSHARE_CACHE;
   const prior = await kv.get('live:snapshot', 'json');
+  const outcome = (status, extra = {}) => ({ status, saved: status === 'saved', retained_last_success: Boolean(prior?.value), next_attempt_at: null, ...extra });
+  if (!force && !tradingMinute(time)) return outcome('outside_trading_session', { skipped: 'outside_trading_session' });
   const slot = Math.floor(time / 60000);
-  if (prior?.attempt_slot >= slot || Date.parse(prior?.next_attempt_at || '') > time) return { skipped: 'already_collected_or_cooling_down' };
+  // Same-minute duplicate schedules and active cooldowns skip without touching the upstream.
+  if (prior?.attempt_slot >= slot || Date.parse(prior?.next_attempt_at || '') > time)
+    return outcome('already_collected_or_cooling_down', { skipped: 'already_collected_or_cooling_down', next_attempt_at: prior?.next_attempt_at || null });
   const stop = new AbortController(), abort = AbortSignal.any([AbortSignal.timeout(45000), stop.signal]), pacer = requestPacer({ intervalMs: 250 });
   let throttle;
   const onLimit = error => { throttle = error; stop.abort(); };
@@ -56,24 +70,28 @@ export async function collectMinute(env, { now = Date.now, fetcher = fetch, forc
       calendar = (Array.isArray(r.data) ? r.data[0] : r.data).trade_dates.map(d => String(d).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3'));
       await kv.put(calendarKey, JSON.stringify(calendar), { expirationTtl: 172800 });
     }
-    if (!calendar.includes(date)) return { skipped: 'market_holiday' };
+    if (!calendar.includes(date)) return outcome('market_holiday', { skipped: 'market_holiday' });
     const seed = { calendar, universe: universe.funds.filter(f => BASKET.includes(f.symbol)) };
     const service = createDataService(seed, { fetcher: pacedFetch, now, persistentCache: cache, onLimit });
     const next = await service.live(env);
     if (throttle) throw throttle;
-    if (next.date !== date || next.amount == null || !next.coverage.some(v => v === 20)) throw Object.assign(new Error('Incomplete intraday data'), { code: 'incomplete_snapshot' });
+    if (!completeLiveSnapshot(next, date)) throw Object.assign(new Error('Incomplete intraday data'), { code: 'incomplete_snapshot' });
     const throttled = next.warnings.find(w => ['rate_limited', 'quota_exceeded'].includes(w.code));
     const value = mergeLiveCache(next, prior?.value);
     const entry = { value, checked_at: new Date(time).toISOString(), attempt_slot: slot, last_error: throttled?.code || (next.warnings.length ? 'partial_upstream' : null),
-      next_attempt_at: throttled ? new Date(time + Math.max(60000, throttled.retry_after_ms || 0)).toISOString() : null };
+      next_attempt_at: throttled ? new Date(time + Math.max(throttled.code === 'quota_exceeded' ? QUOTA_EXCEEDED_COOLDOWN_MS : RATE_LIMIT_COOLDOWN_MS, throttled.retry_after_ms || 0)).toISOString() : null };
     await kv.put('live:snapshot', JSON.stringify(entry));
-    return { saved: true, as_of: value.date + ' ' + value.last_complete_minute, warnings: next.warnings.length };
+    return outcome('saved', { as_of: value.date + ' ' + value.last_complete_minute, warnings: next.warnings.length, next_attempt_at: entry.next_attempt_at });
   } catch (error) {
     error = throttle || error;
     const code = ['rate_limited','quota_exceeded','incomplete_snapshot'].includes(error.code) ? error.code : 'upstream_error';
+    const floor = code === 'quota_exceeded' ? QUOTA_EXCEEDED_COOLDOWN_MS : RATE_LIMIT_COOLDOWN_MS;
+    const nextAttempt = new Date(time + Math.max(floor, error.retryAfterMs || 0)).toISOString();
+    // Failure updates bookkeeping only. The stored value keeps its last validated minute
+    // bars and closes; nothing here may overwrite them with nulls or zeros.
     await kv.put('live:snapshot', JSON.stringify({ ...prior, checked_at: new Date(time).toISOString(), attempt_slot: slot, last_error: code,
-      next_attempt_at: new Date(time + Math.max(error.code === 'quota_exceeded' ? 3600000 : 60000, error.retryAfterMs || 0)).toISOString() }));
-    return { saved: false, retained_last_success: Boolean(prior?.value), error: code };
+      next_attempt_at: nextAttempt }));
+    return outcome(code, { error: code, next_attempt_at: nextAttempt });
   }
 }
 export default {
