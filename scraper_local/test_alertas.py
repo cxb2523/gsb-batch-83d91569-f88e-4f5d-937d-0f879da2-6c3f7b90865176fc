@@ -93,3 +93,30 @@ def test_errores_de_cuota_sin_red_en_cero_igual_alerta():
     v = alertas.evaluar(_base(posts_por_red={"twitter": 31}, warnings_total=2,
                               errores_cuota_por_red={"twitter": 27}))
     assert v is not None and "Gemini" in v["mensaje"]
+
+
+def test_resultado_parcial_solo_no_dispara_alerta():
+    """Una red `parcial` sin posts en 0 ni otros motivos no enciende el cartel; el
+    detalle queda en el JSON para el reintento."""
+    r = _base(resultados_por_red={
+        "twitter": {"resultado": "parcial", "candidatos_salteados": ["Axel Kicillof"]}})
+    assert alertas.evaluar(r) is None
+
+
+def test_alerta_menciona_red_parcial_y_candidatos_salteados():
+    # Hay alerta por otra causa (warnings); el mensaje suma el detalle por red.
+    r = _base(warnings_total=20, resultados_por_red={
+        "twitter": {"resultado": "ok"},
+        "tiktok": {"resultado": "parcial", "candidatos_salteados": ["Axel Kicillof"],
+                   "candidatos_lectura_fallida": ["Sergio Massa"]},
+    })
+    v = alertas.evaluar(r)
+    assert v is not None
+    assert "parcial" in v["mensaje"] and "tiktok" in v["mensaje"]
+    assert "Axel Kicillof" in v["mensaje"] and "Sergio Massa" in v["mensaje"]
+
+
+def test_alerta_tolera_resultado_viejo_sin_detalle_por_red():
+    # Un JSON previo al campo nuevo sigue alertando por sus motivos de siempre.
+    v = alertas.evaluar(_base(posts_por_red={"twitter": 0}))
+    assert v is not None and "parcial" not in v["mensaje"]

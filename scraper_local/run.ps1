@@ -1,7 +1,10 @@
-param([string]$Redes = "")
+param([string]$Redes = "", [switch]$ReintentarFallidas = $false)
 # Corrida del scraper local de la Boca de Urna (la dispara Task Scheduler).
 # Parámetro -Redes: lista separada por comas, p.ej. -Redes "twitter,tiktok".
 # Si se omite, run.py usa las redes del config.json.
+# Parámetro -ReintentarFallidas: corre SÓLO las redes cuyo resultado en el último
+# logs\resultados\*.json no fue "ok". Combinado con -Redes, acota a esas redes.
+# Si no hay último resultado (o no trae redes fallidas) run.py sale non-cero sin scrapear.
 # El exit code de run.py se propaga para que el Task Scheduler registre fallos.
 Set-Location $PSScriptRoot
 
@@ -21,6 +24,9 @@ if (Test-Path $envFile) {
 }
 
 $argumentos = @("run.py")
-if ($Redes) { $argumentos += @("--redes", $Redes) }
+# En modo reintento el nombre de red va pegado al flag (--reintentar-fallidas REDES),
+# no a --redes: run.py sólo corre lo que no salió ok.
+if ($ReintentarFallidas) { $argumentos += "--reintentar-fallidas"; if ($Redes) { $argumentos += $Redes } }
+elseif ($Redes) { $argumentos += @("--redes", $Redes) }
 & "$PSScriptRoot\.venv\Scripts\python.exe" @argumentos
 exit $LASTEXITCODE

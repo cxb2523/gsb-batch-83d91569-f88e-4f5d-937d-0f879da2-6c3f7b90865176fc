@@ -20,6 +20,12 @@ def evaluar(resultado: dict, umbral_warnings: int = 8) -> dict | None:
     Distingue la causa del 0: si una red quedó en 0 por cuota de Gemini (está en
     `errores_cuota_por_red`), lo dice como problema de IA y NO como captcha/cuenta
     quemada — el scraping anduvo, lo que faltó fue la lectura.
+
+    Si igual hay alerta y el resultado trae `resultados_por_red`, el mensaje suma
+    qué redes salieron parciales y qué candidatos quedaron afuera (salteados o sin
+    leer) — antes eso sólo estaba en el log. Un resultado parcial por sí solo NO
+    dispara el cartel: hay configuraciones con candidatos sin perfil (Instagram)
+    que quedarían avisando todos los días.
     """
     motivos: list[str] = []
 
@@ -49,4 +55,28 @@ def evaluar(resultado: dict, umbral_warnings: int = 8) -> dict | None:
 
     if not motivos:
         return None
+    parciales = _redes_parciales(resultado)
+    if parciales:
+        motivos.append("Corrida parcial en: " + "; ".join(parciales) + ".")
     return {"nivel": "alerta", "titulo": TITULO, "mensaje": " ".join(motivos)}
+
+
+def _redes_parciales(resultado: dict) -> list[str]:
+    """Describe las redes con resultado `parcial`: 'tiktok (salteados: A, B)'.
+
+    Un JSON viejo sin `resultados_por_red` no aporta este detalle y devuelve [] —
+    el resto de las alertas sigue funcionando igual."""
+    registros = resultado.get("resultados_por_red") or {}
+    detalle: list[str] = []
+    for red, reg in registros.items():
+        if not isinstance(reg, dict) or reg.get("resultado") != "parcial":
+            continue
+        salteados = [c for c in (reg.get("candidatos_salteados") or []) if c]
+        fallidas = [c for c in (reg.get("candidatos_lectura_fallida") or []) if c]
+        partes = []
+        if salteados:
+            partes.append("salteados: " + ", ".join(salteados))
+        if fallidas:
+            partes.append("sin leer: " + ", ".join(fallidas))
+        detalle.append(f"{red} ({'; '.join(partes)})" if partes else red)
+    return detalle

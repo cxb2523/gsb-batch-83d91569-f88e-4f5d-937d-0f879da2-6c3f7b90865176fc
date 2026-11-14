@@ -236,6 +236,10 @@ def _preparar_correr(monkeypatch, tmp_path, posts_por_captura, escritos):
     monkeypatch.setattr(run.browser, "esperar_aleatorio", lambda rango: None)
     monkeypatch.setattr(run, "_limpiar_corridas_viejas", lambda conservar: None)
     monkeypatch.setattr(run, "DIR_CAPTURAS", tmp_path / "capturas")
+    # Aislar SIEMPRE el directorio de resultados: si no, los tests escriben JSON de
+    # corridas falsas en scraper_local/logs/resultados y el operador podría
+    # reintentar redes que nunca se corrieron.
+    monkeypatch.setattr(run, "DIR_RESULTADOS", tmp_path / "resultados")
 
 
 def test_correr_feliz_sube_snapshot_deduplicado(monkeypatch, tmp_path):
@@ -420,7 +424,7 @@ def test_correr_multi_red_tres_bloques(monkeypatch, tmp_path):
         "tiktok": {"scrolls_por_candidato": 3, "videos_comentarios": 2,
                    "scrolls_comentarios": 2, "candidatos_comentarios": []},
         "instagram": {"scrolls_por_candidato": 1, "posts_por_candidato": 3,
-                      "candidatos_posts": []},
+                      "candidatos_posts": ["Javier Milei"]},
     }
     rc = run.correr(cfg, dry_run=False)
     assert rc == 0 and len(escritos) == 1
@@ -501,3 +505,441 @@ def test_umbral_de_default_y_config():
     assert run._umbral_de({"alertas": {}}) == 8
     assert run._umbral_de({"alertas": 8}) == 8       # malformado -> default, no crash
     assert run._umbral_de({"alertas": None}) == 8
+
+
+# --- Resultado por red (ok / parcial / fallido) ---
+
+def _cfg_redes(redes: dict, **over):
+    cfg = _cfg(**over)
+    cfg["redes"] = redes
+    return cfg
+
+
+def _preparar_correr_por_red(monkeypatch, tmp_path, capturar_fn, vision_fn, escritos):
+    """Como _preparar_correr pero dejando capturar/vision a medida del test."""
+    pool = {"cuentas": [{"alias": "a", "estado": "activa", "ultima_vez": "", "notas": ""}]}
+    monkeypatch.setattr(run.accounts, "cargar_pool", lambda ruta=None, red="twitter": pool)
+    monkeypatch.setattr(run.accounts, "guardar_pool", lambda p, ruta=None, red="twitter": None)
+    monkeypatch.setattr(run, "capturar_candidato", capturar_fn)
+    monkeypatch.setattr(run.vision, "read_captures", vision_fn)
+    monkeypatch.setattr(run.store, "write_snapshot",
+                        lambda payload, generado_en: escritos.append(payload) or True)
+    monkeypatch.setattr(run.browser, "esperar_aleatorio", lambda rango: None)
+    monkeypatch.setattr(run, "_limpiar_corridas_viejas", lambda conservar: None)
+    monkeypatch.setattr(run, "DIR_CAPTURAS", tmp_path / "capturas")
+    monkeypatch.setattr(run, "DIR_RESULTADOS", tmp_path / "resultados")
+
+
+def _leer_unico_resultado(tmp_path):
+    jsons = sorted((tmp_path / "resultados").glob("*.json"))
+    assert len(jsons) == 1
+    return json.loads(jsons[0].read_text(encoding="utf-8"))
+
+
+def test_clasificar_resultado_red_tres_estados():
+    assert run.clasificar_resultado_red(10, 2, [], []) == run.RESULTADO_OK
+    assert run.clasificar_resultado_red(10, 2, ["B"], []) == run.RESULTADO_PARCIAL
+    assert run.clasificar_resultado_red(10, 2, [], ["B"]) == run.RESULTADO_PARCIAL
+    assert run.clasificar_resultado_red(0, 3, [], []) == run.RESULTADO_FALLIDO
+    # Sin candidatos en alcance NO es éxito: no se capturó nada.
+    assert run.clasificar_resultado_red(0, 0, [], []) == run.RESULTADO_FALLIDO
+
+
+def test_candidatos_de_red_instagram_usa_solo_los_punteros_configurados():
+    """Instagram abre sólo los perfiles de `candidatos_posts`: esos son sus
+    candidatos; el resto de la lista global ni se navega y no cuenta como salteado."""
+    cfg = _cfg_redes(
+        {"twitter": {"scrolls_por_candidato": 3},
+         "instagram": {"scrolls_por_candidato": 1,
+                       "candidatos_posts": ["Javier Milei", "Axel Kicillof"]}},
+        candidatos=["Javier Milei", "Axel Kicillof", "Sergio Massa"])
+    assert run.candidatos_de_red(cfg, "instagram") == ["Javier Milei", "Axel Kicillof"]
+    assert run.candidatos_de_red(cfg, "twitter") == ["Javier Milei", "Axel Kicillof",
+                                                     "Sergio Massa"]
+    cfg["redes"]["instagram"]["candidatos_posts"] = []
+    assert run.candidatos_de_red(cfg, "instagram") == []
+
+
+def test_candidatos_globales_respeta_lista_explicita_vacia():
+    # `candidatos: []` significa "esta corrida no busca a nadie" (no la default).
+    assert run._candidatos_globales({"candidatos": []}) == []
+    assert len(run._candidatos_globales({"candidatos": None})) > 0
+
+
+def test_red_con_capturas_pero_sin_posts_es_fallida(monkeypatch, tmp_path):
+    """Capturó pero la visión no vio ninguna publicación -> sin post usable: fallida."""
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([], None),
+        escritos=escritos)
+    run.correr(_cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                          candidatos=["Javier Milei"]), dry_run=False)
+    reg = _leer_unico_resultado(tmp_path)["resultados_por_red"]["twitter"]
+    assert reg["resultado"] == run.RESULTADO_FALLIDO
+    assert reg["candidatos"] == 1 and reg["posts"] == 0
+    assert reg["candidatos_salteados"] == []  # sí se capturó; lo que faltó fueron posts
+
+
+def test_instagram_cuenta_como_candidatos_solo_los_punteros(monkeypatch, tmp_path):
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_INSTAGRAM], None),
+        escritos=escritos)
+    cfg = _cfg_redes(
+        {"instagram": {"scrolls_por_candidato": 1,
+                       "candidatos_posts": ["Javier Milei", "Axel Kicillof"]}},
+        candidatos=["Javier Milei", "Axel Kicillof", "Sergio Massa", "Mauricio Macri"])
+    run.correr(cfg, dry_run=False)
+    reg = _leer_unico_resultado(tmp_path)["resultados_por_red"]["instagram"]
+    assert reg["candidatos"] == 2   # sólo los punteros, no los 4 de la lista global
+    assert reg["resultado"] == run.RESULTADO_OK
+
+
+def test_red_sin_candidatos_no_se_reporta_como_ok(monkeypatch, tmp_path):
+    """Una red que no tenía a quién buscar no puede figurar como éxito (regla del
+    requisito): se reporta fallida con candidatos=0 y posts=0."""
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_MILEI], None),
+        escritos=escritos)
+    cfg = _cfg_redes({"twitter": {"scrolls_por_candidato": 3}}, candidatos=[])
+    rc = run.correr(cfg, dry_run=False)
+    assert rc == 1  # sin posts -> no pisa el snapshot
+    data = _leer_unico_resultado(tmp_path)
+    reg = data["resultados_por_red"]["twitter"]
+    assert reg["resultado"] == run.RESULTADO_FALLIDO
+    assert reg["candidatos"] == 0 and reg["posts"] == 0
+
+
+def test_red_todos_candidatos_salteados_es_fallida(monkeypatch, tmp_path):
+    """Todos los candidatos de la red quedan sin capturar -> red fallida, con la
+    lista de salteados y 0 posts."""
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_MILEI], None),
+        escritos=escritos)
+    cfg = _cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                     candidatos=["Javier Milei", "Axel Kicillof"])
+    rc = run.correr(cfg, dry_run=False)
+    assert rc == 1  # sin posts
+    data = _leer_unico_resultado(tmp_path)
+    reg = data["resultados_por_red"]["twitter"]
+    assert reg["resultado"] == run.RESULTADO_FALLIDO
+    assert reg["candidatos"] == 2 and reg["posts"] == 0
+    assert reg["candidatos_salteados"] == ["Javier Milei", "Axel Kicillof"]
+    assert reg["candidatos_con_problemas"] == ["Javier Milei", "Axel Kicillof"]
+
+
+def test_red_con_parte_ok_y_parte_salteada_es_parcial(monkeypatch, tmp_path):
+    """Un candidato capturó y otro fue salteado -> la red es parcial (no fallida),
+    con sus números y el nombre del salteado."""
+    escritos = []
+    def capturar(red, cfg, pool, cand, carpeta, warnings, estado_red=None):
+        if cand == "Axel Kicillof":
+            return []
+        return [{"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}]
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path, capturar_fn=capturar,
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_MILEI], None),
+        escritos=escritos)
+    cfg = _cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                     candidatos=["Javier Milei", "Axel Kicillof"])
+    rc = run.correr(cfg, dry_run=False)
+    assert rc == 0  # hay posts: la corrida global no falla por esto
+    data = _leer_unico_resultado(tmp_path)
+    reg = data["resultados_por_red"]["twitter"]
+    assert reg["resultado"] == run.RESULTADO_PARCIAL
+    assert reg["candidatos"] == 2 and reg["posts"] >= 1
+    assert reg["candidatos_salteados"] == ["Axel Kicillof"]
+    assert reg["candidatos_lectura_fallida"] == []
+
+
+def test_red_con_lectura_fallida_es_parcial(monkeypatch, tmp_path):
+    """Capturas tomadas pero Gemini no las pudo leer -> parcial, con el candidato
+    en candidatos_lectura_fallida."""
+    escritos = []
+    def vision(rutas, red, candidatos=None, contexto=""):
+        if "Kicillof" in str(rutas[0]):
+            return None, 429
+        return [POST_MILEI], None
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=vision, escritos=escritos)
+    cfg = _cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                     candidatos=["Javier Milei", "Axel Kicillof"])
+    run.correr(cfg, dry_run=False)
+    reg = _leer_unico_resultado(tmp_path)["resultados_por_red"]["twitter"]
+    assert reg["resultado"] == run.RESULTADO_PARCIAL
+    assert reg["candidatos_salteados"] == []
+    assert reg["candidatos_lectura_fallida"] == ["Axel Kicillof"]
+    assert reg["errores_cuota"] >= 1
+
+
+def test_resultado_por_red_conserva_campos_viejos(monkeypatch, tmp_path):
+    """El campo nuevo no cambia la forma de los campos que ya consumía el aviso."""
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_MILEI], None),
+        escritos=escritos)
+    run.correr(_cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                          candidatos=["Javier Milei"]), dry_run=False)
+    data = _leer_unico_resultado(tmp_path)
+    for campo in ("runid", "fin_utc", "redes", "exit_code", "posts_por_red",
+                  "warnings_total", "cuentas_quemadas", "posts_electorales"):
+        assert campo in data
+    assert data["redes"] == ["twitter"]
+    assert data["resultados_por_red"]["twitter"]["resultado"] == run.RESULTADO_OK
+    assert data["reintento_de"] == ""
+
+
+# --- --reintentar-fallidas ---
+
+def _escribir_resultado_viejo(tmp_path, runid, resultados, redes=None):
+    monkeypatch_dir = tmp_path / "resultados"
+    monkeypatch_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "runid": runid,
+        "fin_utc": "2026-10-14T19:00:00+00:00",
+        "redes": list(redes or resultados.keys()),
+        "exit_code": 0,
+        "posts_por_red": {r: v.get("posts", 0) for r, v in resultados.items()},
+        "warnings_total": 0, "cuentas_quemadas": [], "posts_electorales": 1,
+        "resultados_por_red": resultados,
+        "nivel": "ok", "titulo": "", "mensaje": "",
+    }
+    (monkeypatch_dir / f"{runid}.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return data
+
+
+def _preparar_main(monkeypatch, tmp_path):
+    monkeypatch.setattr(run, "DIR_LOGS", tmp_path / "logs")
+    monkeypatch.setattr(run, "DIR_RESULTADOS", tmp_path / "resultados")
+    monkeypatch.setattr(run, "LOCK_PATH", tmp_path / ".run.lock")
+    corridas = []
+    monkeypatch.setattr(run, "correr",
+                        lambda cfg, dry_run=False:
+                        corridas.append((cfg, dry_run, cfg.get("_reintento_de", ""))) or 0)
+    return corridas
+
+
+def test_reintentar_sin_resultado_previo_no_scrapea_y_sale_noncero(monkeypatch, tmp_path):
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    rc = run.main(["--reintentar-fallidas"])
+    assert rc != 0
+    assert corridas == []  # no arrancó scraping
+
+
+def test_reintentar_sin_redes_fallidas_no_scrapea_y_sale_noncero(monkeypatch, tmp_path, capsys):
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "twitter": {"red": "twitter", "resultado": run.RESULTADO_OK,
+                    "candidatos": 1, "posts": 10},
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_OK,
+                   "candidatos": 1, "posts": 20},
+    })
+    rc = run.main(["--reintentar-fallidas"])
+    assert rc != 0
+    assert corridas == []  # nada que reintentar -> no corre
+    salida = capsys.readouterr()
+    assert "reintentar" in (salida.err + salida.out).lower()
+
+
+def test_reintentar_dry_run_no_crea_resultado_y_no_es_reintentable(monkeypatch, tmp_path, capsys):
+    """Un --dry-run nunca escribe resultado: tras una prueba en seco no hay 'última
+    corrida' para reintentar, así que el flag avisa y sale non-cero."""
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_MILEI], None),
+        escritos=escritos)
+    run.correr(_cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                          candidatos=["Javier Milei"]), dry_run=True)
+    assert not (tmp_path / "resultados").exists()
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    rc = run.main(["--reintentar-fallidas"])
+    assert rc != 0 and corridas == []
+
+
+def test_reintentar_corre_solo_las_redes_no_ok(monkeypatch, tmp_path):
+    """Con resultados mixtos, el flag corre SÓLO las redes parcial/fallidas, no las ok."""
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "twitter": {"red": "twitter", "resultado": run.RESULTADO_OK,
+                    "candidatos": 2, "posts": 50},
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_FALLIDO,
+                   "candidatos": 2, "posts": 0},
+        "instagram": {"red": "instagram", "resultado": run.RESULTADO_PARCIAL,
+                      "candidatos": 3, "posts": 4},
+    })
+    rc = run.main(["--reintentar-fallidas"])
+    assert rc == 0
+    assert len(corridas) == 1
+    cfg, dry_run, reintento_de = corridas[0]
+    assert list(cfg["redes"]) == ["tiktok", "instagram"]  # twitter (ok) queda afuera
+    assert dry_run is False
+    assert reintento_de == "20261014-1600"
+
+
+def test_reintentar_acepta_lista_de_redes_para_acotar(monkeypatch, tmp_path):
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_FALLIDO,
+                   "candidatos": 2, "posts": 0},
+        "instagram": {"red": "instagram", "resultado": run.RESULTADO_PARCIAL,
+                      "candidatos": 3, "posts": 4},
+    })
+    rc = run.main(["--reintentar-fallidas", "instagram"])
+    assert rc == 0 and len(corridas) == 1
+    assert list(corridas[0][0]["redes"]) == ["instagram"]
+
+
+def test_reintentar_ignora_redes_ok_aunque_se_pidan(monkeypatch, tmp_path):
+    """Pedir por nombre una red que salió ok no la corre: el flag sólo reintenta fallas."""
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "twitter": {"red": "twitter", "resultado": run.RESULTADO_OK,
+                    "candidatos": 1, "posts": 30},
+    })
+    rc = run.main(["--reintentar-fallidas", "twitter"])
+    assert rc != 0 and corridas == []
+
+
+def test_reintentar_dry_run_pasa_dry_run_y_no_corre_normal(monkeypatch, tmp_path):
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_FALLIDO,
+                   "candidatos": 1, "posts": 0},
+    })
+    rc = run.main(["--reintentar-fallidas", "--dry-run"])
+    assert rc == 0 and len(corridas) == 1
+    assert corridas[0][1] is True           # dry-run se respeta
+    assert list(corridas[0][0]["redes"]) == ["tiktok"]
+
+
+def test_redes_fallidas_soporta_resultado_legacy_sin_detalle():
+    """Un JSON viejo (sin resultados_por_red) sólo deja concluir el 0 de posts_por_red."""
+    legacy = {"redes": ["twitter", "tiktok"], "posts_por_red": {"twitter": 10, "tiktok": 0}}
+    assert run.redes_fallidas(legacy) == ["tiktok"]
+
+
+def test_redes_fallidas_no_omite_red_ausente_de_la_lista_redes():
+    """Si el JSON es inconsistente (una red fallida no figura en `redes`), igual se
+    detecta: un resultado parcial no debe quedar escondido."""
+    data = {"redes": ["twitter"],
+            "posts_por_red": {"twitter": 10, "tiktok": 0},
+            "resultados_por_red": {"twitter": {"resultado": "ok"},
+                                   "tiktok": {"resultado": "fallido"}}}
+    assert run.redes_fallidas(data) == ["tiktok"]
+
+
+def test_alcance_reintento_interseccion_y_none():
+    assert run.alcance_reintento("", None) is None                 # sin acotar
+    assert run.alcance_reintento("", "") is None
+    assert run.alcance_reintento("tiktok,instagram", None) == ["instagram", "tiktok"]
+    # Flag y --redes se INTERSECTAN: ninguno puede ampliar lo que el otro pidió.
+    assert run.alcance_reintento("tiktok,instagram", "instagram,twitter") == ["instagram"]
+    assert run.alcance_reintento("tiktok", "instagram") == []
+
+
+def test_reintentar_con_redes_ok_pedidas_no_las_corre(monkeypatch, tmp_path):
+    """--redes no puede ampliar el alcance del reintento a una red que salió ok."""
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "twitter": {"red": "twitter", "resultado": run.RESULTADO_OK,
+                    "candidatos": 1, "posts": 30},
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_FALLIDO,
+                   "candidatos": 1, "posts": 0},
+    })
+    rc = run.main(["--reintentar-fallidas", "tiktok", "--redes", "twitter"])
+    assert rc != 0 and corridas == []  # intersección vacía -> nada que reintentar
+
+
+def test_reintentar_saltea_json_corrupto_y_usa_uno_valido(monkeypatch, tmp_path):
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    (tmp_path / "resultados").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "resultados" / "20261015-1000.json").write_text("{cortado", encoding="utf-8")
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_FALLIDO,
+                   "candidatos": 1, "posts": 0},
+    })
+    rc = run.main(["--reintentar-fallidas"])
+    assert rc == 0 and len(corridas) == 1
+    assert list(corridas[0][0]["redes"]) == ["tiktok"]
+    assert corridas[0][2] == "20261014-1600"
+
+
+def test_reintentar_omite_red_fallida_que_ya_no_esta_en_config(monkeypatch, tmp_path):
+    """Si la red fallida ya no está en el config, se omite y se corre lo que sí está."""
+    corridas = _preparar_main(monkeypatch, tmp_path)
+    _escribir_resultado_viejo(tmp_path, "20261014-1600", {
+        "tiktok": {"red": "tiktok", "resultado": run.RESULTADO_FALLIDO,
+                   "candidatos": 1, "posts": 0},
+        "myspace": {"red": "myspace", "resultado": run.RESULTADO_FALLIDO,
+                    "candidatos": 1, "posts": 0},
+    })
+    rc = run.main(["--reintentar-fallidas"])
+    assert rc == 0 and len(corridas) == 1
+    assert list(corridas[0][0]["redes"]) == ["tiktok"]
+
+
+def test_crash_registra_todas_las_redes_como_fallidas(monkeypatch, tmp_path):
+    """Una corrida que crashea no puede declarar ninguna red sana: el JSON de resultado
+    deja todas las redes configuradas en `fallido` (y así son reintentables)."""
+    monkeypatch.setattr(run, "DIR_LOGS", tmp_path / "logs")
+    monkeypatch.setattr(run, "DIR_RESULTADOS", tmp_path / "resultados")
+    monkeypatch.setattr(run, "LOCK_PATH", tmp_path / ".run.lock")
+    cfg_fija = _cfg_redes({
+        "twitter": {"scrolls_por_candidato": 3},
+        "tiktok": {"scrolls_por_candidato": 3},
+    }, candidatos=["Javier Milei"])
+    monkeypatch.setattr(run, "cargar_config", lambda ruta=None: cfg_fija)
+
+    def explota(cfg, dry_run=False, reintento_de=""):
+        raise RuntimeError("chromium se murió")
+
+    monkeypatch.setattr(run, "correr", explota)
+    rc = run.main(["--redes", "twitter,tiktok"])
+    assert rc == 1
+    jsons = list((tmp_path / "resultados").glob("*.json"))
+    assert len(jsons) == 1
+    data = json.loads(jsons[0].read_text(encoding="utf-8"))
+    assert data["resultados_por_red"]["twitter"]["resultado"] == run.RESULTADO_FALLIDO
+    assert data["resultados_por_red"]["tiktok"]["resultado"] == run.RESULTADO_FALLIDO
+    assert run.redes_fallidas(data) == ["twitter", "tiktok"]
+
+
+def test_correr_registra_reintento_de(monkeypatch, tmp_path):
+    """Una corrida de reintento deja el runid de origen en su propio resultado."""
+    escritos = []
+    _preparar_correr_por_red(
+        monkeypatch, tmp_path,
+        capturar_fn=lambda red, cfg, pool, cand, carpeta, warnings, estado_red=None: [
+            {"ruta": tmp_path / f"{red}-{cand}.png", "contexto": ""}],
+        vision_fn=lambda rutas, red, candidatos=None, contexto="": ([POST_MILEI], None),
+        escritos=escritos)
+    cfg = _cfg_redes({"twitter": {"scrolls_por_candidato": 3}},
+                     candidatos=["Javier Milei"])
+    cfg["_reintento_de"] = "20261014-1600"
+    run.correr(cfg, dry_run=False)
+    assert _leer_unico_resultado(tmp_path)["reintento_de"] == "20261014-1600"
+
+

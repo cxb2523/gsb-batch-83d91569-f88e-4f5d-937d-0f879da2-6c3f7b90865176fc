@@ -133,6 +133,50 @@ prioridad). Si corrés `run.py` a mano sin `run.ps1`, cargá las variables antes
 .venv\Scripts\python run.py            # sube el snapshot a Supabase
 ```
 
+**Resultado por red** — cada corrida deja `logs/resultados/<runid>.json` con, además
+de los campos de siempre, `resultados_por_red`: el desenlace de CADA red que se
+corrió, con sus números y los candidatos que quedaron afuera.
+
+| Campo | Qué guarda |
+|-------|------------|
+| `resultado` | `ok`, `parcial` o `fallido` |
+| `candidatos` / `posts` | cuántos candidatos buscó la red y cuántos posts quedaron tras el dedup |
+| `candidatos_salteados` | candidatos que quedaron sin ninguna captura (sin cuenta, challenge, error del navegador) |
+| `candidatos_lectura_fallida` | candidatos con capturas que Gemini no pudo leer (cuota, upstream) |
+| `candidatos_con_problemas` | las dos listas de arriba, combinadas |
+
+- **`ok`**: la red juntó posts y ningún candidato quedó en el camino.
+- **`parcial`**: juntó posts, pero algún candidato se salteó o no se pudo leer (está en las listas).
+- **`fallido`**: la red no juntó ningún post usable. Una red sin candidatos en alcance
+  también es `fallido`: no se puede declarar éxito algo que no se capturó.
+
+`reintento_de` guarda el `runid` de la corrida original cuando esta corrida fue un
+reintento (`""` en una corrida normal).
+
+**Reintentar sólo lo que falló** (sin correr todo de nuevo):
+
+```powershell
+.venv\Scripts\python run.py --reintentar-fallidas
+.venv\Scripts\python run.py --reintentar-fallidas tiktok,instagram   # acota a ésas
+run.ps1 -ReintentarFallidas                                          # equivalente en la PC de la oficina
+run.ps1 -ReintentarFallidas -Redes tiktok                            # acotado
+```
+
+Toma el resultado más reciente de `logs/resultados/` y corre **sólo** las redes cuyo
+`resultado` no fue `ok`. Si no hay ningún resultado previo, si `resultados_por_red` no
+trae redes fallidas, o si esas redes no están en el config, imprime el motivo y sale
+con código **3** **sin arrancar el scraping** (no cae a una corrida completa).
+
+Combinaciones:
+
+- `--dry-run` no escribe resultado: una prueba en seco **no** puede ser la "última
+  corrida" a reintentar. `--reintentar-fallidas --dry-run` sí corre las redes
+  fallidas (en seco, sin subir nada ni escribir un resultado nuevo).
+- `--redes` y `--reintentar-fallidas` se **intersecan**: los dos acotan, ninguno
+  puede ampliar lo que el otro pidió. Una red pedida que había salido `ok` se ignora.
+- `--config` sigue eligiendo el archivo de config; sólo se pueden reintentar redes
+  que existan en él.
+
 **Config (`config.json`)** — formato `"redes": { "twitter": {...}, "tiktok": {...} }`.
 Claves de TikTok:
 
@@ -166,6 +210,10 @@ Config editable en `config.json` (scrolls, esperas, candidatos, mínimo de posts
 > logueado): la ventana necesita escritorio real. El umbral de avisos se ajusta en
 > `config.json` → `alertas.umbral_warnings`. Probarlo sin esperar una falla:
 > `aviso-matutino.ps1 -Simular`.
+> Cuando el cartel aparece, el mensaje también nombra las redes **parciales** y los
+> candidatos que quedaron afuera (`tiktok (salteados: A, B)`), tomados de
+> `resultados_por_red` — para no tener que abrir el log a buscar cuál fue. Una
+> corrida meramente parcial no dispara el cartel por sí sola.
 
 > [!warning] TikTok corre con browser VISIBLE
 > En headless TikTok sirve un captcha-slider ("Drag the slider to fit the puzzle")
