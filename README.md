@@ -395,7 +395,13 @@ stopped).
   never replaced with `[]`.
 * **Blocked ≠ empty ≠ partial**, three distinct exit codes, and
   `<out>.meta.json` records `status`, `stop_reason` and *which* pages failed
-  by number.
+  by number. The Playwright engine also records a `pages` list: one entry
+  per requested page with its outcome (`content`, `empty`, `blocked`,
+  `parse_error`, `not_found`, `load_failed` or `unattempted` — the same
+  states the run logic classifies) and how many rows it produced, so a
+  refused page is never mistaken for an empty one, and a page the run never
+  fetched (capped by the site's own `pageCount`, or still queued when
+  concurrent dispatch stopped) is never mistaken for a failed one.
 * **A failed run writes no sidecar**, so a `"failed"` file never sits beside
   good data (the one exception is below, and only where no earlier output
   exists). A run the proxy pre-check stopped writes

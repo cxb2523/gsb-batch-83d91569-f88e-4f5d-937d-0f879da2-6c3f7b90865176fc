@@ -25,6 +25,22 @@ does it leads the release notes rather than being discovered from a bill.
 
 ### Added
 
+- Per-page outcome records in the Playwright engine: `<out>.meta.json` now
+  carries a `pages` list with one entry per requested page — its outcome
+  (`content`, `empty`, `blocked`, `parse_error`, `not_found`, `load_failed`
+  or `unattempted`, the same states `page_flow` classifies, mapped in
+  `page_flow.page_outcome_name`) and how many rows it produced. A refused
+  page is `blocked` and counts as failed; a genuinely empty one is `empty`
+  and does not. Pages never requested — capped by the site's own
+  `pageCount`, or still queued when concurrent dispatch stopped — are
+  `unattempted`, not failures. Offline checks drive `scrape()` over
+  self-made HTML for a normal multi-page run, a refused page, a fully
+  refused zero-row run (still exit 3, never read as empty), a genuinely
+  empty page, an out-of-range echo, and a concurrent run with a page left
+  in the queue.
+- `page_flow.page_outcome_name` / `page_flow.page_outcome_failed`: the
+  per-page record taxonomy, derived from `STATE_POLICY` so all three
+  engines share it.
 - `proxy_meter.py`: per-run proxy traffic meter and budget, in all three
   engines, only through a local proxy. Playwright sums `request.sizes()`;
   pyppeteer and Selenium count CDP `Network.loadingFinished.encodedDataLength`
@@ -62,6 +78,10 @@ does it leads the release notes rather than being discovered from a bill.
 
 ### Changed
 
+- An out-of-range page the server clamps back to page 1 now stops the
+  Playwright engine with `stop_reason: page_echo_mismatch` (it was
+  `no_new_products`), matching what the README has always said. Both are
+  complete stop reasons, so exit codes are unchanged.
 - `pyproject.toml` lists `proxy_check` (missing since it was added) and
   `proxy_meter` among the installed modules.
 - An explicit numeric flag value of `0` is no longer overridden by the

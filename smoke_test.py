@@ -1822,6 +1822,354 @@ def check_worker_pools_start_on_different_exits():
     equal("a missing pool stays missing", engine._worker_pool(None, 0), None)
 
 
+# ---------------------------------------------------------------------------
+# Per-page outcome records (the Playwright engine's sidecar "pages" list)
+# ---------------------------------------------------------------------------
+
+def _selfmade_listing_html(page, page_count, job_ids, echoed_page=None):
+    """A self-made landing page: real `__NEXT_DATA__` with an Apollo cache.
+
+    The fixtures at the top of this file are trimmed captures; these are
+    built on purpose, so a check can decide how many pages the site claims
+    to have, which jobs each page carries, and which page the server SAYS
+    it answered with — the three levers the per-page-record checks need.
+    """
+    jobs = {}
+    for jid in job_ids:
+        jobs["JobListingSearchResult:%d" % jid] = {
+            "__typename": "JobListingSearchResult", "id": str(jid),
+            "slug": "selfmade-job-%d" % jid,
+            "title": "Selfmade Job %d" % jid,
+            "compensation": "$100k – $120k", "jobType": "full-time",
+            "remote": True, "liveStartAt": 1789063154,
+            "locationNames": ["Remote"]}
+    echoed = echoed_page if echoed_page is not None else page
+    results_key = ('seoLandingPageJobSearchResults('
+                   '{"page":%d,"remote":true,"role":"selfmade"})' % echoed)
+    data = {
+        "ROOT_QUERY": {"__typename": "Query", "talent": {
+            "__typename": "Talent",
+            results_key: {"__typename": "Results",
+                          "totalJobCount": len(job_ids) * page_count,
+                          "totalStartupCount": page_count, "perPage": 20,
+                          "pageCount": page_count,
+                          "startups": [{"__ref": "StartupResult:9001"}]}}},
+        "StartupResult:9001": {
+            "__typename": "StartupResult", "id": "9001",
+            "name": "Selfmade Co", "slug": "selfmade-co",
+            "highConcept": "A fixture company",
+            "highlightedJobListings": [{"__ref": key} for key in jobs]}}
+    data.update(jobs)
+    payload = {"props": {"pageProps": {"apolloState": {"data": data}}}}
+    return ('<html><head><link href="/_next/static/css/app.css"/></head>'
+            '<body><img src="https://photos.wellfound.com/startups/i/1.jpg"/>'
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(payload) + "</script></body></html>")
+
+
+# A landing page that matched nothing: the site's own "no jobs" copy over an
+# empty Apollo cache, which page_flow classifies as "empty" — a real answer,
+# not a failure.
+SELF_MADE_EMPTY_LISTING_HTML = (
+    '<html><head><link href="/_next/static/css/app.css"/></head><body>'
+    "<p>No jobs found</p>"
+    '<script id="__NEXT_DATA__" type="application/json">'
+    '{"props":{"pageProps":{"apolloState":{"data":{"ROOT_QUERY":'
+    '{"__typename":"Query","talent":{"__typename":"Talent",'
+    '"seoLandingPageJobSearchResults({\\"page\\":2})":'
+    '{"__typename":"Results","totalJobCount":0,"totalStartupCount":0,'
+    '"perPage":20,"pageCount":1,"startups":[]}}}}}}}'
+    "</script></body></html>")
+
+
+def _drive_playwright_scrape(html_by_url, *extra_argv):
+    """scrape() end to end with the browser faked, serving self-made pages.
+
+    `html_by_url` maps the exact URL the engine will fetch to the HTML the
+    fake browser serves for it. Returns (rc, meta, rows, log) — meta is None
+    when the run wrote no sidecar, which is itself something to assert.
+    """
+    import shutil
+    engine = _engine_with_stub_driver("playwright_scraper")
+    tmp = tempfile.mkdtemp()
+    args = _engine_args(engine, tmp, None, "--delay", "0", "--retries", "1",
+                        "--retry-delay", "0", "--format", "json", *extra_argv)
+
+    class FakePage:
+        def __init__(self):
+            self.url = ""
+
+        def goto(self, url, **_kw):
+            self.url = url
+            return _FakeResponse(200)
+
+        def query_selector_all(self, *_a):
+            return []
+
+        def wait_for_timeout(self, *_a):
+            pass
+
+        def screenshot(self, **_kw):
+            pass
+
+    class FakeSession:
+        def __init__(self, *_a, **_k):
+            self.page = FakePage()
+            self.pool = None
+
+        def open(self):
+            return self
+
+        def relaunch(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_a):
+            return False
+
+    engine._snapshot = lambda page, _url: html_by_url.get(page.url, "")
+    engine.handle_captcha_if_present = lambda *_a, **_k: False
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    out = os.path.join(tmp, "out")
+    with _captured_output() as buf:
+        try:
+            rc = engine.scrape(args)
+        except Exception as e:  # noqa: BLE001 — fail BY NAME
+            rc = "raised %s" % type(e).__name__
+    meta = (json.load(open(out + ".meta.json", encoding="utf-8"))
+            if os.path.exists(out + ".meta.json") else None)
+    rows = (json.load(open(out + ".json", encoding="utf-8"))
+            if os.path.exists(out + ".json") else None)
+    log = buf.getvalue()
+    shutil.rmtree(tmp, ignore_errors=True)
+    return rc, meta, rows, log
+
+
+def check_page_outcome_names_come_from_the_shared_policy():
+    """The record taxonomy IS page_flow's, not a second one invented for
+    the records — a second one is how three engines drift apart."""
+    import page_flow
+    equal("page outcome: a navigation that never got a response",
+          page_flow.page_outcome_name(True, None, None), "load_failed")
+    equal("page outcome: a refusal names itself blocked",
+          page_flow.page_outcome_name(False, "cloudflare", "blocked"),
+          "blocked")
+    equal("page outcome: a served page keeps its page_flow state",
+          page_flow.page_outcome_name(False, None, "empty"), "empty")
+    for state in ("content", "parse_error", "not_found", "unknown"):
+        equal("page outcome: %s passes through" % state,
+              page_flow.page_outcome_name(False, None, state), state)
+    # The failure semantics mirror PageOutcome.ok: a refused page counts
+    # against the run, a genuinely empty one does not, and a page that was
+    # never tried is not a page that failed.
+    for name, want in (("content", False), ("empty", False),
+                       ("not_found", False), ("blocked", True),
+                       ("parse_error", True), ("unknown", True),
+                       ("load_failed", True), ("unattempted", False)):
+        equal("page outcome failed(%s) is %s" % (name, want),
+              page_flow.page_outcome_failed(name), want)
+
+
+def check_playwright_records_each_requested_pages_outcome():
+    """The sidecar's "pages" list says how EVERY requested page ended."""
+    import product_parser as P
+    import output_writer as O
+    base = _SAVERS_URL
+
+    def url(n):
+        return base if n == 1 else P.page_url(base, n)
+
+    # -- a normal multi-page run, capped by the site's own pageCount -------
+    rc, meta, rows, _log = _drive_playwright_scrape(
+        {url(1): _selfmade_listing_html(1, 3, [101, 102]),
+         url(2): _selfmade_listing_html(2, 3, [103, 104]),
+         url(3): _selfmade_listing_html(3, 3, [105])},
+        "--pages", "5")
+    check("records: a capped 3-of-5 run exits 0", rc == 0, "rc=%r" % (rc,))
+    recs = (meta or {}).get("pages") or []
+    equal("records: one per REQUESTED page, in page order",
+          [r["page"] for r in recs], [1, 2, 3, 4, 5])
+    equal("records: the fetched three are content, with their row counts",
+          [(r["outcome"], r["rows"]) for r in recs[:3]],
+          [("content", 2), ("content", 2), ("content", 1)])
+    equal("records: the two the site's pageCount capped away are unattempted",
+          [(r["outcome"], r["rows"]) for r in recs[3:]],
+          [("unattempted", 0), ("unattempted", 0)])
+    equal("records: the run-level fields agree with them",
+          (meta.get("status"), meta.get("stop_reason"),
+           meta.get("pages_completed"), meta.get("pages_failed"),
+           meta.get("products")),
+          ("complete", "page_cap_reached", 3, [], 5))
+
+    # -- a page Cloudflare refused ------------------------------------------
+    rc, meta, rows, _log = _drive_playwright_scrape(
+        {url(1): _selfmade_listing_html(1, 2, [101, 102]),
+         url(2): BRANDED_BLOCK_HTML},
+        "--pages", "2")
+    recs = (meta or {}).get("pages") or []
+    equal("records: a refused page is blocked, never empty",
+          [(r["outcome"], r["rows"]) for r in recs],
+          [("content", 2), ("blocked", 0)])
+    check("records: the refused page counts as failed (an empty one would "
+          "not)", bool(meta) and meta.get("pages_failed") == [2]
+          and meta.get("pages_completed") == 1,
+          repr(meta and meta.get("pages_failed")))
+    check("records: a failed page means stop_reason is not completed",
+          bool(meta)
+          and meta.get("stop_reason") not in O.COMPLETE_STOP_REASONS
+          and meta.get("stop_reason", "").startswith("blocked"),
+          repr(meta and meta.get("stop_reason")))
+    equal("records: rows were gathered, so the run is partial (exit 6)",
+          (rc, (meta or {}).get("status")), (6, "partial"))
+
+    # -- a fully refused run: blocked must not become empty -----------------
+    rc, meta, rows, _log = _drive_playwright_scrape(
+        {url(1): BRANDED_BLOCK_HTML}, "--pages", "1", "--allow-empty")
+    check("records: a zero-row refused run still exits 3, not 4",
+          rc == 3, "rc=%r" % (rc,))
+    equal("records: ...and the sidecar says blocked, not empty",
+          (meta or {}).get("status"), "blocked")
+    equal("records: ...with the page recorded as blocked",
+          [(r["outcome"], r["rows"]) for r in (meta or {}).get("pages", [])],
+          [("blocked", 0)])
+    check("records: ...and no row file was written", rows is None)
+
+    # -- a genuinely empty page: an answer, not a failure -------------------
+    rc, meta, rows, _log = _drive_playwright_scrape(
+        {url(1): _selfmade_listing_html(1, 3, [101, 102]),
+         url(2): SELF_MADE_EMPTY_LISTING_HTML,
+         url(3): _selfmade_listing_html(3, 3, [103])},
+        "--pages", "3")
+    recs = (meta or {}).get("pages") or []
+    equal("records: a genuinely empty page is empty, not blocked",
+          [(r["outcome"], r["rows"]) for r in recs],
+          [("content", 2), ("empty", 0), ("unattempted", 0)])
+    check("records: an empty page is NOT a failed page",
+          bool(meta) and meta.get("pages_failed") == []
+          and meta.get("status") == "complete"
+          and meta.get("stop_reason") == "no_new_products" and rc == 0,
+          "rc=%r meta=%r" % (rc, meta and {k: meta.get(k) for k in
+                                           ("pages_failed", "status",
+                                            "stop_reason")}))
+
+    # -- an out-of-range page the server clamped back to page 1 -------------
+    rc, meta, rows, _log = _drive_playwright_scrape(
+        {url(1): _selfmade_listing_html(1, 2, [101, 102]),
+         url(2): _selfmade_listing_html(2, 2, [101, 102], echoed_page=1)},
+        "--pages", "3")
+    recs = (meta or {}).get("pages") or []
+    equal("records: an out-of-range echo stops with page_echo_mismatch",
+          (meta or {}).get("stop_reason"), "page_echo_mismatch")
+    equal("records: the repeated page shows what the server really answered",
+          recs[1].get("echoed_page") if len(recs) > 1 else None, 1)
+    equal("records: the page past the echo was never tried",
+          (recs[2]["outcome"], recs[2]["rows"]) if len(recs) > 2 else None,
+          ("unattempted", 0))
+    check("records: the run is complete and the repeated rows were not "
+          "double-counted",
+          bool(meta) and meta.get("status") == "complete"
+          and meta.get("products") == 2 and rc == 0,
+          "status=%r products=%r rc=%r"
+          % ((meta or {}).get("status"), (meta or {}).get("products"), rc))
+
+
+def check_playwright_records_unattempted_pages_under_concurrency():
+    """A page still queued when dispatch stops is unattempted, not failed."""
+    import shutil
+    import threading
+    import time as _time
+    from output_writer import JobPosting
+    engine = _engine_with_stub_driver("playwright_scraper")
+    tmp = tempfile.mkdtemp()
+    args = _engine_args(engine, tmp, None, "--pages", "4", "--concurrency", "2",
+                        "--delay", "0", "--retries", "1", "--format", "json")
+
+    def row(sku):
+        return JobPosting(sku=str(sku), title="t", url="u")
+
+    page3_started = threading.Event()
+    page2_returned = threading.Event()
+
+    def fake_fetch(session, a, pool, page_num, page_url):
+        if page_num == 2:
+            # Empty: the end of the listing. Waits until page 3 is in flight
+            # so both workers are busy, then returns fast — page 4 is still
+            # queued when dispatch stops.
+            page3_started.wait(10)
+            outcome = engine.PageOutcome(page_num=2, url=page_url,
+                                         final_url=page_url, state="empty",
+                                         products=[])
+            page2_returned.set()
+            return outcome
+        if page_num == 3:
+            page3_started.set()
+            # Slow enough that the empty page 2 has stopped dispatch long
+            # before this returns.
+            page2_returned.wait(10)
+            _time.sleep(0.5)
+        products = {1: [row(101), row(102)], 3: [row(103)]}.get(page_num, [])
+        return engine.PageOutcome(page_num=page_num, url=page_url,
+                                  final_url=_SAVERS_URL, state="content",
+                                  products=products, pages_available=4)
+
+    class FakeSession:
+        def __init__(self, *_a, **_k):
+            self.pool = None
+
+        def open(self):
+            return self
+
+        def close(self):
+            pass
+
+    class FakePlaywright:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_a):
+            return False
+
+    engine._fetch_one_page = fake_fetch
+    engine._BrowserSession = FakeSession
+    engine.sync_playwright = lambda: FakePlaywright()
+    out = os.path.join(tmp, "out")
+    with _captured_output():
+        try:
+            rc = engine.scrape(args)
+        except Exception as e:  # noqa: BLE001 — fail BY NAME
+            rc = "raised %s" % type(e).__name__
+    meta = (json.load(open(out + ".meta.json", encoding="utf-8"))
+            if os.path.exists(out + ".meta.json") else None)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    recs = (meta or {}).get("pages") or []
+    check("concurrency: the run returned and completed", rc == 0,
+          "rc=%r" % (rc,))
+    equal("concurrency: every requested page has a record",
+          [r["page"] for r in recs], [1, 2, 3, 4])
+    if len(recs) == 4:
+        equal("concurrency: an empty page is recorded empty — not a failure",
+              (recs[1]["outcome"], recs[1]["rows"]), ("empty", 0))
+        equal("concurrency: the page still queued when dispatch stopped is "
+              "unattempted",
+              (recs[3]["outcome"], recs[3]["rows"]), ("unattempted", 0))
+    check("concurrency: pages_failed stays empty and the sidecar agrees",
+          bool(meta) and meta.get("pages_failed") == []
+          and meta.get("pages_completed") == 3
+          and meta.get("status") == "complete"
+          and meta.get("stop_reason") == "no_new_products",
+          repr(meta and {k: meta.get(k) for k in
+                         ("pages_failed", "pages_completed", "status",
+                          "stop_reason")}))
+
+
 def check_fingerprint_kwargs_are_ones_the_driver_accepts():
     """An unknown key in new_context(**kwargs) is a TypeError at launch,
     on the PAID path, at runtime."""

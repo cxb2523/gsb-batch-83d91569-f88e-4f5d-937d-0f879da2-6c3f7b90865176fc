@@ -225,6 +225,55 @@ def stop_reason_for(load_failed: bool, blocked_by: Optional[str],
     return "completed"
 
 
+# ---------------------------------------------------------------------------
+# Per-page outcome records
+# ---------------------------------------------------------------------------
+
+# The outcome name a page record carries for a page the run never tried —
+# capped away by the site's own `pageCount`, or still queued when dispatch
+# stopped. Deliberately NOT a STATE_POLICY state (there is no response to
+# classify) and deliberately not a failure: nothing was asked, so nothing
+# can be concluded about what the site would have answered.
+PAGE_OUTCOME_UNATTEMPTED = "unattempted"
+
+
+def page_outcome_name(load_failed: bool, blocked_by,
+                      state: Optional[str]) -> str:
+    """The outcome one attempted page records, from the SAME policy the
+    run-level decisions already use — not a second taxonomy invented for
+    the records, which is how three engines end up calling the same page
+    three different things.
+
+    "load_failed" and "blocked" are the two facts a page outcome carries
+    that are not page-flow states — a navigation that never got a response,
+    and a refusal the engine attributed to a vendor. Everything else IS the
+    state `classify()` returned, carried through unchanged.
+    """
+    if load_failed:
+        return "load_failed"
+    if blocked_by:
+        return "blocked"
+    if state in STATE_POLICY:
+        return state
+    return "unknown"
+
+
+def page_outcome_failed(name: str) -> bool:
+    """Whether a recorded page outcome counts against the run.
+
+    Mirrors the engines' `PageOutcome.ok` exactly, so a per-page record and
+    the run-level `pages_failed` can never disagree: a load failure and
+    every state the policy marks not-obtained fail; "empty" and "not_found"
+    do NOT (both are answers the site gave — see STATE_POLICY), and neither
+    does "unattempted", because a page that was never tried is not a page
+    that failed.
+    """
+    if name == "load_failed":
+        return True
+    policy = STATE_POLICY.get(name)
+    return bool(policy) and not policy["obtained"]
+
+
 def should_retry(state: str) -> bool:
     return STATE_POLICY.get(state, STATE_POLICY["unknown"])["retry"]
 

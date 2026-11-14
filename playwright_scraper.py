@@ -77,7 +77,7 @@ from product_parser import (MODES, DEFAULT_MODE, FEED_URL, category_from_url,
                             parse_listing_page, references_own_assets,
                             role_url, site_turnstile_sitekey)
 from output_writer import (dedupe_by_key, finish_run, EXIT_API_ERROR,
-                           finish_without_fetch,
+                           finish_without_fetch, COMPLETE_STOP_REASONS,
                            SOURCE_DEFAULT)
 import page_flow
 from page_flow import MIN_CARD_MATCHES
@@ -159,6 +159,25 @@ class PageOutcome:
         return (not self.load_failed
                 and self.blocked_by is None
                 and (self.state is None or page_flow.content_obtained(self.state)))
+
+    def record(self) -> dict:
+        """This page's entry in the run's per-page outcome records.
+
+        The outcome name comes from page_flow's shared mapping, so what a
+        page is called here is what the policy called it everywhere else —
+        a blocked page is "blocked" (and counts against the run), an empty
+        one is "empty" (and does not). `echoed_page` rides along when the
+        server stated one, because that is how a record shows "asked for
+        page 48, the server answered with page 1" instead of leaving the
+        row counts to tell that story on their own.
+        """
+        rec = {"page": self.page_num,
+               "outcome": page_flow.page_outcome_name(
+                   self.load_failed, self.blocked_by, self.state),
+               "rows": len(self.products)}
+        if self.echoed_page is not None:
+            rec["echoed_page"] = self.echoed_page
+        return rec
 
 
 ITEM_LINK_SELECTOR = page_flow.READY_SELECTOR_LISTING
@@ -1467,11 +1486,18 @@ def scrape(args) -> int:
                     outcomes.extend(rest)
 
                     failed = [o for o in rest if not o.ok]
+                    echoed = [o for o in rest
+                              if o.echoed_page is not None
+                              and o.echoed_page != o.page_num]
                     if failed:
                         worst = min(failed, key=lambda o: o.page_num)
                         stop_reason = page_flow.stop_reason_for(
                     worst.load_failed, worst.blocked_by, worst.state)
                         blocked = any(o.blocked_by for o in rest)
+                    elif echoed:
+                        # The site answered an out-of-range page with page 1
+                        # and said so — see the sequential loop below.
+                        stop_reason = "page_echo_mismatch"
                     elif exhausted:
                         stop_reason = "no_new_products"
                     elif unattempted:
@@ -1495,6 +1521,17 @@ def scrape(args) -> int:
                             stop_reason = page_flow.stop_reason_for(
                     outcome.load_failed, outcome.blocked_by, outcome.state)
                             blocked = outcome.blocked_by is not None
+                            break
+
+                        if (outcome.echoed_page is not None
+                                and outcome.echoed_page != page_num):
+                            # The server clamped an out-of-range page back to
+                            # page 1 and said so in its own payload. That is
+                            # the end of the listing stated by the SITE, a
+                            # stronger signal than the no-new-rows heuristic
+                            # below — which would also catch it, one step
+                            # later and under a less specific name.
+                            stop_reason = "page_echo_mismatch"
                             break
 
                         # Whether this page contributed anything not already
@@ -1594,9 +1631,44 @@ def scrape(args) -> int:
                         len([o for o in outcomes if o.ok]), pages_available)
 
     ok_pages = [o for o in outcomes if o.ok]
-    failed_pages = [o.page_num for o in outcomes if not o.ok]
     final_url = (max(ok_pages, key=lambda o: o.page_num).final_url
                  if ok_pages else args.url)
+
+    # One record per REQUESTED page, fetched or not: until now the sidecar
+    # said how many pages completed and which failed, but nothing about how
+    # each page ended — served content, matched nothing, was refused, or was
+    # never tried at all. Pages the site's own `pageCount` capped away and
+    # pages still queued when dispatch stopped are recorded as "unattempted"
+    # rather than left to be misread as failures: nothing was asked, so
+    # nothing can be concluded from them. The outcome names are page_flow's,
+    # so a record cannot call a page something the policy would not.
+    page_records = [oc.record() for oc in outcomes]
+    attempted = {oc.page_num for oc in outcomes}
+    for page_num in range(1, args.pages + 1):
+        if page_num not in attempted:
+            page_records.append({"page": page_num,
+                                 "outcome": page_flow.PAGE_OUTCOME_UNATTEMPTED,
+                                 "rows": 0})
+    page_records.sort(key=lambda r: r["page"])
+
+    # pages_failed is DERIVED from the records rather than computed
+    # alongside them, so the sidecar's run-level fields and its per-page
+    # list are two renderings of one fact and cannot drift apart. The
+    # predicate is page_flow's and mirrors PageOutcome.ok: a refused page
+    # fails, an empty one does not, and an unattempted one is neither.
+    failed_pages = [r["page"] for r in page_records
+                    if page_flow.page_outcome_failed(r["outcome"])]
+
+    if failed_pages and stop_reason in COMPLETE_STOP_REASONS:
+        # Unreachable by construction — every failure path above names its
+        # reason — but the per-page records and the run-level fields are two
+        # views of the same run, and this reconciliation is what keeps a
+        # future loop change from writing "completed" beside a failed page.
+        first_failed = min((o for o in outcomes if not o.ok),
+                           key=lambda o: o.page_num)
+        stop_reason = page_flow.stop_reason_for(
+            first_failed.load_failed, first_failed.blocked_by,
+            first_failed.state)
 
     # One-per-run context, in the sidecar rather than repeated down a column.
     #
@@ -1606,14 +1678,14 @@ def scrape(args) -> int:
     # are what stop a reader dividing rows by pages and getting an answer
     # that is wrong for every page: Wellfound paginates over companies and
     # this file holds jobs.
-    extra = None
+    extra = {"pages": page_records}
     if args.mode != "job":
         total_companies = next((o.total_companies for o in outcomes
                                 if o.total_companies is not None), None)
-        extra = {"total_jobs": total_available,
-                 "total_companies": total_companies,
-                 "pages_available": pages_available,
-                 "paginates_by_url": args.mode == "role"}
+        extra.update({"total_jobs": total_available,
+                      "total_companies": total_companies,
+                      "pages_available": pages_available,
+                      "paginates_by_url": args.mode == "role"})
     extra = proxy_meter.finish(args, extra)
 
     return finish_run(all_rows, args.out, args.format, args.allow_empty,
