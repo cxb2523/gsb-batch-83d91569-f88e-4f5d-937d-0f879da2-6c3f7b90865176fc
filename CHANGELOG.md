@@ -71,6 +71,36 @@ bad default or violating the promise quietly.
 ### Fixed
 
 - The pyppeteer and Selenium proxy meter counts only `http://` / `https://` requests and responses that came over the network. Chrome's own loads (the `chrome://` new-tab page, `data:`, `blob:`), cache hits (`requestServedFromCache`, `fromDiskCache`, `fromPrefetchCache`, `fromServiceWorker`) and Chrome's error page count nothing. A sibling repo's Selenium run had counted about 2.8 MB of new-tab scripts while its proxy carried about 6 KB. The pyppeteer block sent once the budget is spent now reaches the page's own event loop even when the budget runs out on another thread.
+- **A batch that was not obtained is no longer reported as the end of the
+  listing.** `page_flow.advance_feed` returns `NO_GROWTH` when its 45-second
+  growth window ends, and the Playwright engine used to decide the listing
+  was `exhausted` from the card count alone at that instant. Two legitimate
+  "not obtained" endings arrive just AFTER that instant and were therefore
+  mis-read as `pagination_exhausted` — a COMPLETE stop reason — so a
+  throttled or blocked run claimed the feed had run out:
+  - the next batch's `POST /graphql` being refused (`>= 400`) while the HTML
+    keeps answering 200 — now `no_turnover`, `stop_reason:
+    next_batch_refused`, exit 6 with the rows already gathered kept;
+  - Cloudflare replacing the document mid-scroll — now `blocked_mid_scroll`,
+    `stop_reason: blocked_mid_scroll`, exit 6 (or 3 with no rows), with the
+    vendor named and the rows already gathered kept.
+
+  A settle window (`BATCH_SETTLE_MS`, default 6s) watches all three signals
+  at every poll instead of sampling once, so a refusal or a replacement that
+  lands a second late is still seen; a batch whose count grows during that
+  window is read normally rather than written off. `pagination_exhausted` is
+  now reached only when the batch added no sku, nothing was refused, and the
+  page was still the listing. The sidecar gains `batch_end` (which batch,
+  what the page was, how many GraphQL refusals, `listing_ended`) and
+  `batches_not_obtained`; the first screen's exit semantics are unchanged —
+  a blocked or unloadable first batch is still exit 3 / 5.
+- `page_flow.advance_feed` no longer logs "treating the listing as
+  exhausted" when its window ends: that loop no longer makes the claim, the
+  caller does.
+- `playwright_scraper.BATCH_SETTLE_MS` / `BATCH_SETTLE_POLL_MS`: the settle
+  window used to decide a stopped batch, separated from the growth wait in
+  `page_flow.advance_feed` so the two questions ("did the feed grow?" and
+  "did the listing end?") are answered by different code.
 
 ## [0.2.0] — 2026-10-16
 

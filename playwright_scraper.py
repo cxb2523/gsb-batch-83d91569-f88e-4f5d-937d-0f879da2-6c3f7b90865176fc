@@ -178,10 +178,25 @@ class PageOutcome:
     # credentials masked), so a load that failed in 60 ms is not reported as
     # a timeout with nothing to say why.
     load_error: Optional[str] = None
+    # This batch was reached but did NOT yield its data, and not because the
+    # listing ended: the next batch's POST /graphql was refused, or the page
+    # was replaced by a challenge mid-scroll. Kept apart from `load_failed`
+    # (the page loaded fine) and from `blocked_by` on its own (a mid-scroll
+    # replacement is a fact about batch N, not about the first fetch), but
+    # the batch must not read as completed in the sidecar.
+    not_obtained: bool = False
+    # Why the batch advance stopped, as a sidecar-ready dict: the state
+    # (exhausted / no_turnover / blocked_mid_scroll), the page state it was
+    # judged on, how many GraphQL responses were refused, and the vendor that
+    # replaced the page where one named itself. None for a batch that did
+    # advance normally, so the run-level sidecar can say WHICH ending this
+    # run hit rather than only its stop_reason.
+    batch_end: Optional[dict] = None
 
     @property
     def ok(self) -> bool:
-        return not self.load_failed and self.blocked_by is None
+        return (not self.load_failed and self.blocked_by is None
+                and not self.not_obtained)
 
 
 # The lowest share of rows that must carry an author and an answer body
@@ -297,6 +312,182 @@ def _watch_graphql(session) -> None:
 
 def _graphql_refused_count(session) -> int:
     return getattr(session, "_graphql_refused", 0)
+
+
+# How long to keep watching after the growth window has closed before calling
+# a feed finished, and how often to look while doing it.
+#
+# `page_flow.advance_feed` returns NO_GROWTH the moment its 45-second window
+# ends, and the two things that must NOT be read as "the listing ended" can
+# both arrive just AFTER that moment: the next batch's POST /graphql can be
+# refused while the HTML keeps answering 200, and Cloudflare can replace the
+# document mid-scroll. Deciding on the count difference observed at the
+# instant the window closes is what wrote `pagination_exhausted` — a COMPLETE
+# ending — for a batch that was never obtained. This window is watched at
+# every poll instead, so a refusal or a replacement that lands a second late
+# is still seen.
+BATCH_SETTLE_MS = 6_000
+BATCH_SETTLE_POLL_MS = 1_000
+
+# The four ways a batch that did not grow can actually have ended. Only
+# EXHAUSTED is a complete ending; the other two are "not obtained" and leave
+# the run partial with the rows already gathered intact.
+BATCH_ADVANCED = "advanced"
+BATCH_EXHAUSTED = "exhausted"
+BATCH_NO_TURNOVER = "no_turnover"
+BATCH_BLOCKED_MID_SCROLL = "blocked_mid_scroll"
+
+
+def _settle_batch_end(probe, sleep, baseline_count: int, *,
+                      settle_ms: Optional[int] = None,
+                      poll_ms: Optional[int] = None):
+    """Watch a feed that stopped growing a little longer, then judge it.
+
+    `probe()` returns `(graphql_refused_since_baseline, card_count, state,
+    html)` where `state` is the current page classification (or None when the
+    page could not be read this round). It is called repeatedly for
+    `settle_ms`, so every signal is OBSERVED over the window rather than
+    sampled once at the moment the growth window closes — a refusal or a
+    replacement that lands a second late is still seen.
+
+    `baseline_count` is the card count taken BEFORE the scroll, i.e. the
+    number of cards the last parsed batch held. A reading above it means
+    cards the run has not read are on the page, which is BATCH_ADVANCED.
+
+    The verdict, in precedence order:
+
+      BATCH_BLOCKED_MID_SCROLL  the page was a block at ANY point in the
+                                window — it was REPLACED, so the feed did
+                                not run out
+      BATCH_NO_TURNOVER         a GraphQL response was >= 400 during the
+                                window — the batch was REFUSED
+      BATCH_BLOCKED_MID_SCROLL  no state could be read at all: an
+                                unclassifiable page is not evidence of an
+                                ending either
+      BATCH_ADVANCED            cards appeared above the baseline — the
+                                batch arrived late and must be parsed
+      BATCH_EXHAUSTED           the page stayed intact, nothing was refused,
+                                and no cards were added: the listing ended
+
+    Refusal and block come BEFORE growth on purpose. The whole defect is a
+    run that wrote a COMPLETE ending for a batch it never obtained, so the
+    two "not obtained" signals must win even if the card count also moved —
+    otherwise a late card would mask the refusal or the challenge that is
+    the real reason the batch is incomplete.
+
+    Returns `(verdict, evidence)`; `evidence` is sidecar-ready except for
+    `html`, which the caller uses to name the vendor and then drops.
+    """
+    settle_ms = BATCH_SETTLE_MS if settle_ms is None else settle_ms
+    poll_ms = BATCH_SETTLE_POLL_MS if poll_ms is None else poll_ms
+    waited = 0
+    grew = False
+    refused_seen = 0
+    last_cards = baseline_count
+    last_state = None
+    last_html = None
+    saw_state = False
+    blocked_state = None
+    blocked_html = None
+
+    while True:
+        refused, cards, state, html = probe()
+        refused_seen = max(refused_seen, refused or 0)
+        if cards is not None:
+            last_cards = cards
+            if cards > baseline_count:
+                grew = True
+        if state is not None:
+            saw_state = True
+            last_state = state
+            last_html = html
+            if page_flow.counts_as_blocked(state) and blocked_state is None:
+                blocked_state = state
+                # The html of the probe that SAW the block, not whatever the
+                # page held last: naming the vendor needs the replacement
+                # page's own markup, and a later probe with the feed back in
+                # front of it would name nothing.
+                blocked_html = html
+        if waited >= settle_ms:
+            break
+        sleep(poll_ms)
+        waited += poll_ms
+
+    evidence = {
+        "cards": last_cards,
+        "graphql_refused": refused_seen,
+        "page_state": blocked_state or last_state,
+        "html": blocked_html if blocked_state is not None else last_html,
+    }
+    if blocked_state is not None:
+        return BATCH_BLOCKED_MID_SCROLL, evidence
+    if refused_seen > 0:
+        return BATCH_NO_TURNOVER, evidence
+    if not saw_state:
+        # Nothing readable in the whole window. That is not a finding that
+        # the listing ended, and `pagination_exhausted` would state exactly
+        # that, so it is reported as a block with the reason made explicit.
+        evidence["page_state"] = "unreadable"
+        return BATCH_BLOCKED_MID_SCROLL, evidence
+    if grew:
+        return BATCH_ADVANCED, evidence
+    return BATCH_EXHAUSTED, evidence
+
+
+def _batch_probe(session, refused_before: int):
+    """One reading of the feed while a stopped batch settles.
+
+    Returns `(refused_since_baseline, card_count, page_state, html)`. The
+    page is re-read each time rather than inspected once, because both
+    signals this exists to catch — a refused /graphql response and a
+    challenge replacing the document — are observed only by watching, and a
+    single snapshot at the moment the growth window closes is exactly the
+    bug this replaced.
+
+    A driver error here is reported as an unreadable round (state None)
+    rather than raised: the settle window runs AT the moment a page may be
+    navigating, and turning that into a traceback on the last poll would
+    replace "we could not tell" with exit 1 — a crash where the answer is
+    "not obtained". `_count` is already guarded; the content/classify pair
+    is guarded here for the same reason.
+    """
+    refused = _graphql_refused_count(session) - refused_before
+    cards = _count(session.page, page_flow.READY_SELECTOR)
+    try:
+        html = _content_when_settled(session.page)
+        if html is None:
+            return refused, cards, None, None
+        return refused, cards, _classify(session.page, html), html
+    except (PWError, PWTimeout) as e:
+        logger.debug("batch probe could not read the page: %s", e)
+        return refused, cards, None, None
+
+
+def _batch_end_record(page_num: int, verdict: str, page_state,
+                      refused: int, cards, blocked_by) -> dict:
+    """The sidecar record for why a batch did not advance.
+
+    Separate fields rather than one string, because the three non-advanced
+    verdicts are the whole point of this record: `exhausted` says the listing
+    ended, `no_turnover` says the next batch was refused, and
+    `blocked_mid_scroll` says the page was replaced — and a consumer that can
+    only see `stop_reason` on the run cannot tell WHICH batch ended it or
+    what the run was looking at when it did.
+
+    `listing_ended` is the one boolean a consumer should branch on: True only
+    for `exhausted`, where the feed genuinely ran out. The other two endings
+    are "this batch was NOT obtained", and reading either as an ending is the
+    defect this record exists to make impossible.
+    """
+    return {
+        "batch": page_num,
+        "verdict": verdict,
+        "page_state": page_state,
+        "graphql_refused": refused,
+        "cards": cards,
+        "blocked_by": blocked_by,
+        "listing_ended": verdict == BATCH_EXHAUSTED,
+    }
 
 
 def _ready_selector(args) -> str:
@@ -786,62 +977,101 @@ def _fetch_one_page(session, args, pool, page_num: int, url: Optional[str]) -> P
                         page_num, args.pages, page_num)
             proxy_meter.check(args)
             refused_before = _graphql_refused_count(session)
+            # `advance_feed` only reports NO_GROWTH when the card count was
+            # never ABOVE this reading, so it is the exact baseline the
+            # settle window must compare against: anything higher during
+            # the window is a batch that arrived after the growth deadline,
+            # including one that lands in the sliver after the wait ends.
+            cards_before_scroll = _count(session.page, page_flow.READY_SELECTOR)
             turn = page_flow.advance_feed(
                 lambda: _scroll_to_bottom(session.page),
                 lambda sel: _count(session.page, sel),
                 lambda: _page_height(session.page),
                 session.page.wait_for_timeout)
             if turn == page_flow.NO_GROWTH:
-                refused = _graphql_refused_count(session) - refused_before
-                if refused:
+                # NO_GROWTH is the END OF THE WAIT, not the end of the
+                # listing. The two things that must not be read as an ending
+                # — a refused POST /graphql and Cloudflare replacing the
+                # document — can arrive after the growth window closes, and
+                # judging on the count difference observed at that instant
+                # wrote `pagination_exhausted` (a COMPLETE ending) for a
+                # batch that was never obtained. Keep watching for a short
+                # settle window and decide on everything seen IN it.
+                verdict, evidence = _settle_batch_end(
+                    lambda: _batch_probe(session, refused_before),
+                    session.page.wait_for_timeout,
+                    cards_before_scroll)
+                refused = evidence.get("graphql_refused") or 0
+                page_state = evidence.get("page_state")
+                evidence_html = evidence.pop("html", None)
+                outcome.final_url = session.page.url
+
+                if verdict == BATCH_ADVANCED:
+                    # The count did move while we were watching, so the
+                    # batch DID arrive — just late. Fall through and parse
+                    # it like any other settled batch.
+                    logger.info(
+                        "Batch %d grew to %d card(s) after the growth window "
+                        "had closed (a slow %s response, not a block) — "
+                        "reading it normally.", page_num,
+                        evidence.get("cards"), "POST /graphql")
+                elif verdict == BATCH_NO_TURNOVER:
                     # The feed stopped growing AND the endpoint behind it was
                     # refusing. Those are two different endings and must not
                     # collapse into one: reporting this as the end of the
                     # listing would make a throttled run say "complete" while
-                    # holding its first batch.
-                    outcome.state = "no_turnover"
-                    outcome.load_failed = True
-                    outcome.final_url = session.page.url
+                    # holding its earlier batches.
+                    outcome.state = BATCH_NO_TURNOVER
+                    outcome.not_obtained = True
+                    outcome.batch_end = _batch_end_record(
+                        page_num, BATCH_NO_TURNOVER, page_state, refused,
+                        evidence.get("cards"), None)
                     logger.error(
                         "The feed did not grow within %.0fs and %d GraphQL "
-                        "response(s) were refused while waiting. This is NOT "
+                        "response(s) were refused while watching. This is NOT "
                         "the end of the listing — the run is reported as "
-                        "PARTIAL (exit 6) rather than complete. Each batch "
-                        "after the first is fetched over POST /graphql, "
-                        "which is limited separately from the HTML: the page "
-                        "itself still answers 200 while the batch is "
-                        "refused. Raise --delay (it is %.1fs now), or spread "
-                        "the load with --proxy-file.",
+                        "PARTIAL (exit 6) rather than complete, with the "
+                        "batches already gathered kept. Each batch after the "
+                        "first is fetched over POST /graphql, which is "
+                        "limited separately from the HTML: the page itself "
+                        "still answers 200 while the batch is refused. Raise "
+                        "--delay (it is %.1fs now), or spread the load with "
+                        "--proxy-file.",
                         page_flow.NEXT_BATCH_TIMEOUT_MS / 1000, refused,
                         args.delay)
                     return outcome
-                # Nothing refused and nothing new. Before calling that the
-                # end of the listing, ASK WHAT PAGE WE ARE ON: Cloudflare's
-                # challenge can arrive mid-scroll — it is what crashed this
-                # repo's first canary dispatch — and a feed that stopped
-                # growing because the page was replaced has not run out. The
-                # engines used to report that as `exhausted`, which is a
-                # COMPLETE stop reason, so a run that was blocked halfway
-                # would have claimed the feed ended.
-                current = _content_when_settled(session.page) or ""
-                state_now = _classify(session.page, current)
-                if page_flow.counts_as_blocked(state_now):
-                    outcome.state = "blocked_mid_scroll"
-                    outcome.blocked_by = (detect_bot_challenge(current)
-                                          or "bot-challenge")
-                    outcome.final_url = session.page.url
+                elif verdict == BATCH_BLOCKED_MID_SCROLL:
+                    # Cloudflare's challenge can arrive mid-scroll — it is
+                    # what crashed this repo's first canary dispatch — and a
+                    # feed that stopped growing because the page was
+                    # replaced has not run out. `exhausted` is a COMPLETE
+                    # stop reason, so a run that was blocked halfway would
+                    # have claimed the feed ended.
+                    outcome.state = BATCH_BLOCKED_MID_SCROLL
+                    outcome.not_obtained = True
+                    outcome.blocked_by = (
+                        detect_bot_challenge(evidence_html or "")
+                        or ("unreadable-page" if page_state == "unreadable"
+                            else (page_state or "bot-challenge")))
+                    outcome.batch_end = _batch_end_record(
+                        page_num, BATCH_BLOCKED_MID_SCROLL, page_state,
+                        refused, evidence.get("cards"), outcome.blocked_by)
                     logger.error(
                         "The feed stopped growing because the page was "
-                        "replaced: it is now %s. This is NOT the end of the "
-                        "listing — the batches already gathered are kept and "
-                        "the run is reported as partial rather than "
-                        "complete.", state_now)
+                        "replaced: it is now %s (%s). This is NOT the end of "
+                        "the listing — the batches already gathered are kept "
+                        "and the run is reported as partial rather than "
+                        "complete.", page_state, outcome.blocked_by)
                     return outcome
-                # Ours, still served, and no more answers came. On an
-                # infinite scroll that is the only ending there is.
-                outcome.state = "exhausted"
-                outcome.final_url = session.page.url
-                return outcome
+                else:
+                    # Ours, still served, nothing refused, and no more
+                    # answers came at any point in the window. On an
+                    # infinite scroll that is the only ending there is.
+                    outcome.state = "exhausted"
+                    outcome.batch_end = _batch_end_record(
+                        page_num, BATCH_EXHAUSTED, page_state, refused,
+                        evidence.get("cards"), None)
+                    return outcome
 
         if exit_failed and has_pool and block_attempt < block_retries:
             logger.warning("Exit %s is unusable (%s) — rotating to another "
@@ -1100,6 +1330,11 @@ def scrape(args) -> int:
     blocked = False
     dedupe_key = "sku"
     stop_reason = "completed"
+    # Why a batch stopped advancing, when one did. Its own record rather than
+    # only the run-level stop_reason: `stop_reason` says how the RUN ended,
+    # and a consumer diagnosing a short run needs to know which batch ended
+    # it and what the page was when it did.
+    batch_end = None
 
     pool = proxy_pool_from_args(args)
     if pool and args.cdp_endpoint:
@@ -1181,18 +1416,34 @@ def scrape(args) -> int:
 
                     if outcome.state == "exhausted":
                         logger.info("The feed stopped growing after batch %d, "
-                                    "with nothing refused behind it — "
-                                    "treating that as the end of the "
-                                    "listing.", page_num - 1)
+                                    "with nothing refused behind it and the "
+                                    "page still intact — treating that as the "
+                                    "end of the listing.", page_num - 1)
                         stop_reason = "pagination_exhausted"
+                        batch_end = outcome.batch_end
                         outcomes.pop()  # nothing was fetched; do not count it
                         break
                     if outcome.state == "no_turnover":
                         # Deliberately NOT "pagination_exhausted", which is a
                         # COMPLETE stop reason: a throttled turn is a partial
-                        # run, not a finished one.
+                        # run, not a finished one. The outcome is KEPT, so the
+                        # sidecar names the batch that was refused instead of
+                        # describing a run that stopped for no stated reason.
+                        # It carries no rows (it returned before parsing), and
+                        # `not_obtained` keeps it out of `pages_completed`.
                         stop_reason = "next_batch_refused"
-                        outcomes.pop()
+                        batch_end = outcome.batch_end
+                        break
+                    if outcome.state == "blocked_mid_scroll":
+                        # The page was REPLACED mid-scroll, which says nothing
+                        # about whether the listing ended. Its own stop reason
+                        # and its own sidecar record, so a consumer can tell
+                        # it apart from a first-fetch block and from a
+                        # refusal; and `not_obtained` makes it a failed page,
+                        # so the run is partial (or failed), never complete.
+                        stop_reason = "blocked_mid_scroll"
+                        batch_end = outcome.batch_end
+                        blocked = True
                         break
                     if not outcome.ok:
                         stop_reason = ("page_load_timeout" if outcome.load_failed
@@ -1299,6 +1550,18 @@ def scrape(args) -> int:
         # The browser's reason for the first page that never loaded, so a
         # sidecar saying page_load_timeout also says what actually failed.
         "load_error": next((o.load_error for o in outcomes if o.load_error), None),
+        # The three endings a stopped batch can have, kept apart in the
+        # sidecar as well as in `stop_reason`. `exhausted` is the listing
+        # ending; `no_turnover` is the next batch being refused; and
+        # `blocked_mid_scroll` is the page being REPLACED under the scroll.
+        # A run that only recorded `stop_reason` left a consumer unable to
+        # tell which batch ended it, what the page was, or how many GraphQL
+        # refusals were behind the verdict — and `batch_end.listing_ended` is
+        # the one boolean that says whether the listing itself ran out.
+        "batch_end": batch_end,
+        "batches_obtained": sum(1 for o in outcomes if o.ok),
+        "batches_not_obtained": [o.page_num for o in outcomes
+                                 if o.not_obtained],
     }
     extra = proxy_meter.finish(args, extra)
 

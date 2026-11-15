@@ -925,6 +925,328 @@ def test_throttle_is_not_completion():
     return ok
 
 
+# ---------------------------------------------------------------------------
+# Batch advance: "the listing ended" vs "the batch was not obtained"
+# ---------------------------------------------------------------------------
+def _batch_verdict_script(engine, script, baseline=4):
+    """Drive `_settle_batch_end` through a scripted `probe`, no browser.
+
+    Each entry of `script` is one probe result:
+    `(refused, cards, page_state, html)`. The sleep is a no-op, so the whole
+    settle window runs instantly and NOTHING here touches a network or a
+    browser — the probe is a list.
+
+    The LAST entry repeats once the script runs out: the settle loop probes
+    on every poll until its window closes, and a script that ran dry would
+    otherwise end the loop early with a StopIteration rather than exercising
+    the verdict it was written for.
+
+    Returns `(verdict, evidence)`.
+    """
+    entries = list(script)
+    state = {"i": 0, "last": entries[-1]}
+
+    def probe():
+        i = state["i"]
+        state["i"] += 1
+        if i < len(entries):
+            state["last"] = entries[i]
+        return state["last"]
+
+    return engine._settle_batch_end(probe, lambda _ms: None, baseline,
+                                    settle_ms=3_000, poll_ms=1_000)
+
+
+def _fake_fetch_outcome(engine, page_num, state, *, products=None,
+                        batch_end=None, not_obtained=False, final_url=None):
+    """A PageOutcome as `_fetch_one_page` would return it, without a page."""
+    return engine.PageOutcome(
+        page_num=page_num,
+        url=final_url or _SAVERS_URL,
+        final_url=final_url or _SAVERS_URL,
+        products=list(products or []),
+        state=state,
+        not_obtained=not_obtained,
+        batch_end=batch_end)
+
+
+def _drive_scrape_outcomes(engine, tmp, outcomes, pages):
+    """`scrape()` with `_fetch_one_page` returning the given outcomes in order.
+
+    The browser, the proxy pre-check and the session are all patched out, so
+    what this asserts is the DECISION the loop makes about a sequenced run —
+    which stop_reason it writes, whether the rows it already holds survive,
+    and what the sidecar says. No network, no browser, no solver.
+
+    Returns `(rc, meta_or_None, attempt_or_None, output_rows_or_None)`.
+    """
+    import proxy_meter
+    from unittest import mock
+    args = _engine_args(engine, tmp, None, "--pages", str(pages),
+                        "--delay", "0", "--format", "json")
+    seq = list(outcomes)
+    seen = {"n": 0}
+
+    def fake_fetch(session, a, pool, page_num, url):
+        oc = seq[seen["n"]]
+        seen["n"] += 1
+        return oc
+
+    with contextlib.ExitStack() as stack:
+        for patch in _engine_session_mocks(engine):
+            stack.enter_context(patch)
+        stack.enter_context(mock.patch.object(
+            engine.proxy_check, "gate", return_value=None))
+        stack.enter_context(mock.patch.object(
+            engine, "_fetch_one_page", side_effect=fake_fetch))
+        stack.enter_context(mock.patch.object(engine.time, "sleep"))
+        stack.enter_context(mock.patch.object(
+            engine, "source_of", side_effect=lambda url: SOURCE_DEFAULT))
+        stack.enter_context(mock.patch.object(proxy_meter, "start",
+                                              return_value=None))
+        stack.enter_context(_captured_output())
+        rc = engine.scrape(args)
+    out = os.path.join(tmp, "out")
+    meta = (json.load(open(out + ".meta.json", encoding="utf-8"))
+            if os.path.exists(out + ".meta.json") else None)
+    attempt = (json.load(open(out + ".latest_attempt.meta.json",
+                              encoding="utf-8"))
+               if os.path.exists(out + ".latest_attempt.meta.json") else None)
+    rows = (json.load(open(out + ".json", encoding="utf-8"))
+            if os.path.exists(out + ".json") else None)
+    return rc, meta, attempt, rows
+
+
+def test_batch_end_is_not_an_ending(skips):
+    group("A stopped batch: 'the listing ended' is not 'we did not get it'")
+    ok = True
+    try:
+        engine = __import__("playwright_scraper")
+    except ImportError as e:  # pragma: no cover — CI's engine job installs it
+        skips.append(f"playwright_scraper batch-end driving — {e}")
+        print("  SKIP  playwright_scraper batch-end driving — %s" % e)
+        return ok
+
+    feed = "<html><body>" + ("<div class='q-box'>card</div>" * 4) + "</body></html>"
+    challenge = fixture("BLOCK_CF")
+
+    # -- the policy constants, read off the module -------------------------
+    ok &= check("only `exhausted` is the listing actually ending",
+                engine.BATCH_EXHAUSTED == "exhausted"
+                and engine.BATCH_NO_TURNOVER == "no_turnover"
+                and engine.BATCH_BLOCKED_MID_SCROLL == "blocked_mid_scroll")
+    ok &= check("the settle window exists and is bounded",
+                0 < engine.BATCH_SETTLE_MS <= page_flow.NEXT_BATCH_TIMEOUT_MS
+                and engine.BATCH_SETTLE_POLL_MS > 0)
+
+    # -- 1. the listing genuinely ends: no growth, nothing refused, page
+    #       still ours. This is the ONLY script that may be exhausted. ------
+    verdict, ev = _batch_verdict_script(
+        engine, [(0, 4, "content", feed), (0, 4, "content", feed), (0, 4, "content", feed)])
+    ok &= check("natural end: no growth + nothing refused + intact page -> "
+                f"exhausted ({verdict})", verdict == engine.BATCH_EXHAUSTED)
+    ok &= check("...and the evidence records zero refusals and no block",
+                ev["graphql_refused"] == 0 and ev["page_state"] == "content")
+    record = engine._batch_end_record(2, verdict, ev["page_state"],
+                                      ev["graphql_refused"], ev["cards"], None)
+    ok &= check("...and its sidecar record says listing_ended=True",
+                record["listing_ended"] is True
+                and record["verdict"] == "exhausted")
+
+    # -- 2. a >=400 /graphql arrives LATE, after the growth window closed.
+    #       The old code sampled the refusal count at the instant the window
+    #       ended and saw 0, then wrote pagination_exhausted. ---------------
+    verdict, ev = _batch_verdict_script(
+        engine, [(0, 4, "content", feed),
+                 (0, 4, "content", feed),
+                 (3, 4, "content", feed)])
+    ok &= check("GraphQL refused late in the window -> no_turnover, NOT "
+                f"exhausted ({verdict})", verdict == engine.BATCH_NO_TURNOVER)
+    ok &= check("...and the refusals seen during the window are recorded "
+                f"({ev['graphql_refused']})", ev["graphql_refused"] == 3)
+    record = engine._batch_end_record(2, verdict, ev["page_state"],
+                                      ev["graphql_refused"], ev["cards"], None)
+    ok &= check("...and its record says listing_ended=False",
+                record["listing_ended"] is False)
+
+    # -- 3. the page is REPLACED by a challenge mid-scroll. ----------------
+    verdict, ev = _batch_verdict_script(
+        engine, [(0, 4, "content", feed),
+                 (0, 0, "challenge", challenge),
+                 (0, 0, "challenge", challenge)])
+    ok &= check("challenge replaced the page mid-scroll -> "
+                f"blocked_mid_scroll ({verdict})",
+                verdict == engine.BATCH_BLOCKED_MID_SCROLL)
+    ok &= check("...and the blocked state is on the evidence",
+                ev["page_state"] == "challenge")
+    ok &= check("...and the page is still recognised as a block by policy",
+                page_flow.counts_as_blocked(ev["page_state"]))
+    vendor = detect_bot_challenge(ev["html"] or "")
+    ok &= check("...and the vendor that replaced it is named",
+                vendor == "cloudflare")
+    record = engine._batch_end_record(2, verdict, ev["page_state"],
+                                      ev["graphql_refused"], ev["cards"], vendor)
+    ok &= check("...and its record carries the blocked reason, not an ending",
+                record["listing_ended"] is False
+                and record["blocked_by"] == "cloudflare")
+
+    # -- the precedence: a challenge is a block even if a refusal was also
+    #    seen in the same window, because neither is a complete ending. -----
+    verdict, _ = _batch_verdict_script(
+        engine, [(2, 0, "challenge", challenge)])
+    ok &= check("a block outranks a refusal in the same window",
+                verdict == engine.BATCH_BLOCKED_MID_SCROLL)
+
+    # -- a batch that arrives LATE (count grows during the window) is read,
+    #    not written off as exhausted. ------------------------------------
+    verdict, ev = _batch_verdict_script(
+        engine, [(0, 4, "content", feed), (0, 9, "content", feed)],
+        baseline=4)
+    ok &= check("a batch that grows after the deadline -> advanced, not an "
+                f"ending ({verdict})", verdict == engine.BATCH_ADVANCED)
+    ok &= check("...and the grown count is what the record reports",
+                ev["cards"] == 9)
+
+    # -- an unreadable page is not an ending either. ----------------------
+    verdict, ev = _batch_verdict_script(
+        engine, [(0, 4, None, None), (0, 4, None, None)])
+    ok &= check("a page that cannot be read -> not called 'exhausted'",
+                verdict == engine.BATCH_BLOCKED_MID_SCROLL
+                and ev["page_state"] == "unreadable")
+    return ok
+
+
+def test_batch_end_through_scrape(skips):
+    group("The batch endings as the run reports them — rows kept, never "
+          "'complete'")
+    ok = True
+    try:
+        engine = __import__("playwright_scraper")
+    except ImportError as e:  # pragma: no cover — CI's engine job installs it
+        skips.append(f"playwright_scraper batch-end scrape — {e}")
+        print("  SKIP  playwright_scraper batch-end scrape — %s" % e)
+        return ok
+
+    rows = rows_of("TOPIC_EN")[:4]
+
+    def first_batch():
+        return _fake_fetch_outcome(
+            engine, 1, "content", products=list(rows),
+            final_url=_SAVERS_URL)
+
+    # -- 1. natural end: batch 2 adds nothing, page intact, nothing refused.
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, attempt, out_rows = _drive_scrape_outcomes(
+            engine, tmp,
+            [first_batch(),
+             _fake_fetch_outcome(engine, 2, "exhausted",
+                                 batch_end={"batch": 2, "verdict": "exhausted",
+                                            "page_state": "content",
+                                            "graphql_refused": 0,
+                                            "cards": 4, "blocked_by": None,
+                                            "listing_ended": True})],
+            pages=3)
+    ok &= check("natural end: exit 0, status complete, stop_reason "
+                f"pagination_exhausted (rc={rc})",
+                rc == 0 and meta and meta["status"] == "complete"
+                and meta["stop_reason"] == "pagination_exhausted")
+    ok &= check("...the rows gathered so far are all written",
+                out_rows is not None and len(out_rows) == len(rows))
+    ok &= check("...and the sidecar's batch_end says the listing ended",
+                meta.get("batch_end", {}).get("listing_ended") is True)
+
+    # -- 2. the next batch's GraphQL was refused (>=400). The run is
+    #       PARTIAL, the rows survive, and it is NOT pagination_exhausted.
+    refused_end = {"batch": 2, "verdict": "no_turnover", "page_state": "content",
+                   "graphql_refused": 4, "cards": 4, "blocked_by": None,
+                   "listing_ended": False}
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, attempt, out_rows = _drive_scrape_outcomes(
+            engine, tmp,
+            [first_batch(),
+             _fake_fetch_outcome(engine, 2, "no_turnover",
+                                 batch_end=refused_end, not_obtained=True)],
+            pages=3)
+    ok &= check("GraphQL refused: exit 6 (partial), not 0 "
+                f"(rc={rc})", rc == EXIT_PARTIAL)
+    ok &= check("...stop_reason is next_batch_refused, NOT "
+                "pagination_exhausted",
+                meta and meta["stop_reason"] == "next_batch_refused"
+                and meta["status"] == "partial")
+    ok &= check("...the rows already gathered are KEPT in the output",
+                out_rows is not None and len(out_rows) == len(rows))
+    ok &= check("...and the sidecar names the refused batch and its "
+                "listing_ended=False",
+                meta.get("batch_end", {}).get("listing_ended") is False
+                and meta.get("batch_end", {}).get("graphql_refused") == 4
+                and 2 in meta.get("batches_not_obtained", []))
+    ok &= check("...and next_batch_refused is not a complete stop reason",
+                "next_batch_refused" not in COMPLETE_STOP_REASONS)
+
+    # -- 3. the page was replaced by a challenge mid-scroll.
+    blocked_end = {"batch": 2, "verdict": "blocked_mid_scroll",
+                   "page_state": "challenge", "graphql_refused": 0,
+                   "cards": 0, "blocked_by": "cloudflare",
+                   "listing_ended": False}
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, attempt, out_rows = _drive_scrape_outcomes(
+            engine, tmp,
+            [first_batch(),
+             _fake_fetch_outcome(engine, 2, "blocked_mid_scroll",
+                                 batch_end=blocked_end, not_obtained=True)],
+            pages=3)
+    ok &= check("challenge mid-scroll: the run is NOT complete "
+                f"(rc={rc})", rc in (EXIT_PARTIAL, EXIT_BLOCKED))
+    ok &= check("...stop_reason is blocked_mid_scroll, not "
+                "pagination_exhausted",
+                meta and meta["stop_reason"] == "blocked_mid_scroll"
+                and meta["status"] != "complete")
+    ok &= check("...the rows already gathered are KEPT in the output",
+                out_rows is not None and len(out_rows) == len(rows))
+    ok &= check("...and the sidecar carries the blocked reason and "
+                "listing_ended=False",
+                meta.get("batch_end", {}).get("blocked_by") == "cloudflare"
+                and meta.get("batch_end", {}).get("listing_ended") is False
+                and 2 in meta.get("batches_not_obtained", []))
+    ok &= check("...and blocked_mid_scroll is not a complete stop reason",
+                "blocked_mid_scroll" not in COMPLETE_STOP_REASONS)
+
+    # -- a FIRST batch that is blocked must still be the original exit 3,
+    #    not swallowed by the new mid-scroll logic. ----------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, attempt, out_rows = _drive_scrape_outcomes(
+            engine, tmp,
+            [engine.PageOutcome(page_num=1, url=_SAVERS_URL,
+                                blocked_by="cloudflare", state="challenge")],
+            pages=3)
+    ok &= check("a blocked FIRST screen keeps exit 3, unconditionally "
+                f"(rc={rc})", rc == EXIT_BLOCKED)
+    ok &= check("...and writes no good-output sidecar of its own",
+                meta is None)
+
+    # -- a FIRST batch that failed to load keeps exit 5. ------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, attempt, out_rows = _drive_scrape_outcomes(
+            engine, tmp,
+            [engine.PageOutcome(page_num=1, url=_SAVERS_URL,
+                                load_failed=True,
+                                load_error="net::ERR_CONNECTION_CLOSED")],
+            pages=3)
+    ok &= check("a first screen that never loaded keeps exit 5 "
+                f"(rc={rc})", rc == EXIT_FETCH_FAILED)
+
+    # -- the sidecar field set is on the engine's source, so a refactor that
+    #    drops it fails here rather than only in a live run. --------------
+    src = _engine_source("playwright_scraper") or ""
+    ok &= check("the sidecar declares batch_end and the not-obtained "
+                "batches", '"batch_end": batch_end' in src
+                and '"batches_not_obtained"' in src)
+    ok &= check("the settle window is consulted, not just defined",
+                "_settle_batch_end(" in src and "BATCH_SETTLE_MS" in src)
+    return ok
+
+
+
 def test_output_contract():
     group("The output contract")
     ok = True
@@ -3956,6 +4278,8 @@ def main() -> int:
     ok &= test_page_flow_policy()
     ok &= test_scroll_loop()
     ok &= test_throttle_is_not_completion()
+    ok &= test_batch_end_is_not_an_ending(skips)
+    ok &= test_batch_end_through_scrape(skips)
     ok &= test_output_contract()
     ok &= test_writers_and_finish_run()
     ok &= test_diff()

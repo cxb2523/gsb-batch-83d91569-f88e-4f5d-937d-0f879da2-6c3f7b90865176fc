@@ -525,8 +525,9 @@ def advance_feed(scroll_to_bottom: Callable[[], None],
         if now_height != before_height:
             before_height = now_height
             scroll_to_bottom()
-    logger.info("feed did not grow within %dms — treating the listing as "
-                "exhausted", timeout_ms)
+    logger.info("feed did not grow within %dms — the wait is over; whether "
+                "that means the LISTING ended is the caller's decision, not "
+                "this loop's", timeout_ms)
     return NO_GROWTH
 
 

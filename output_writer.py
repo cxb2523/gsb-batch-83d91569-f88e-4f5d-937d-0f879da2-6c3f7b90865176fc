@@ -577,10 +577,19 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # "no_new_products" is therefore the data-side termination condition, and on
 # this site it is the ONLY one: an infinite scroll has no last page to
 # recognise. "pagination_exhausted" is kept for the family's shape and is set
-# when a scroll produced nothing new AND nothing behind it was refused — see
-# `page_flow.advance_feed`, which is careful to keep those two apart, because
-# a refused batch reported as an exhausted listing is how a throttled run
-# says "complete".
+# only when a scroll produced nothing new, NOTHING behind it was refused, AND
+# the page was still the listing rather than a challenge — see
+# `playwright_scraper._settle_batch_end`, which watches all three conditions
+# over a settle window rather than judging on the single instant the growth
+# window closes. A refused batch reported as an exhausted listing is how a
+# throttled run says "complete", and a page replaced mid-scroll reported as
+# one is how a blocked run says it.
+#
+# The two "not obtained" endings are deliberately absent from this tuple:
+# `next_batch_refused` (a >=400 /graphql response behind the batch) and
+# `blocked_mid_scroll` (the document replaced by a challenge) both leave the
+# rows already gathered in the output and the run `partial`, never
+# `complete`.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted",
                          "no_new_products")
 
